@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0": {
+      "Microsoft.NET.ILLink.Tasks": {
+        "type": "Direct",
+        "requested": "[10.0.3, )",
+        "resolved": "10.0.3",
+        "contentHash": "0B6nZyCHWXnvmlB559oduOspVdNOnpNXPjhpWVMovLPAsDVG7A4jJR9rzECf67JUzxP8/ee/wA8clwIzJcWNFA=="
+      },
+      "sharpemu.core": {
+        "type": "Project",
+        "dependencies": {
+          "Iced": "[1.21.0, )",
+          "SharpEmu.HLE": "[1.0.0, )",
+          "SharpEmu.Libs": "[1.0.0, )",
+          "SharpEmu.Logging": "[1.0.0, )"
+        }
+      },
+      "sharpemu.hle": {
+        "type": "Project"
+      },
+      "sharpemu.libs": {
+        "type": "Project",
+        "dependencies": {
+          "SharpEmu.HLE": "[1.0.0, )"
+        }
+      },
+      "sharpemu.logging": {
+        "type": "Project"
+      },
+      "Iced": {
+        "type": "CentralTransitive",
+        "requested": "[1.21.0, )",
+        "resolved": "1.21.0",
+        "contentHash": "dv5+81Q1TBQvVMSOOOmRcjJmvWcX3BZPZsIq31+RLc5cNft0IHAyNlkdb7ZarOWG913PyBoFDsDXoCIlKmLclg=="
+      }
+    },
+    "net10.0/linux-x64": {},
+    "net10.0/osx-arm64": {},
+    "net10.0/win-x64": {}
+  }
+}

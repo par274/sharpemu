@@ -1,0 +1,36 @@
+# Copyright (C) 2026 SharpEmu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+[Dd]ebug/
+[Rr]elease/
+[Bb]in/
+[Oo]bj/
+[Pp]ublish/
+[Aa]rtifacts/
+logs/
+.tmp/
+
+x86/
+x64/
+arm64/
+
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+*.tmp
+*.tmp_proj
+*.log
+
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+packages/
+*.nupkg
+.nuget/
+
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db

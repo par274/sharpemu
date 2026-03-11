@@ -1,0 +1,14 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SharpEmu.CLI/SharpEmu.CLI.csproj" />
+    <Project Path="src/SharpEmu.Core/SharpEmu.Core.csproj" />
+    <Project Path="src/SharpEmu.HLE/SharpEmu.HLE.csproj" />
+    <Project Path="src/SharpEmu.Libs/SharpEmu.Libs.csproj" />
+    <Project Path="src/SharpEmu.Logging/SharpEmu.Logging.csproj" />
+  </Folder>
+</Solution>

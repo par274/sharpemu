@@ -1,0 +1,12 @@
+version = 1
+
+[[annotations]]
+path = [
+    "REUSE.toml",
+    "**/packages.lock.json",
+    "scripts/ps5_names.txt",
+    "src/SharpEmu.HLE/Aerolib/aerolib.bin"
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "SharpEmu Emulator Project"
+SPDX-License-Identifier = "GPL-2.0-or-later"
