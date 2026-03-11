@@ -5,7 +5,8 @@ path = [
     "REUSE.toml",
     "**/packages.lock.json",
     "scripts/ps5_names.txt",
-    "src/SharpEmu.HLE/Aerolib/aerolib.bin"
+    "src/SharpEmu.HLE/Aerolib/aerolib.bin",
+    "_logs/**"
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "SharpEmu Emulator Project"
