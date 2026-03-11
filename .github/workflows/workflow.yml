@@ -1,0 +1,151 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - "**"
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  init:
+    name: Init
+    runs-on: ubuntu-latest
+    outputs:
+      archive-name: ${{ steps.vars.outputs.archive-name }}
+      artifact-name: ${{ steps.vars.outputs.artifact-name }}
+      release-name: ${{ steps.vars.outputs.release-name }}
+      release-tag: ${{ steps.vars.outputs.release-tag }}
+      short-sha: ${{ steps.vars.outputs.short-sha }}
+    steps:
+      - name: Compute workflow variables
+        id: vars
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          safe_ref="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')"
+          archive_name="sharpemu-win64-${short_sha}.zip"
+          artifact_name="sharpemu-win64-${short_sha}"
+          release_tag="win64-${safe_ref}-${short_sha}"
+          release_name="SharpEmu win64 ${short_sha}"
+
+          {
+            echo "short-sha=${short_sha}"
+            echo "archive-name=${archive_name}"
+            echo "artifact-name=${artifact_name}"
+            echo "release-tag=${release_tag}"
+            echo "release-name=${release_name}"
+          } >> "$GITHUB_OUTPUT"
+
+  reuse:
+    name: REUSE Compliance
+    needs: init
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run REUSE lint
+        uses: fsfe/reuse-action@v6
+
+  build:
+    name: Build Archive
+    needs:
+      - init
+      - reuse
+    runs-on: windows-latest
+    env:
+      DOTNET_NOLOGO: true
+      NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+      PUBLISH_DIR: ${{ github.workspace }}\artifacts\publish\win-x64
+      RELEASE_DIR: ${{ github.workspace }}\artifacts\release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+          cache: true
+          cache-dependency-path: |
+            Directory.Packages.props
+            src/**/packages.lock.json
+
+      - name: Restore solution
+        run: dotnet restore SharpEmu.slnx --locked-mode
+
+      - name: Build solution
+        run: dotnet build SharpEmu.slnx -c Release --no-restore
+
+      - name: Publish win-x64 CLI
+        run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishDir="${env:PUBLISH_DIR}"
+
+      - name: Create release archive
+        run: |
+          New-Item -ItemType Directory -Path $env:RELEASE_DIR -Force | Out-Null
+
+          $archivePath = Join-Path $env:RELEASE_DIR "${{ needs.init.outputs.archive-name }}"
+          if (Test-Path $archivePath) {
+            Remove-Item $archivePath -Force
+          }
+
+          Compress-Archive -Path (Join-Path $env:PUBLISH_DIR '*') -DestinationPath $archivePath -CompressionLevel Optimal
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.init.outputs.artifact-name }}
+          path: ${{ env.RELEASE_DIR }}\${{ needs.init.outputs.archive-name }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - init
+      - build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.init.outputs.artifact-name }}
+          path: release
+
+      - name: Create or update release
+        shell: bash
+        env:
+          ARCHIVE_NAME: ${{ needs.init.outputs.archive-name }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NAME: ${{ needs.init.outputs.release-name }}
+          RELEASE_TAG: ${{ needs.init.outputs.release-tag }}
+        run: |
+          asset_path="release/${ARCHIVE_NAME}"
+          notes="Automated Windows build for commit ${GITHUB_SHA}."
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${asset_path}" --clobber
+            gh release edit "${RELEASE_TAG}" --title "${RELEASE_NAME}" --notes "${notes}"
+          else
+            gh release create "${RELEASE_TAG}" "${asset_path}" \
+              --title "${RELEASE_NAME}" \
+              --notes "${notes}" \
+              --target "${GITHUB_SHA}"
+          fi
