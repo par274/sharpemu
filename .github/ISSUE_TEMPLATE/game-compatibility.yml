@@ -1,0 +1,90 @@
+name: Game Compatibility Report
+description: Report compatibility status of a game
+labels: ["game-compatibility"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to report the compatibility status of a game.
+
+        Please include the **game name in the issue title**.
+
+        Example title:
+        Demon’s Souls (PPSA01341)
+
+  - type: input
+    id: game_name
+    attributes:
+      label: Game Name
+      placeholder: e.g. Demon's Souls
+    validations:
+      required: true
+
+  - type: input
+    id: game_code
+    attributes:
+      label: Game Code
+      description: Title ID
+      placeholder: e.g. PPSA01341
+    validations:
+      required: true
+
+  - type: input
+    id: game_version
+    attributes:
+      label: Game Version
+      placeholder: e.g. 1.00 / 1.09
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Current Status
+      description: What happens when running the game?
+      options:
+        - Nothing happens
+        - Crashes on boot
+        - Boots to black screen
+        - Shows intro / menus
+        - Ingame but unstable
+        - Playable
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe what happens when running the game.
+      placeholder: |
+        Example:
+        - Game boots
+        - Shows intro logos
+        - Crashes when entering gameplay
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log Output
+      description: Paste emulator logs here
+      render: shell
+
+  - type: textarea
+    id: system_info
+    attributes:
+      label: System Information
+      placeholder: |
+        OS:
+        CPU:
+        GPU:
+        RAM:
+        Emulator Version / Commit:
+        Renderer (if applicable):
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Notes
+      description: Screenshots, settings, patches etc.
