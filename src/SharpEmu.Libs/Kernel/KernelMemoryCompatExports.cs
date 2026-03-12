@@ -35,13 +35,18 @@ public static class KernelMemoryCompatExports
     private const uint PageExecuteReadWrite = 0x40;
     private const uint PageExecuteWriteCopy = 0x80;
     private const uint PageGuard = 0x100;
+    private const int Enomem = 12;
+    private const int Einval = 22;
+    private const nuint DefaultLibcHeapAlignment = 16;
 
     private static readonly object _fdGate = new();
     private static readonly Dictionary<int, FileStream> _openFiles = new();
     private static readonly Dictionary<int, OpenDirectory> _openDirectories = new();
+    private static readonly object _libcAllocGate = new();
     private static readonly object _memoryGate = new();
     private static readonly object _tlsGate = new();
     private static readonly Dictionary<ulong, DirectAllocation> _directAllocations = new();
+    private static readonly Dictionary<ulong, LibcHeapAllocation> _libcAllocations = new();
     private static readonly Dictionary<ulong, MappedRegion> _mappedRegions = new();
     private static readonly Dictionary<ulong, ulong> _tlsModuleBlocks = new();
     private static long _nextFileDescriptor = 2;
@@ -78,7 +83,9 @@ public static class KernelMemoryCompatExports
         public required string[] Entries { get; init; }
         public int NextIndex { get; set; }
     }
+
     private readonly record struct DirectAllocation(ulong Start, ulong Length, int MemoryType);
+    private readonly record struct LibcHeapAllocation(nint BaseAddress, nuint Size, nuint Alignment);
     private readonly record struct MappedRegion(ulong Address, ulong Length, int Protection, bool IsFlexible, ulong DirectStart);
 
     [SysAbiExport(
@@ -310,7 +317,7 @@ public static class KernelMemoryCompatExports
 
         var payload = new byte[bytes.Length + 1];
         bytes.CopyTo(payload.AsSpan());
-        if (!ctx.Memory.TryWrite(destination, payload))
+        if (!TryWriteCompat(ctx, destination, payload))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -339,7 +346,7 @@ public static class KernelMemoryCompatExports
         var copied = 0;
         while (copied < count)
         {
-            if (!ctx.Memory.TryRead(source + (ulong)copied, one))
+            if (!TryReadCompat(ctx, source + (ulong)copied, one))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -352,7 +359,7 @@ public static class KernelMemoryCompatExports
             }
         }
 
-        if (!ctx.Memory.TryWrite(destination, payload))
+        if (!TryWriteCompat(ctx, destination, payload))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -377,7 +384,7 @@ public static class KernelMemoryCompatExports
         }
 
         var payload = GC.AllocateUninitializedArray<byte>(count);
-        if (count > 0 && (!ctx.Memory.TryRead(source, payload) || !ctx.Memory.TryWrite(destination, payload)))
+        if (count > 0 && (!TryReadCompat(ctx, source, payload) || !TryWriteCompat(ctx, destination, payload)))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -394,6 +401,161 @@ public static class KernelMemoryCompatExports
     public static int Memmove(CpuContext ctx)
     {
         return Memcpy(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "gQX+4GDQjpM",
+        ExportName = "malloc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Malloc(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] =
+            TryAllocateLibcHeap(ctx[CpuRegister.Rdi], DefaultLibcHeapAlignment, zeroFill: false, out var address)
+                ? address
+                : 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "tIhsqj0qsFE",
+        ExportName = "free",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Free(CpuContext ctx)
+    {
+        FreeLibcHeap(ctx[CpuRegister.Rdi]);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "2X5agFjKxMc",
+        ExportName = "calloc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Calloc(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] =
+            TryMultiplyAllocationSize(ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], out var totalSize) &&
+            TryAllocateLibcHeapCore(totalSize, DefaultLibcHeapAlignment, zeroFill: true, out var address)
+                ? address
+                : 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "Y7aJ1uydPMo",
+        ExportName = "realloc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Realloc(CpuContext ctx)
+    {
+        var existingAddress = ctx[CpuRegister.Rdi];
+        var requestedSize = ctx[CpuRegister.Rsi];
+
+        if (existingAddress == 0)
+        {
+            ctx[CpuRegister.Rax] =
+                TryAllocateLibcHeap(requestedSize, DefaultLibcHeapAlignment, zeroFill: false, out var freshAddress)
+                    ? freshAddress
+                    : 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (requestedSize == 0)
+        {
+            FreeLibcHeap(existingAddress);
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        ctx[CpuRegister.Rax] =
+            TryReallocateLibcHeap(existingAddress, requestedSize, out var resizedAddress)
+                ? resizedAddress
+                : 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "Ujf3KzMvRmI",
+        ExportName = "memalign",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Memalign(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] =
+            TryAllocateAlignedLibcHeap(
+                alignmentValue: ctx[CpuRegister.Rdi],
+                requestedSize: ctx[CpuRegister.Rsi],
+                requireSizeMultiple: false,
+                out var address)
+                ? address
+                : 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "2Btkg8k24Zg",
+        ExportName = "aligned_alloc",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int AlignedAlloc(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] =
+            TryAllocateAlignedLibcHeap(
+                alignmentValue: ctx[CpuRegister.Rdi],
+                requestedSize: ctx[CpuRegister.Rsi],
+                requireSizeMultiple: true,
+                out var address)
+                ? address
+                : 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "cVSk9y8URbc",
+        ExportName = "posix_memalign",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int PosixMemalign(CpuContext ctx)
+    {
+        var outPointerAddress = ctx[CpuRegister.Rdi];
+        if (outPointerAddress == 0)
+        {
+            ctx[CpuRegister.Rax] = Einval;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (!TryValidateAlignedAllocation(
+                ctx[CpuRegister.Rsi],
+                ctx[CpuRegister.Rdx],
+                requireSizeMultiple: false,
+                requirePointerSizedAlignment: true,
+                out var alignment,
+                out var requestedSize))
+        {
+            _ = TryWriteUInt64Compat(ctx, outPointerAddress, 0);
+            ctx[CpuRegister.Rax] = Einval;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (!TryAllocateLibcHeapCore(requestedSize, alignment, zeroFill: false, out var address))
+        {
+            _ = TryWriteUInt64Compat(ctx, outPointerAddress, 0);
+            ctx[CpuRegister.Rax] = Enomem;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (!TryWriteUInt64Compat(ctx, outPointerAddress, address))
+        {
+            FreeLibcHeap(address);
+            ctx[CpuRegister.Rax] = Einval;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -415,8 +577,8 @@ public static class KernelMemoryCompatExports
         Span<byte> rightByte = stackalloc byte[1];
         for (var i = 0; i < count; i++)
         {
-            if (!ctx.Memory.TryRead(left + (ulong)i, leftByte) ||
-                !ctx.Memory.TryRead(right + (ulong)i, rightByte))
+            if (!TryReadCompat(ctx, left + (ulong)i, leftByte) ||
+                !TryReadCompat(ctx, right + (ulong)i, rightByte))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -2316,6 +2478,236 @@ public static class KernelMemoryCompatExports
         {
             return false;
         }
+    }
+
+    private static bool TryAllocateLibcHeap(ulong requestedSize, nuint alignment, bool zeroFill, out ulong address)
+    {
+        address = 0;
+        return TryConvertAllocationSize(requestedSize, out var size) &&
+               TryAllocateLibcHeapCore(size, alignment, zeroFill, out address);
+    }
+
+    private static unsafe bool TryAllocateLibcHeapCore(nuint requestedSize, nuint alignment, bool zeroFill, out ulong address)
+    {
+        address = 0;
+        alignment = NormalizeLibcAlignment(alignment);
+        var actualSize = requestedSize == 0 ? 1u : requestedSize;
+
+        nuint totalSize;
+        try
+        {
+            checked
+            {
+                totalSize = actualSize + alignment - 1 + (nuint)IntPtr.Size;
+            }
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        nint baseAddress;
+        try
+        {
+            baseAddress = Marshal.AllocHGlobal(checked((nint)totalSize));
+        }
+        catch (OutOfMemoryException)
+        {
+            return false;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        if (baseAddress == 0)
+        {
+            return false;
+        }
+
+        var alignedAddress = AlignUp(unchecked((ulong)baseAddress) + (ulong)IntPtr.Size, (ulong)alignment);
+        lock (_libcAllocGate)
+        {
+            _libcAllocations[alignedAddress] = new LibcHeapAllocation(baseAddress, actualSize, alignment);
+        }
+
+        try
+        {
+            if (zeroFill)
+            {
+                NativeMemory.Clear((void*)alignedAddress, actualSize);
+            }
+        }
+        catch
+        {
+            FreeLibcHeap(alignedAddress);
+            return false;
+        }
+
+        address = alignedAddress;
+        return true;
+    }
+
+    private static unsafe bool TryReallocateLibcHeap(ulong existingAddress, ulong requestedSize, out ulong resizedAddress)
+    {
+        resizedAddress = 0;
+        if (existingAddress == 0)
+        {
+            return TryAllocateLibcHeap(requestedSize, DefaultLibcHeapAlignment, zeroFill: false, out resizedAddress);
+        }
+
+        if (requestedSize == 0)
+        {
+            FreeLibcHeap(existingAddress);
+            return true;
+        }
+
+        LibcHeapAllocation allocation;
+        lock (_libcAllocGate)
+        {
+            if (!_libcAllocations.TryGetValue(existingAddress, out allocation))
+            {
+                return false;
+            }
+        }
+
+        if (!TryAllocateLibcHeap(requestedSize, allocation.Alignment, zeroFill: false, out resizedAddress))
+        {
+            return false;
+        }
+
+        var bytesToCopy = Math.Min(allocation.Size, (nuint)requestedSize);
+        Buffer.MemoryCopy(
+            source: (void*)existingAddress,
+            destination: (void*)resizedAddress,
+            destinationSizeInBytes: checked((long)Math.Max(bytesToCopy, 1u)),
+            sourceBytesToCopy: checked((long)bytesToCopy));
+        FreeLibcHeap(existingAddress);
+        return true;
+    }
+
+    private static bool TryAllocateAlignedLibcHeap(ulong alignmentValue, ulong requestedSize, bool requireSizeMultiple, out ulong address)
+    {
+        address = 0;
+        return TryValidateAlignedAllocation(
+                   alignmentValue,
+                   requestedSize,
+                   requireSizeMultiple,
+                   requirePointerSizedAlignment: false,
+                   out var alignment,
+                   out var size) &&
+               TryAllocateLibcHeapCore(size, alignment, zeroFill: false, out address);
+    }
+
+    private static bool TryValidateAlignedAllocation(
+        ulong alignmentValue,
+        ulong requestedSize,
+        bool requireSizeMultiple,
+        bool requirePointerSizedAlignment,
+        out nuint alignment,
+        out nuint size)
+    {
+        alignment = 0;
+        size = 0;
+        if (!TryConvertAllocationSize(requestedSize, out size) ||
+            alignmentValue == 0 ||
+            alignmentValue > (ulong)nint.MaxValue)
+        {
+            return false;
+        }
+
+        alignment = (nuint)alignmentValue;
+        if (!IsPowerOfTwo(alignment))
+        {
+            return false;
+        }
+
+        if (requirePointerSizedAlignment && alignment % (nuint)IntPtr.Size != 0)
+        {
+            return false;
+        }
+
+        if (alignment < (nuint)IntPtr.Size)
+        {
+            alignment = (nuint)IntPtr.Size;
+        }
+
+        if (requireSizeMultiple && size % alignment != 0)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void FreeLibcHeap(ulong address)
+    {
+        if (address == 0)
+        {
+            return;
+        }
+
+        LibcHeapAllocation allocation;
+        lock (_libcAllocGate)
+        {
+            if (!_libcAllocations.Remove(address, out allocation))
+            {
+                return;
+            }
+        }
+
+        Marshal.FreeHGlobal(allocation.BaseAddress);
+    }
+
+    private static bool TryMultiplyAllocationSize(ulong left, ulong right, out nuint size)
+    {
+        size = 0;
+        if (!TryConvertAllocationSize(left, out var leftSize) ||
+            !TryConvertAllocationSize(right, out var rightSize))
+        {
+            return false;
+        }
+
+        try
+        {
+            checked
+            {
+                size = leftSize * rightSize;
+            }
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryConvertAllocationSize(ulong requestedSize, out nuint size)
+    {
+        size = 0;
+        if (requestedSize > (ulong)nint.MaxValue)
+        {
+            return false;
+        }
+
+        size = (nuint)requestedSize;
+        return true;
+    }
+
+    private static nuint NormalizeLibcAlignment(nuint alignment)
+    {
+        if (alignment < DefaultLibcHeapAlignment)
+        {
+            return DefaultLibcHeapAlignment;
+        }
+
+        return alignment;
+    }
+
+    private static bool IsPowerOfTwo(nuint value)
+    {
+        return value != 0 && (value & (value - 1)) == 0;
     }
 
     private static bool TryWriteHostMemory(ulong address, ReadOnlySpan<byte> source)

@@ -16,6 +16,7 @@ public sealed class SelfImage
         IReadOnlyList<VirtualMemoryRegion> mappedRegions,
         IReadOnlyDictionary<ulong, string>? importStubs = null,
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
+        IReadOnlyList<ImportedSymbolRelocation>? importedRelocations = null,
         ulong imageBase = 0,
         ulong procParamAddress = 0)
     {
@@ -28,6 +29,7 @@ public sealed class SelfImage
         MappedRegions = mappedRegions;
         ImportStubs = importStubs ?? new Dictionary<ulong, string>();
         RuntimeSymbols = runtimeSymbols ?? new Dictionary<string, ulong>(StringComparer.Ordinal);
+        ImportedRelocations = importedRelocations ?? Array.Empty<ImportedSymbolRelocation>();
         _imageBase = imageBase;
         ProcParamAddress = procParamAddress;
     }
@@ -43,6 +45,8 @@ public sealed class SelfImage
     public IReadOnlyDictionary<ulong, string> ImportStubs { get; }
 
     public IReadOnlyDictionary<string, ulong> RuntimeSymbols { get; }
+
+    public IReadOnlyList<ImportedSymbolRelocation> ImportedRelocations { get; }
 
     public ulong EntryPoint => ElfHeader.EntryPoint + _imageBase;
 

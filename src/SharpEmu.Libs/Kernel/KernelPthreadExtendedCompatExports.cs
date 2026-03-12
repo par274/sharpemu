@@ -841,9 +841,13 @@ public static class KernelPthreadExtendedCompatExports
             return state;
         }
 
+        var name = KernelPthreadState.TryGetThreadIdentity(thread, out var identity)
+            ? identity.Name
+            : $"Thread-{thread:X}";
+
         state = new ThreadState
         {
-            Name = $"Thread-{thread:X}",
+            Name = name,
             Priority = DefaultThreadPriority,
             AffinityMask = DefaultThreadAffinityMask,
             DetachState = DefaultDetachState,

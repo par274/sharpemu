@@ -587,6 +587,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			"_init_env" or
 			"atexit" or
+			"__cxa_guard_acquire" or
+			"__cxa_guard_release" or
+			"__cxa_guard_abort" or
 			"strlen" or
 			"strnlen" or
 			"strcmp" or

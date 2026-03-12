@@ -13,6 +13,7 @@ public static class CxaGuardExports
     private sealed class GuardState
     {
         public int OwnerThreadId { get; set; }
+        public int RecursionDepth { get; set; }
     }
 
     private static readonly ConcurrentDictionary<ulong, GuardState> _inProgress = new();
@@ -53,6 +54,7 @@ public static class CxaGuardExports
             var newState = new GuardState
             {
                 OwnerThreadId = currentThreadId,
+                RecursionDepth = 1,
             };
             if (_inProgress.TryAdd(guardPtr, newState))
             {
@@ -99,6 +101,20 @@ public static class CxaGuardExports
             ctx[CpuRegister.Rax] = 0;
             LogGuardResult("guard_release", guardPtr, result: 0, initialized: false, inProgress: true, ownerThreadId: state.OwnerThreadId);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (state is not null)
+        {
+            lock (state)
+            {
+                if (state.RecursionDepth > 1)
+                {
+                    state.RecursionDepth--;
+                    ctx[CpuRegister.Rax] = 0;
+                    LogGuardResult("guard_release", guardPtr, result: 0, initialized: false, inProgress: true, ownerThreadId: state.OwnerThreadId);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
+            }
         }
 
         if (!TryWriteGuardInitialized(ctx, guardPtr, initialized: true))

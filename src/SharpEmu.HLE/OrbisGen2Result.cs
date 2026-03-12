@@ -16,6 +16,11 @@ public enum OrbisGen2Result : int
     ORBIS_GEN2_OK = 0,
 
     /// <summary>
+    /// Indicates that the operation is not permitted for the calling thread.
+    /// </summary>
+    ORBIS_GEN2_ERROR_PERMISSION_DENIED = unchecked((int)0x80020001),
+
+    /// <summary>
     /// Indicates that the requested export was not found.
     /// </summary>
     ORBIS_GEN2_ERROR_NOT_FOUND = unchecked((int)0x80020002),
@@ -31,9 +36,24 @@ public enum OrbisGen2Result : int
     ORBIS_GEN2_ERROR_ALREADY_EXISTS = unchecked((int)0x80020004),
 
     /// <summary>
+    /// Indicates that completing the operation would deadlock.
+    /// </summary>
+    ORBIS_GEN2_ERROR_DEADLOCK = unchecked((int)0x8002000B),
+
+    /// <summary>
+    /// Indicates that the target resource is busy.
+    /// </summary>
+    ORBIS_GEN2_ERROR_BUSY = unchecked((int)0x80020010),
+
+    /// <summary>
     /// Indicates that behavior is recognized but not implemented yet.
     /// </summary>
     ORBIS_GEN2_ERROR_NOT_IMPLEMENTED = unchecked((int)0x8002FFFF),
+
+    /// <summary>
+    /// Indicates that the operation timed out.
+    /// </summary>
+    ORBIS_GEN2_ERROR_TIMED_OUT = unchecked((int)0x8002003C),
 
     /// <summary>
     /// Indicates that memory access failed.

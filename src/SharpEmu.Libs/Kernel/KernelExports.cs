@@ -8,7 +8,6 @@ namespace SharpEmu.Libs.Kernel;
 
 public static class KernelExports
 {
-    private static long _nextThreadId = 1;
     private static int _nextFileDescriptor = 2;
     private static readonly object _cxaGate = new();
     private static readonly List<CxaDestructorEntry> _cxaDestructors = new();
@@ -175,12 +174,24 @@ public static class KernelExports
     public static int PthreadCreate(CpuContext ctx)
     {
         var threadIdAddress = ctx[CpuRegister.Rdi];
-        var nextThreadId = unchecked((ulong)Interlocked.Increment(ref _nextThreadId));
-        if (threadIdAddress != 0 && !ctx.TryWriteUInt64(threadIdAddress, nextThreadId))
+        var attrAddress = ctx[CpuRegister.Rsi];
+        var entryAddress = ctx[CpuRegister.Rdx];
+        var argument = ctx[CpuRegister.Rcx];
+        var nameAddress = ctx[CpuRegister.R8];
+        var name = nameAddress == 0 ? string.Empty : ReadCString(ctx, nameAddress, 256);
+        var threadHandle = KernelPthreadState.CreateThreadHandle(name);
+        if (threadIdAddress != 0 && !ctx.TryWriteUInt64(threadIdAddress, threadHandle))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        if (ShouldTracePthread())
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] pthread_create: out=0x{threadIdAddress:X16} attr=0x{attrAddress:X16} entry=0x{entryAddress:X16} arg=0x{argument:X16} name_ptr=0x{nameAddress:X16} name='{name}' -> thread=0x{threadHandle:X16}");
+        }
+
+        ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -201,12 +212,20 @@ public static class KernelExports
         LibraryName = "libKernel")]
     public static int PthreadJoin(CpuContext ctx)
     {
+        var threadId = ctx[CpuRegister.Rdi];
         var returnValueAddress = ctx[CpuRegister.Rsi];
         if (returnValueAddress != 0 && !ctx.TryWriteUInt64(returnValueAddress, 0))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        if (ShouldTracePthread())
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] pthread_join: thread=0x{threadId:X16} retval_out=0x{returnValueAddress:X16}");
+        }
+
+        ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -369,5 +388,10 @@ public static class KernelExports
 
         try { return System.Text.Encoding.UTF8.GetString(buf.Slice(0, len)); }
         catch { return System.Text.Encoding.ASCII.GetString(buf.Slice(0, len)); }
+    }
+
+    private static bool ShouldTracePthread()
+    {
+        return string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREADS"), "1", StringComparison.Ordinal);
     }
 }

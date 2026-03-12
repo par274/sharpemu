@@ -138,7 +138,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         var generation = image.ElfHeader.AbiVersion == 2 ? Generation.Gen5 : Generation.Gen4;
         var activeImportStubs = new Dictionary<ulong, string>(image.ImportStubs);
         var activeRuntimeSymbols = new Dictionary<string, ulong>(image.RuntimeSymbols, StringComparer.Ordinal);
-        LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
+        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
+        RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
         var processImageName = Path.GetFileName(ebootPath);
         if (string.IsNullOrWhiteSpace(processImageName))
         {
@@ -328,15 +329,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         return result;
     }
 
-    private void LoadAdjacentSceModules(
+    private List<SelfImage> LoadAdjacentSceModules(
         string ebootPath,
         IDictionary<ulong, string> importStubs,
         IDictionary<string, ulong> runtimeSymbols)
     {
+        var loadedImages = new List<SelfImage>();
         var ebootDirectory = Path.GetDirectoryName(ebootPath);
         if (string.IsNullOrWhiteSpace(ebootDirectory))
         {
-            return;
+            return loadedImages;
         }
 
         var moduleDirectories = new[]
@@ -350,7 +352,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         if (moduleDirectories.Length == 0)
         {
-            return;
+            return loadedImages;
         }
 
         var allModulePaths = moduleDirectories
@@ -380,7 +382,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         if (modulePaths.Length == 0)
         {
-            return;
+            return loadedImages;
         }
 
         Console.Error.WriteLine($"[RUNTIME] Module search directories: {string.Join(", ", moduleDirectories)}");
@@ -416,6 +418,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 mergedImportCount += MergeImportStubs(importStubs, moduleImage.ImportStubs, modulePath);
                 mergedSymbolCount += MergeRuntimeSymbols(runtimeSymbols, moduleImage.RuntimeSymbols);
                 RegisterLoadedModule(modulePath, moduleImage, isMain: false, isSystemModule: false);
+                loadedImages.Add(moduleImage);
                 loadedModules++;
 
                 Console.Error.WriteLine(
@@ -430,6 +433,67 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         Console.Error.WriteLine(
             $"[RUNTIME] Module preload summary: loaded={loadedModules}, failed={failedModules}, merged_imports={mergedImportCount}, merged_symbols={mergedSymbolCount}");
+        return loadedImages;
+    }
+
+    private void RebindImportedDataSymbols(
+        SelfImage mainImage,
+        IReadOnlyList<SelfImage> loadedModuleImages,
+        IReadOnlyDictionary<string, ulong> runtimeSymbols)
+    {
+        var rebound = 0;
+        var unresolved = 0;
+
+        rebound += RebindImportedDataSymbols(mainImage, runtimeSymbols, ref unresolved);
+        for (var i = 0; i < loadedModuleImages.Count; i++)
+        {
+            rebound += RebindImportedDataSymbols(loadedModuleImages[i], runtimeSymbols, ref unresolved);
+        }
+
+        if (rebound != 0 || unresolved != 0)
+        {
+            Console.Error.WriteLine(
+                $"[RUNTIME] Imported data rebind: rebound={rebound}, unresolved={unresolved}");
+        }
+    }
+
+    private int RebindImportedDataSymbols(
+        SelfImage image,
+        IReadOnlyDictionary<string, ulong> runtimeSymbols,
+        ref int unresolved)
+    {
+        if (image.ImportedRelocations.Count == 0)
+        {
+            return 0;
+        }
+
+        var rebound = 0;
+        for (var i = 0; i < image.ImportedRelocations.Count; i++)
+        {
+            var relocation = image.ImportedRelocations[i];
+            if (!relocation.IsData)
+            {
+                continue;
+            }
+
+            if (!runtimeSymbols.TryGetValue(relocation.Nid, out var symbolAddress) ||
+                !IsUsableRuntimeSymbolAddress(symbolAddress))
+            {
+                unresolved++;
+                continue;
+            }
+
+            var reboundValue = AddSigned(symbolAddress, relocation.Addend);
+            if (!TryWriteUInt64(_virtualMemory, relocation.TargetAddress, reboundValue))
+            {
+                unresolved++;
+                continue;
+            }
+
+            rebound++;
+        }
+
+        return rebound;
     }
 
     private static int MergeImportStubs(
@@ -496,6 +560,24 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     private static bool IsUsableRuntimeSymbolAddress(ulong address)
     {
         return address >= 0x10000 && !IsUnresolvedRuntimeSentinel(address);
+    }
+
+    private static bool TryWriteUInt64(IVirtualMemory virtualMemory, ulong address, ulong value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        return virtualMemory.TryWrite(address, bytes);
+    }
+
+    private static ulong AddSigned(ulong value, long addend)
+    {
+        if (addend >= 0)
+        {
+            return unchecked(value + (ulong)addend);
+        }
+
+        var magnitude = unchecked((ulong)(-(addend + 1))) + 1;
+        return unchecked(value - magnitude);
     }
 
     private static bool IsUnresolvedRuntimeSentinel(ulong value)

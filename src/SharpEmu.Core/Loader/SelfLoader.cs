@@ -29,6 +29,7 @@ public sealed class SelfLoader : ISelfLoader
     private const int ElfRelocationSize = 24;
     private const int ElfSectionHeaderSize = 64;
     private const uint SectionTypeSymbolTable = 2;
+    private const uint SectionTypeRela = 4;
 
     private const long DtNull = 0;
     private const long DtPltRelSize = 0x02;
@@ -65,6 +66,7 @@ public sealed class SelfLoader : ISelfLoader
     private const byte SymbolBindLocal = 0;
     private const byte SymbolBindGlobal = 1;
     private const byte SymbolBindWeak = 2;
+    private const byte SymbolTypeObject = 1;
 
     private IModuleManager? _moduleManager;
     private uint _nextTlsModuleId = 1;
@@ -190,11 +192,13 @@ public sealed class SelfLoader : ISelfLoader
         var importStubs = ResolveAndPatchImportStubs(
             imageData,
             loadContext,
+            elfHeader,
             programHeaders,
             virtualMemory,
             imageBase,
             _moduleManager,
-            tlsModuleId);
+            tlsModuleId,
+            out var importedRelocations);
         var effectiveImportStubs = importStubs.Count == 0
             ? new Dictionary<ulong, string>()
             : new Dictionary<ulong, string>(importStubs);
@@ -246,6 +250,7 @@ public sealed class SelfLoader : ISelfLoader
             virtualMemory.SnapshotRegions(),
             finalizedImportStubs,
             finalizedRuntimeSymbols,
+            importedRelocations,
             imageBase,
             procParamAddress);
     }
@@ -426,12 +431,15 @@ public sealed class SelfLoader : ISelfLoader
     private static IReadOnlyDictionary<ulong, string> ResolveAndPatchImportStubs(
         ReadOnlySpan<byte> imageData,
         LoadContext loadContext,
+        ElfHeader elfHeader,
         IReadOnlyList<ProgramHeader> programHeaders,
         IVirtualMemory virtualMemory,
         ulong imageBase,
         IModuleManager? moduleManager,
-        uint tlsModuleId)
+        uint tlsModuleId,
+        out IReadOnlyList<ImportedSymbolRelocation> importedRelocations)
     {
+        importedRelocations = Array.Empty<ImportedSymbolRelocation>();
         if (!TryGetProgramHeader(programHeaders, ProgramHeaderType.Dynamic, out var dynamicHeader, out var dynamicHeaderIndex))
         {
             return EmptyImportStubs;
@@ -447,10 +455,18 @@ public sealed class SelfLoader : ISelfLoader
             throw new NotSupportedException("Dynamic metadata segments larger than 2 GB are not currently supported.");
         }
 
-        var dynamicOffset = ResolvePhysicalSegmentOffset(imageData.Length, loadContext, dynamicHeader, dynamicHeaderIndex);
-        EnsureRange(imageData.Length, dynamicOffset, dynamicHeader.FileSize);
+        if (!TryLoadDynamicTableBytes(
+                imageData,
+                loadContext,
+                virtualMemory,
+                imageBase,
+                dynamicHeader,
+                dynamicHeaderIndex,
+                out var dynamicTable))
+        {
+            return EmptyImportStubs;
+        }
 
-        var dynamicTable = imageData.Slice((int)dynamicOffset, (int)dynamicHeader.FileSize);
         var elfData = imageData;
 
         var dynamicInfo = ParseDynamicInfo(dynamicTable);
@@ -463,13 +479,6 @@ public sealed class SelfLoader : ISelfLoader
         Console.WriteLine($"[LOADER] TLS module id: {tlsModuleId}");
         Console.WriteLine($"[LOADER] HasImportMetadata: {dynamicInfo.HasImportMetadata}");
 
-        if (!dynamicInfo.HasImportMetadata)
-        {
-            Console.WriteLine($"[LOADER] No import metadata found in ELF!");
-            return EmptyImportStubs;
-        }
-
-        Console.WriteLine($"[LOADER] ImageBase runtime: 0x{imageBase:X16}");
         var relocations = new List<ElfRelocation>(512);
 
         if (dynamicInfo.RelaSize != 0 &&
@@ -484,13 +493,16 @@ public sealed class SelfLoader : ISelfLoader
             CollectRelocations(jmpRelBytes, relocations);
         }
 
-        if (relocations.Count == 0)
+        if (!dynamicInfo.HasImportMetadata)
         {
-            Console.WriteLine($"[LOADER] No relocations found!");
-            return EmptyImportStubs;
+            Console.WriteLine($"[LOADER] No import metadata found in ELF!");
         }
 
-        Console.WriteLine($"[LOADER] Processing {relocations.Count} relocations...");
+        if (relocations.Count != 0)
+        {
+            Console.WriteLine($"[LOADER] ImageBase runtime: 0x{imageBase:X16}");
+            Console.WriteLine($"[LOADER] Processing {relocations.Count} relocations...");
+        }
 
         uint maxSymbolIndex = 0;
         foreach (var relocation in relocations)
@@ -544,170 +556,45 @@ public sealed class SelfLoader : ISelfLoader
         var descriptors = new List<RelocationDescriptor>(256);
         var orderedImportNids = new List<string>(128);
         var seenImportNids = new HashSet<string>(StringComparer.Ordinal);
-        var skippedUnsupported = 0;
-        var skippedUnmapped = 0;
-        var skippedSymbolRead = 0;
-        var skippedNonImportBind = 0;
-        var skippedNameRead = 0;
-        var skippedEmptyNid = 0;
-        foreach (var relocation in relocations)
+        AppendRelocationDescriptors(
+            relocations,
+            symbolTable,
+            stringTable,
+            virtualMemory,
+            imageBase,
+            tlsModuleId,
+            descriptors,
+            orderedImportNids,
+            seenImportNids);
+
+        if (descriptors.Count == 0)
         {
-            if (IsFocusRelocationOffset(relocation.Offset, imageBase))
+            var sectionFallbackRelocCount = AppendSectionRelocationDescriptors(
+                imageData,
+                loadContext,
+                elfHeader,
+                virtualMemory,
+                imageBase,
+                tlsModuleId,
+                descriptors,
+                orderedImportNids,
+                seenImportNids);
+            if (sectionFallbackRelocCount != 0)
             {
-                Console.Error.WriteLine(
-                    $"[LOADER][FOCUS][SCAN] off=0x{relocation.Offset:X16} type={relocation.Type} sym={relocation.SymbolIndex} addend=0x{relocation.Addend:X}");
+                Console.WriteLine(
+                    $"[LOADER] Section relocation fallback recovered {sectionFallbackRelocCount} relocation entries, {orderedImportNids.Count} unique NIDs, {descriptors.Count} descriptors");
             }
-
-            if (!IsSupportedRelocationType(relocation.Type))
-            {
-                skippedUnsupported++;
-                if (IsFocusRelocationOffset(relocation.Offset, imageBase))
-                {
-                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] unsupported type={relocation.Type}");
-                }
-                continue;
-            }
-
-            if (!TryResolveMappedAddress(virtualMemory, relocation.Offset, imageBase, sizeof(ulong), out var targetAddress))
-            {
-                skippedUnmapped++;
-                if (IsFocusRelocationOffset(relocation.Offset, imageBase))
-                {
-                    Console.Error.WriteLine("[LOADER][FOCUS][SKIP] target address not mapped");
-                }
-                continue;
-            }
-
-            if (relocation.Type == RelocationTypeRelative)
-            {
-                descriptors.Add(new RelocationDescriptor(
-                    targetAddress,
-                    relocation.Addend,
-                    null,
-                    imageBase,
-                    RelocationValueKind.Pointer));
-                continue;
-            }
-
-            if (relocation.Type == RelocationTypeTlsModuleId)
-            {
-                var dtpmodValue = tlsModuleId == 0 ? 1u : tlsModuleId;
-                descriptors.Add(new RelocationDescriptor(
-                    targetAddress,
-                    0,
-                    null,
-                    dtpmodValue,
-                    RelocationValueKind.TlsModuleId));
-                continue;
-            }
-
-            var symbolIndex = relocation.SymbolIndex;
-            ElfSymbol symbol;
-            if (symbolIndex == 0)
-            {
-                symbol = default;
-            }
-            else if (!TryReadSymbol(symbolTable, symbolIndex, out symbol))
-            {
-                skippedSymbolRead++;
-                if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
-                {
-                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] symbol read failed index={symbolIndex}");
-                }
-                continue;
-            }
-
-            var addend = relocation.Type is RelocationTypeGlobalData or RelocationTypeJumpSlot ? 0 : relocation.Addend;
-            var symbolBind = GetSymbolBind(symbol.Info);
-            if (symbolBind == SymbolBindLocal)
-            {
-                var symbolAddress = ResolveMappedAddressOrFallback(virtualMemory, symbol.Value, imageBase);
-                if (symbolAddress == 0)
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER] Skipping local relocation with invalid symbol value 0x{symbol.Value:X} " +
-                        $"at target 0x{targetAddress:X16}, type={relocation.Type}, sym={symbolIndex}");
-                    continue;
-                }
-
-                descriptors.Add(new RelocationDescriptor(
-                    targetAddress,
-                    addend,
-                    null,
-                    symbolAddress,
-                    RelocationValueKind.Pointer));
-                continue;
-            }
-
-            if (symbol.Value != 0)
-            {
-                var symbolAddress = ResolveMappedAddressOrFallback(virtualMemory, symbol.Value, imageBase);
-                if (symbolAddress == 0)
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER] Skipping relocation with invalid symbol value 0x{symbol.Value:X} " +
-                        $"at target 0x{targetAddress:X16}, type={relocation.Type}, sym={symbolIndex}");
-                    continue;
-                }
-
-                descriptors.Add(new RelocationDescriptor(
-                    targetAddress,
-                    addend,
-                    null,
-                    symbolAddress,
-                    RelocationValueKind.Pointer));
-                continue;
-            }
-
-            if (symbolBind is not (SymbolBindGlobal or SymbolBindWeak))
-            {
-                skippedNonImportBind++;
-                if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
-                {
-                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] bind={symbolBind} not importable");
-                }
-                continue;
-            }
-
-            if (!TryReadNullTerminatedAscii(stringTable, symbol.NameOffset, out var symbolName))
-            {
-                skippedNameRead++;
-                if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
-                {
-                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] symbol name read failed offset={symbol.NameOffset}");
-                }
-                continue;
-            }
-
-            var nid = ExtractNid(symbolName);
-            if (string.IsNullOrWhiteSpace(nid))
-            {
-                skippedEmptyNid++;
-                continue;
-            }
-
-            if (seenImportNids.Add(nid))
-            {
-                orderedImportNids.Add(nid);
-            }
-
-            descriptors.Add(new RelocationDescriptor(
-                targetAddress,
-                addend,
-                nid,
-                0,
-                RelocationValueKind.Pointer));
         }
 
         Console.WriteLine($"[LOADER] Found {orderedImportNids.Count} unique NIDs, {descriptors.Count} descriptors");
-        Console.WriteLine(
-            $"[LOADER] Reloc skip stats: unsupported={skippedUnsupported}, unmapped={skippedUnmapped}, symbolRead={skippedSymbolRead}, nonImportBind={skippedNonImportBind}, nameRead={skippedNameRead}, emptyNid={skippedEmptyNid}");
 
         if (descriptors.Count == 0)
         {
             Console.WriteLine($"[LOADER] No relocation descriptors!");
             return EmptyImportStubs;
         }
+
+        importedRelocations = BuildImportedRelocations(descriptors);
 
         var stubsByAddress = CreateImportStubMapping(virtualMemory, orderedImportNids);
         Console.WriteLine($"[LOADER] Created {stubsByAddress.Count} import stubs");
@@ -784,6 +671,237 @@ public sealed class SelfLoader : ISelfLoader
         return stubsByAddress;
     }
 
+    private static int AppendSectionRelocationDescriptors(
+        ReadOnlySpan<byte> imageData,
+        LoadContext loadContext,
+        ElfHeader elfHeader,
+        IVirtualMemory virtualMemory,
+        ulong imageBase,
+        uint tlsModuleId,
+        ICollection<RelocationDescriptor> descriptors,
+        IList<string> orderedImportNids,
+        ISet<string> seenImportNids)
+    {
+        if (elfHeader.SectionHeaderOffset == 0 ||
+            elfHeader.SectionHeaderCount == 0 ||
+            elfHeader.SectionHeaderEntrySize < ElfSectionHeaderSize)
+        {
+            return 0;
+        }
+
+        var appendedRelocations = 0;
+        for (var sectionIndex = 0; sectionIndex < elfHeader.SectionHeaderCount; sectionIndex++)
+        {
+            if (!TryReadSectionHeader(imageData, loadContext, elfHeader, sectionIndex, out var relocationHeader) ||
+                relocationHeader.Type != SectionTypeRela ||
+                relocationHeader.Size == 0 ||
+                relocationHeader.EntrySize < ElfRelocationSize)
+            {
+                continue;
+            }
+
+            if (!TryReadElfRelativeSlice(imageData, loadContext, relocationHeader.Offset, relocationHeader.Size, out var relocationTable))
+            {
+                continue;
+            }
+
+            var relocations = new List<ElfRelocation>(checked((int)(relocationHeader.Size / relocationHeader.EntrySize)));
+            CollectRelocations(relocationTable, relocations);
+            if (relocations.Count == 0)
+            {
+                continue;
+            }
+
+            ReadOnlySpan<byte> symbolTable = ReadOnlySpan<byte>.Empty;
+            ReadOnlySpan<byte> stringTable = ReadOnlySpan<byte>.Empty;
+            if (relocationHeader.Link < elfHeader.SectionHeaderCount &&
+                TryReadSectionHeader(imageData, loadContext, elfHeader, (int)relocationHeader.Link, out var symbolHeader) &&
+                symbolHeader.Size != 0 &&
+                symbolHeader.EntrySize >= ElfSymbolSize &&
+                TryReadElfRelativeSlice(imageData, loadContext, symbolHeader.Offset, symbolHeader.Size, out symbolTable) &&
+                symbolHeader.Link < elfHeader.SectionHeaderCount &&
+                TryReadSectionHeader(imageData, loadContext, elfHeader, (int)symbolHeader.Link, out var stringHeader) &&
+                stringHeader.Size != 0 &&
+                TryReadElfRelativeSlice(imageData, loadContext, stringHeader.Offset, stringHeader.Size, out stringTable))
+            {
+            }
+
+            AppendRelocationDescriptors(
+                relocations,
+                symbolTable,
+                stringTable,
+                virtualMemory,
+                imageBase,
+                tlsModuleId,
+                descriptors,
+                orderedImportNids,
+                seenImportNids);
+            appendedRelocations += relocations.Count;
+        }
+
+        return appendedRelocations;
+    }
+
+    private static void AppendRelocationDescriptors(
+        IReadOnlyList<ElfRelocation> relocations,
+        ReadOnlySpan<byte> symbolTable,
+        ReadOnlySpan<byte> stringTable,
+        IVirtualMemory virtualMemory,
+        ulong imageBase,
+        uint tlsModuleId,
+        ICollection<RelocationDescriptor> descriptors,
+        IList<string> orderedImportNids,
+        ISet<string> seenImportNids)
+    {
+        foreach (var relocation in relocations)
+        {
+            if (IsFocusRelocationOffset(relocation.Offset, imageBase))
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][FOCUS][SCAN] off=0x{relocation.Offset:X16} type={relocation.Type} sym={relocation.SymbolIndex} addend=0x{relocation.Addend:X}");
+            }
+
+            if (!IsSupportedRelocationType(relocation.Type))
+            {
+                if (IsFocusRelocationOffset(relocation.Offset, imageBase))
+                {
+                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] unsupported type={relocation.Type}");
+                }
+                continue;
+            }
+
+            if (!TryResolveMappedAddress(virtualMemory, relocation.Offset, imageBase, sizeof(ulong), out var targetAddress))
+            {
+                if (IsFocusRelocationOffset(relocation.Offset, imageBase))
+                {
+                    Console.Error.WriteLine("[LOADER][FOCUS][SKIP] target address not mapped");
+                }
+                continue;
+            }
+
+            if (relocation.Type == RelocationTypeRelative)
+            {
+                descriptors.Add(new RelocationDescriptor(
+                    targetAddress,
+                    relocation.Addend,
+                    null,
+                    imageBase,
+                    RelocationValueKind.Pointer,
+                    IsDataImport: false));
+                continue;
+            }
+
+            if (relocation.Type == RelocationTypeTlsModuleId)
+            {
+                var dtpmodValue = tlsModuleId == 0 ? 1u : tlsModuleId;
+                descriptors.Add(new RelocationDescriptor(
+                    targetAddress,
+                    0,
+                    null,
+                    dtpmodValue,
+                    RelocationValueKind.TlsModuleId,
+                    IsDataImport: false));
+                continue;
+            }
+
+            var symbolIndex = relocation.SymbolIndex;
+            ElfSymbol symbol;
+            if (symbolIndex == 0)
+            {
+                symbol = default;
+            }
+            else if (!TryReadSymbol(symbolTable, symbolIndex, out symbol))
+            {
+                if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
+                {
+                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] symbol read failed index={symbolIndex}");
+                }
+                continue;
+            }
+
+            var addend = relocation.Type is RelocationTypeGlobalData or RelocationTypeJumpSlot ? 0 : relocation.Addend;
+            var symbolBind = GetSymbolBind(symbol.Info);
+            if (symbolBind == SymbolBindLocal)
+            {
+                var symbolAddress = ResolveMappedAddressOrFallback(virtualMemory, symbol.Value, imageBase);
+                if (symbolAddress == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER] Skipping local relocation with invalid symbol value 0x{symbol.Value:X} " +
+                        $"at target 0x{targetAddress:X16}, type={relocation.Type}, sym={symbolIndex}");
+                    continue;
+                }
+
+                descriptors.Add(new RelocationDescriptor(
+                    targetAddress,
+                    addend,
+                    null,
+                    symbolAddress,
+                    RelocationValueKind.Pointer,
+                    IsDataImport: false));
+                continue;
+            }
+
+            if (symbol.Value != 0)
+            {
+                var symbolAddress = ResolveMappedAddressOrFallback(virtualMemory, symbol.Value, imageBase);
+                if (symbolAddress == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER] Skipping relocation with invalid symbol value 0x{symbol.Value:X} " +
+                        $"at target 0x{targetAddress:X16}, type={relocation.Type}, sym={symbolIndex}");
+                    continue;
+                }
+
+                descriptors.Add(new RelocationDescriptor(
+                    targetAddress,
+                    addend,
+                    null,
+                    symbolAddress,
+                    RelocationValueKind.Pointer,
+                    IsDataImport: false));
+                continue;
+            }
+
+            if (symbolBind is not (SymbolBindGlobal or SymbolBindWeak))
+            {
+                if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
+                {
+                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] bind={symbolBind} not importable");
+                }
+                continue;
+            }
+
+            if (!TryReadNullTerminatedAscii(stringTable, symbol.NameOffset, out var symbolName))
+            {
+                if (targetAddress >= FocusRelocGuestStart && targetAddress <= FocusRelocGuestEnd)
+                {
+                    Console.Error.WriteLine($"[LOADER][FOCUS][SKIP] symbol name read failed offset={symbol.NameOffset}");
+                }
+                continue;
+            }
+
+            var nid = ExtractNid(symbolName);
+            if (string.IsNullOrWhiteSpace(nid))
+            {
+                continue;
+            }
+
+            if (seenImportNids.Add(nid))
+            {
+                orderedImportNids.Add(nid);
+            }
+
+            descriptors.Add(new RelocationDescriptor(
+                targetAddress,
+                addend,
+                nid,
+                0,
+                RelocationValueKind.Pointer,
+                IsDataImport: GetSymbolType(symbol.Info) == SymbolTypeObject));
+        }
+    }
+
     private static void RegisterRuntimeSymbolsAndHooks(
         ReadOnlySpan<byte> imageData,
         LoadContext loadContext,
@@ -809,6 +927,34 @@ public sealed class SelfLoader : ISelfLoader
             Console.Error.WriteLine(
                 $"[LOADER] Runtime symbol index populated: section={sectionSymbols}, dynamic={dynamicSymbols}, total={runtimeSymbols.Count}");
         }
+    }
+
+    private static IReadOnlyList<ImportedSymbolRelocation> BuildImportedRelocations(
+        IReadOnlyList<RelocationDescriptor> descriptors)
+    {
+        if (descriptors.Count == 0)
+        {
+            return Array.Empty<ImportedSymbolRelocation>();
+        }
+
+        var importedRelocations = new List<ImportedSymbolRelocation>(descriptors.Count);
+        foreach (var descriptor in descriptors)
+        {
+            if (descriptor.ImportNid is null || descriptor.ValueKind != RelocationValueKind.Pointer)
+            {
+                continue;
+            }
+
+            importedRelocations.Add(new ImportedSymbolRelocation(
+                descriptor.TargetAddress,
+                descriptor.Addend,
+                descriptor.ImportNid,
+                descriptor.IsDataImport));
+        }
+
+        return importedRelocations.Count == 0
+            ? Array.Empty<ImportedSymbolRelocation>()
+            : importedRelocations;
     }
 
     private static int RegisterSectionRuntimeSymbols(
@@ -909,9 +1055,18 @@ public sealed class SelfLoader : ISelfLoader
             return 0;
         }
 
-        var dynamicOffset = ResolvePhysicalSegmentOffset(imageData.Length, loadContext, dynamicHeader, dynamicHeaderIndex);
-        EnsureRange(imageData.Length, dynamicOffset, dynamicHeader.FileSize);
-        var dynamicTable = imageData.Slice((int)dynamicOffset, (int)dynamicHeader.FileSize);
+        if (!TryLoadDynamicTableBytes(
+                imageData,
+                loadContext,
+                virtualMemory,
+                imageBase,
+                dynamicHeader,
+                dynamicHeaderIndex,
+                out var dynamicTable))
+        {
+            return 0;
+        }
+
         var dynamicInfo = ParseDynamicInfo(dynamicTable);
         if (dynamicInfo.SymTabOffset == 0 || dynamicInfo.StrTabOffset == 0)
         {
@@ -1041,6 +1196,37 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         sectionHeader = ReadUnmanaged<ElfSectionHeader>(sectionBytes, 0);
+        return true;
+    }
+
+    private static bool TryLoadDynamicTableBytes(
+        ReadOnlySpan<byte> imageData,
+        LoadContext loadContext,
+        IVirtualMemory virtualMemory,
+        ulong imageBase,
+        ProgramHeader dynamicHeader,
+        int dynamicHeaderIndex,
+        out ReadOnlySpan<byte> dynamicTable)
+    {
+        if (TryLoadTableBytes(
+                imageData,
+                virtualMemory,
+                imageBase,
+                dynamicHeader.VirtualAddress,
+                dynamicHeader.FileSize,
+                out var loadedDynamicTable))
+        {
+            dynamicTable = loadedDynamicTable;
+            return true;
+        }
+
+        var dynamicOffset = ResolvePhysicalSegmentOffset(imageData.Length, loadContext, dynamicHeader, dynamicHeaderIndex);
+        if (!TrySlice(imageData, dynamicOffset, dynamicHeader.FileSize, out dynamicTable))
+        {
+            dynamicTable = default;
+            return false;
+        }
+
         return true;
     }
 
@@ -1512,6 +1698,11 @@ public sealed class SelfLoader : ISelfLoader
         return (byte)(info >> 4);
     }
 
+    private static byte GetSymbolType(byte info)
+    {
+        return (byte)(info & 0x0F);
+    }
+
     private static bool IsFocusRelocationOffset(ulong relocationOffset, ulong imageBase)
     {
         if (relocationOffset >= FocusRelocGuestStart && relocationOffset <= FocusRelocGuestEnd)
@@ -1947,7 +2138,8 @@ public sealed class SelfLoader : ISelfLoader
         long Addend,
         string? ImportNid,
         ulong SymbolValue,
-        RelocationValueKind ValueKind);
+        RelocationValueKind ValueKind,
+        bool IsDataImport);
 
     private enum SelfSegmentResolveStatus
     {
