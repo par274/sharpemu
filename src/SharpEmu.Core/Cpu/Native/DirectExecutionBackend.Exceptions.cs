@@ -4,6 +4,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using SharpEmu.Core.Cpu.Disasm;
@@ -254,6 +255,9 @@ public sealed partial class DirectExecutionBackend
 						Console.Error.WriteLine("[LOADER][ERROR]   Could not read code at RIP");
 					}
 					DumpRecentImportTrace();
+					DumpGuestDisasmDiagnostics(rip, rbp);
+					DumpGuestReferenceDiagnostics();
+					DumpGuestPointerWindowDiagnostics();
 					break;
 				case 2147483651u:
 					Console.Error.WriteLine("[LOADER][WARNING]   Type: Breakpoint (int3)");
@@ -320,6 +324,239 @@ public sealed partial class DirectExecutionBackend
 				$"[LOADER][INFO]     0x{instruction.Rip:X16}: {instruction.Text} bytes={IcedDecoder.FormatBytes(instruction.Bytes)}");
 			rip += (ulong)instruction.Length;
 		}
+	}
+
+	private void DumpGuestDisasmDiagnostics(ulong rip, ulong rbp)
+	{
+		if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_DISASM"), "1", StringComparison.Ordinal))
+		{
+			return;
+		}
+
+		if (rip >= 0x20)
+		{
+			DumpGuestInstructionStream("fault-prelude", rip - 0x20, 24);
+		}
+
+		try
+		{
+			ulong frame = rbp;
+			for (int i = 0; i < 3; i++)
+			{
+				if (frame < 140733193388032L || frame > 140737488355327L)
+				{
+					break;
+				}
+
+				ulong ret = (ulong)Marshal.ReadInt64((nint)(frame + 8));
+				if (ret >= 0x40)
+				{
+					DumpGuestInstructionStream($"frame#{i}-ret-prelude", ret - 0x40, 24);
+				}
+
+				ulong next = (ulong)Marshal.ReadInt64((nint)frame);
+				if (next <= frame)
+				{
+					break;
+				}
+
+				frame = next;
+			}
+		}
+		catch
+		{
+			Console.Error.WriteLine("[LOADER][WARNING]   Could not dump disasm diagnostics.");
+		}
+
+		var extraAddresses = Environment.GetEnvironmentVariable("SHARPEMU_LOG_DISASM_ADDRS");
+		if (string.IsNullOrWhiteSpace(extraAddresses))
+		{
+			return;
+		}
+
+		foreach (var token in extraAddresses.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			var normalized = token.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+				? token[2..]
+				: token;
+			if (!ulong.TryParse(normalized, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var address) || address < 0x20)
+			{
+				continue;
+			}
+
+			DumpGuestInstructionStream($"extra-0x{address:X16}", address, 48);
+		}
+	}
+
+	private unsafe void DumpGuestReferenceDiagnostics()
+	{
+		var targetList = ParseDiagnosticAddresses(Environment.GetEnvironmentVariable("SHARPEMU_LOG_REFSCAN_ADDRS"));
+		if (targetList.Count == 0 || _cpuContext == null)
+		{
+			return;
+		}
+
+		const ulong scanBase = 0x0000000800000000UL;
+		const ulong scanEnd = 0x0000000810000000UL;
+		const int maxHitsPerTarget = 24;
+
+		Console.Error.WriteLine(
+			$"[LOADER][INFO]   Ref scan targets: {string.Join(", ", targetList.ConvertAll(static addr => $"0x{addr:X16}"))}");
+
+		var hitCounts = new Dictionary<ulong, int>(targetList.Count);
+		for (var i = 0; i < targetList.Count; i++)
+		{
+			hitCounts[targetList[i]] = 0;
+		}
+
+		ulong address = scanBase;
+		while (address < scanEnd)
+		{
+			if (VirtualQuery((void*)address, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0)
+			{
+				break;
+			}
+
+			ulong regionBase = mbi.BaseAddress;
+			ulong regionEnd = regionBase + mbi.RegionSize;
+			if (regionEnd <= address)
+			{
+				break;
+			}
+
+			if (mbi.State == MEM_COMMIT &&
+				IsReadableProtection(mbi.Protect) &&
+				IsExecutableProtection(mbi.Protect))
+			{
+				ScanExecutableRegionForTargetReferences(regionBase, regionEnd, targetList, hitCounts, maxHitsPerTarget);
+			}
+
+			var allTargetsSatisfied = true;
+			for (var i = 0; i < targetList.Count; i++)
+			{
+				if (hitCounts[targetList[i]] < maxHitsPerTarget)
+				{
+					allTargetsSatisfied = false;
+					break;
+				}
+			}
+
+			if (allTargetsSatisfied)
+			{
+				break;
+			}
+
+			address = regionEnd;
+		}
+
+		for (var i = 0; i < targetList.Count; i++)
+		{
+			var target = targetList[i];
+			if (!hitCounts.TryGetValue(target, out var count) || count == 0)
+			{
+				Console.Error.WriteLine($"[LOADER][INFO]   Ref scan 0x{target:X16}: none");
+			}
+		}
+	}
+
+	private void DumpGuestPointerWindowDiagnostics()
+	{
+		var targetList = ParseDiagnosticAddresses(Environment.GetEnvironmentVariable("SHARPEMU_LOG_POINTER_WINDOWS"));
+		if (targetList.Count == 0)
+		{
+			return;
+		}
+
+		var windowSize = 0x80;
+		var rawWindowSize = Environment.GetEnvironmentVariable("SHARPEMU_LOG_POINTER_WINDOW_SIZE");
+		if (!string.IsNullOrWhiteSpace(rawWindowSize))
+		{
+			var normalized = rawWindowSize.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+				? rawWindowSize[2..]
+				: rawWindowSize;
+			if (int.TryParse(normalized, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var parsedWindowSize) &&
+				parsedWindowSize > 0)
+			{
+				windowSize = parsedWindowSize;
+			}
+		}
+
+		foreach (var target in targetList)
+		{
+			DumpPointerWindow($"ptrwin-0x{target:X16}", target, windowSize);
+		}
+	}
+
+	private void ScanExecutableRegionForTargetReferences(
+		ulong regionBase,
+		ulong regionEnd,
+		IReadOnlyList<ulong> targets,
+		IDictionary<ulong, int> hitCounts,
+		int maxHitsPerTarget)
+	{
+		if (_cpuContext == null || regionEnd <= regionBase)
+		{
+			return;
+		}
+
+		ulong rip = regionBase;
+		while (rip < regionEnd)
+		{
+			if (!IcedDecoder.TryReadGuestBytes(_cpuContext.Memory, rip, maxLen: 15, out var bytes) ||
+				!IcedDecoder.TryDecode(rip, bytes, out var instruction) ||
+				instruction.Length <= 0)
+			{
+				rip++;
+				continue;
+			}
+
+			if (instruction.MemoryAddress is { } memoryAddress)
+			{
+				for (var i = 0; i < targets.Count; i++)
+				{
+					var target = targets[i];
+					if (memoryAddress != target ||
+						!hitCounts.TryGetValue(target, out var count) ||
+						count >= maxHitsPerTarget)
+					{
+						continue;
+					}
+
+					hitCounts[target] = count + 1;
+					Console.Error.WriteLine(
+						$"[LOADER][INFO]   Ref scan hit target=0x{target:X16} rip=0x{instruction.Rip:X16} text={instruction.Text} bytes={IcedDecoder.FormatBytes(instruction.Bytes)}");
+				}
+			}
+
+			rip += (ulong)instruction.Length;
+		}
+	}
+
+	private static List<ulong> ParseDiagnosticAddresses(string? rawValue)
+	{
+		var result = new List<ulong>();
+		if (string.IsNullOrWhiteSpace(rawValue))
+		{
+			return result;
+		}
+
+		foreach (var token in rawValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+		{
+			var normalized = token.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+				? token[2..]
+				: token;
+			if (!ulong.TryParse(normalized, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var address))
+			{
+				continue;
+			}
+
+			if (!result.Contains(address))
+			{
+				result.Add(address);
+			}
+		}
+
+		return result;
 	}
 
 	private void DumpUnresolvedSentinelWindow(string name, ulong baseAddress, int size)

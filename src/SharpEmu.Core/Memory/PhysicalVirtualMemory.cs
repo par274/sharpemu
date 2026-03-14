@@ -11,6 +11,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
 {
     private readonly object _gate = new();
     private readonly List<MemoryRegion> _regions = new();
+    private readonly Dictionary<ulong, ProgramHeaderFlags> _pageProtections = new();
     private bool _disposed;
     private const ulong PageSize = 0x1000;
     private const ulong LargeDataReserveThreshold = 0x4000_0000UL; // 1 GiB
@@ -24,6 +25,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
     private const uint PAGE_EXECUTE_READWRITE = 0x40;
     private const uint PAGE_EXECUTE = 0x10;
     private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
+    private const uint PAGE_NOACCESS = 0x01;
     private const uint PAGE_READWRITE = 0x04;
     private const uint PAGE_READONLY = 0x02;
 
@@ -124,7 +126,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
 
             Console.Error.WriteLine($"[VMEM] Could not allocate at 0x{desiredAddress:X16}, trying any address...");
             result = VirtualAlloc(null, (nuint)alignedSize, allocationType, protection);
-            
+
             if (result == null)
             {
                 if (!executable)
@@ -219,6 +221,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
                 VirtualFree((void*)region.VirtualAddress, 0, MEM_RELEASE);
             }
             _regions.Clear();
+            _pageProtections.Clear();
         }
     }
 
@@ -264,20 +267,35 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
                 NativeMemory.Clear((void*)(virtualAddress + (ulong)fileData.Length), (nuint)zeroFillSize);
             }
 
-            SetProtection(mapStart, mapSize, protection);
+            ApplySegmentProtection(mapStart, mapEnd, protection);
 
             Console.Error.WriteLine($"[VMEM] Mapped segment: 0x{virtualAddress:X16} - 0x{virtualAddress + memorySize:X16} (file: {fileData.Length} bytes, prot: {protection})");
+        }
+    }
+
+    private void ApplySegmentProtection(ulong mapStart, ulong mapEnd, ProgramHeaderFlags flags)
+    {
+        for (var pageAddress = mapStart; pageAddress < mapEnd; pageAddress += PageSize)
+        {
+            _pageProtections.TryGetValue(pageAddress, out var existingFlags);
+            var mergedFlags = existingFlags | flags;
+            _pageProtections[pageAddress] = mergedFlags;
+            SetProtection(pageAddress, PageSize, mergedFlags);
         }
     }
 
     private void SetProtection(ulong address, ulong size, ProgramHeaderFlags flags)
     {
         uint protection;
-        
-        if ((flags & ProgramHeaderFlags.Execute) != 0)
+
+        if (flags == ProgramHeaderFlags.None)
         {
-            protection = (flags & ProgramHeaderFlags.Write) != 0 
-                ? PAGE_EXECUTE_READWRITE 
+            protection = PAGE_NOACCESS;
+        }
+        else if ((flags & ProgramHeaderFlags.Execute) != 0)
+        {
+            protection = (flags & ProgramHeaderFlags.Write) != 0
+                ? PAGE_EXECUTE_READWRITE
                 : PAGE_EXECUTE_READ;
         }
         else if ((flags & ProgramHeaderFlags.Write) != 0)
@@ -309,10 +327,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
             {
                 var r = _regions[i];
                 snapshot[i] = new VirtualMemoryRegion(
-                    r.VirtualAddress, 
-                    r.Size, 
-                    0, 
-                    r.Size, 
+                    r.VirtualAddress,
+                    r.Size,
+                    0,
+                    r.Size,
                     r.IsExecutable ? ProgramHeaderFlags.Execute | ProgramHeaderFlags.Read : ProgramHeaderFlags.Read);
             }
             return snapshot;
@@ -328,10 +346,28 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
                 if (TryResolveRegionOffset(virtualAddress, (ulong)destination.Length, region, out var offset))
                 {
                     var srcPtr = (void*)(region.VirtualAddress + offset);
-                    fixed (byte* destPtr = destination)
+                    if (destination.IsEmpty)
                     {
-                        Buffer.MemoryCopy(srcPtr, destPtr, (nuint)destination.Length, (nuint)destination.Length);
+                        return true;
                     }
+
+                    if (!TryTemporarilyProtectForRead((ulong)srcPtr, (ulong)destination.Length, region, out var touchedPages))
+                    {
+                        return false;
+                    }
+
+                    try
+                    {
+                        fixed (byte* destPtr = destination)
+                        {
+                            Buffer.MemoryCopy(srcPtr, destPtr, (nuint)destination.Length, (nuint)destination.Length);
+                        }
+                    }
+                    finally
+                    {
+                        RestorePageProtections(touchedPages);
+                    }
+
                     return true;
                 }
             }
@@ -394,7 +430,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
         {
             foreach (var region in _regions)
             {
-                if (virtualAddress >= region.VirtualAddress && 
+                if (virtualAddress >= region.VirtualAddress &&
                     virtualAddress < region.VirtualAddress + region.Size)
                 {
                     return (void*)virtualAddress;
@@ -456,6 +492,41 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IDisposable
     private static bool IsExecutableProtection(uint protection)
     {
         return protection is PAGE_EXECUTE or PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY;
+    }
+
+    private bool TryTemporarilyProtectForRead(
+        ulong address,
+        ulong size,
+        MemoryRegion region,
+        out List<(ulong Address, uint Protection)> touchedPages)
+    {
+        touchedPages = new List<(ulong Address, uint Protection)>();
+
+        var startPage = AlignDown(address, PageSize);
+        var endPage = AlignUp(address + size, PageSize);
+        var temporaryProtection = region.IsExecutable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
+
+        for (var pageAddress = startPage; pageAddress < endPage; pageAddress += PageSize)
+        {
+            if (!VirtualProtect((void*)pageAddress, (nuint)PageSize, temporaryProtection, out var oldProtection))
+            {
+                RestorePageProtections(touchedPages);
+                touchedPages.Clear();
+                return false;
+            }
+
+            touchedPages.Add((pageAddress, oldProtection));
+        }
+
+        return true;
+    }
+
+    private static void RestorePageProtections(List<(ulong Address, uint Protection)> touchedPages)
+    {
+        foreach (var (pageAddress, protection) in touchedPages)
+        {
+            VirtualProtect((void*)pageAddress, (nuint)PageSize, protection, out _);
+        }
     }
 
     private static ulong AlignDown(ulong value, ulong alignment)

@@ -17,6 +17,9 @@ public sealed class SelfImage
         IReadOnlyDictionary<ulong, string>? importStubs = null,
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
         IReadOnlyList<ImportedSymbolRelocation>? importedRelocations = null,
+        IReadOnlyList<ulong>? preInitializerFunctions = null,
+        IReadOnlyList<ulong>? initializerFunctions = null,
+        ulong initFunctionEntryPoint = 0,
         ulong imageBase = 0,
         ulong procParamAddress = 0)
     {
@@ -30,6 +33,9 @@ public sealed class SelfImage
         ImportStubs = importStubs ?? new Dictionary<ulong, string>();
         RuntimeSymbols = runtimeSymbols ?? new Dictionary<string, ulong>(StringComparer.Ordinal);
         ImportedRelocations = importedRelocations ?? Array.Empty<ImportedSymbolRelocation>();
+        PreInitializerFunctions = preInitializerFunctions ?? Array.Empty<ulong>();
+        InitializerFunctions = initializerFunctions ?? Array.Empty<ulong>();
+        InitFunctionEntryPoint = initFunctionEntryPoint;
         _imageBase = imageBase;
         ProcParamAddress = procParamAddress;
     }
@@ -47,6 +53,12 @@ public sealed class SelfImage
     public IReadOnlyDictionary<string, ulong> RuntimeSymbols { get; }
 
     public IReadOnlyList<ImportedSymbolRelocation> ImportedRelocations { get; }
+
+    public IReadOnlyList<ulong> PreInitializerFunctions { get; }
+
+    public IReadOnlyList<ulong> InitializerFunctions { get; }
+
+    public ulong InitFunctionEntryPoint { get; }
 
     public ulong EntryPoint => ElfHeader.EntryPoint + _imageBase;
 

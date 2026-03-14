@@ -89,6 +89,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const uint PAGE_EXECUTE_READ = 32u;
 
+	private const int TlsHandlerRegionSize = 4096;
+
 	private const ulong TlsModuleAllocStart = 140726751354880uL;
 
 	private const ulong TlsModuleAllocStride = 65536uL;
@@ -100,6 +102,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private nint _tlsBaseAddress;
 
 	private bool _ownsTlsBaseAddress;
+
+	private int _tlsPatchStubOffset;
 
 	private nint _unresolvedReturnStub;
 
@@ -176,6 +180,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private ulong _entryReturnSentinelRip;
 
 	private readonly ulong[] _importLoopSignatures = new ulong[192];
+
+	private readonly ulong[] _importLoopNidHashes = new ulong[192];
+
+	private readonly ulong[] _importLoopReturnRips = new ulong[192];
 
 	private int _importLoopSignatureCount;
 
@@ -509,6 +517,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		Console.Error.WriteLine($"[LOADER][DEBUG] TryResolveDirectImportTarget: {nid} not in HLE table, checking runtime symbols...");
 
+		if (TryResolveRuntimeSymbolAddress(nid, out var directValue) && IsDirectImportTargetUsable(directValue))
+		{
+			targetAddress = directValue;
+			resolvedSymbol = nid;
+			Console.Error.WriteLine($"[LOADER][DEBUG] TryResolveDirectImportTarget: {nid} -> runtime symbol 0x{targetAddress:X16}");
+			return true;
+		}
+
 		if (Aerolib.Instance.TryGetByNid(nid, out var symbolByNid))
 		{
 			if (!PreferLleForLibcExport(symbolByNid.ExportName))
@@ -587,9 +603,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			"_init_env" or
 			"atexit" or
-			"__cxa_guard_acquire" or
-			"__cxa_guard_release" or
-			"__cxa_guard_abort" or
 			"strlen" or
 			"strnlen" or
 			"strcmp" or
@@ -841,10 +854,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe void CreateTlsHandler()
 	{
-		_tlsHandlerAddress = (nint)TryAllocateNearEntry(256u);
+		_tlsHandlerAddress = (nint)TryAllocateNearEntry(TlsHandlerRegionSize);
 		if (_tlsHandlerAddress == 0)
 		{
-			_tlsHandlerAddress = (nint)VirtualAlloc(null, 256u, 12288u, 64u);
+			_tlsHandlerAddress = (nint)VirtualAlloc(null, TlsHandlerRegionSize, 12288u, 64u);
 		}
 		if (_tlsHandlerAddress == 0)
 		{
@@ -857,9 +870,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		*(long*)(tlsHandlerAddress + num) = _tlsBaseAddress;
 		num += 8;
 		tlsHandlerAddress[num++] = 195;
+		_tlsPatchStubOffset = (num + 15) & ~15;
 		uint num2 = default(uint);
-		VirtualProtect((void*)_tlsHandlerAddress, 256u, 32u, &num2);
-		FlushInstructionCache(GetCurrentProcess(), (void*)_tlsHandlerAddress, 256u);
+		VirtualProtect((void*)_tlsHandlerAddress, TlsHandlerRegionSize, 32u, &num2);
+		FlushInstructionCache(GetCurrentProcess(), (void*)_tlsHandlerAddress, TlsHandlerRegionSize);
 		Console.Error.WriteLine($"[LOADER][INFO] TLS handler at 0x{_tlsHandlerAddress:X16}");
 	}
 
@@ -939,6 +953,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong num2 = num + MaxScanBytes;
 		int num3 = 0;
 		int num4 = 0;
+		int num9 = 0;
 		while (num < num2)
 		{
 			if (VirtualQuery((void*)num, out var lpBuffer, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 || lpBuffer.RegionSize == 0)
@@ -967,6 +982,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						num3++;
 						PatchTlsInstruction(address);
 					}
+					else if (TryPatchTlsImmediateStoreInstruction(address, ptr + i))
+					{
+						num9++;
+					}
 					else if (TryPatchStackCanaryInstruction(address, ptr + i))
 					{
 						num4++;
@@ -975,7 +994,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			num = num6 > num ? num6 : num + 4096uL;
 		}
-		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS patterns, {num4} stack-canary accesses");
+		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses");
 	}
 
 	private unsafe bool IsPatternMatch(byte* ptr, byte[] pattern)
@@ -1087,6 +1106,115 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			VirtualProtect((void*)address, 9u, flNewProtect, &flNewProtect);
 			FlushInstructionCache(GetCurrentProcess(), (void*)address, 9u);
 		}
+	}
+
+	private unsafe bool TryPatchTlsImmediateStoreInstruction(nint address, byte* source)
+	{
+		if (source[0] != 100 || source[1] != 199 || source[2] != 4 || source[3] != 37)
+		{
+			return false;
+		}
+		int tlsOffset = *(int*)(source + 4);
+		int immediateValue = *(int*)(source + 8);
+		nint num = CreateTlsImmediateStoreHelper(tlsOffset, immediateValue);
+		if (num == 0)
+		{
+			return false;
+		}
+		return PatchCallSite(address, 12, num);
+	}
+
+	private unsafe nint CreateTlsImmediateStoreHelper(int tlsOffset, int immediateValue)
+	{
+		nint num = AllocateTlsPatchStub(32);
+		if (num == 0)
+		{
+			return 0;
+		}
+		byte* ptr = (byte*)num;
+		int num2 = 0;
+		ptr[num2++] = 80;
+		ptr[num2++] = 232;
+		long num3 = _tlsHandlerAddress - (num + num2 + 4);
+		if (num3 < int.MinValue || num3 > int.MaxValue)
+		{
+			Console.Error.WriteLine($"[LOADER][WARNING] TLS store helper out of rel32 range at 0x{num:X16}");
+			return 0;
+		}
+		*(int*)(ptr + num2) = (int)num3;
+		num2 += 4;
+		ptr[num2++] = 199;
+		ptr[num2++] = 128;
+		*(int*)(ptr + num2) = tlsOffset;
+		num2 += 4;
+		*(int*)(ptr + num2) = immediateValue;
+		num2 += 4;
+		ptr[num2++] = 88;
+		ptr[num2++] = 195;
+		while (num2 < 32)
+		{
+			ptr[num2++] = 144;
+		}
+		uint flNewProtect = default(uint);
+		VirtualProtect((void*)num, 32u, 32u, &flNewProtect);
+		FlushInstructionCache(GetCurrentProcess(), (void*)num, 32u);
+		return num;
+	}
+
+	private unsafe nint AllocateTlsPatchStub(int size)
+	{
+		if (_tlsHandlerAddress == 0 || size <= 0)
+		{
+			return 0;
+		}
+		int num = (size + 15) & -16;
+		if (_tlsPatchStubOffset + num > TlsHandlerRegionSize)
+		{
+			Console.Error.WriteLine("[LOADER][WARNING] TLS patch stub region exhausted.");
+			return 0;
+		}
+		nint result = _tlsHandlerAddress + _tlsPatchStubOffset;
+		_tlsPatchStubOffset += num;
+		uint flNewProtect = default(uint);
+		if (!VirtualProtect((void*)result, (nuint)num, 64u, &flNewProtect))
+		{
+			return 0;
+		}
+		return result;
+	}
+
+	private unsafe bool PatchCallSite(nint address, int instructionLength, nint target)
+	{
+		if (instructionLength < 5)
+		{
+			return false;
+		}
+		uint flNewProtect = default(uint);
+		if (!VirtualProtect((void*)address, (nuint)instructionLength, 64u, &flNewProtect))
+		{
+			return false;
+		}
+		try
+		{
+			long num = target - (address + 5);
+			if (num < int.MinValue || num > int.MaxValue)
+			{
+				Console.Error.WriteLine($"[LOADER][WARNING] TLS patch out of rel32 range at 0x{address:X16}");
+				return false;
+			}
+			*(byte*)address = 232;
+			*(int*)(address + 1) = (int)num;
+			for (int i = 5; i < instructionLength; i++)
+			{
+				*(byte*)(address + i) = 144;
+			}
+		}
+		finally
+		{
+			VirtualProtect((void*)address, (nuint)instructionLength, flNewProtect, &flNewProtect);
+			FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)instructionLength);
+		}
+		return true;
 	}
 
 	private unsafe void TryPreReservePrtAperture(ulong baseAddress, ulong size)

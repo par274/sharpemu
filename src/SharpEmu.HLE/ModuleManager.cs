@@ -94,19 +94,27 @@ public sealed class ModuleManager : IModuleManager
 
     public OrbisGen2Result Dispatch(string nid, CpuContext context)
     {
+        TryDispatch(nid, context, out var result);
+        return result;
+    }
+
+    public bool TryDispatch(string nid, CpuContext context, out OrbisGen2Result result)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(nid);
         ArgumentNullException.ThrowIfNull(context);
 
         if (!_dispatchTable.TryGetValue(nid, out var function) || !_exportTable.TryGetValue(nid, out var export))
         {
             context[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
-            return OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            result = OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            return false;
         }
 
         if ((export.Target & context.TargetGeneration) == 0)
         {
             context[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
-            return OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            result = OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            return false;
         }
 
         context.ClearRaxWriteFlag();
@@ -117,7 +125,8 @@ public sealed class ModuleManager : IModuleManager
             context[CpuRegister.Rax] = unchecked((ulong)ret);
         }
 
-        return (OrbisGen2Result)ret;
+        result = (OrbisGen2Result)ret;
+        return true;
     }
 
     private static Delegate CreateHandler(Type ownerType, MethodInfo method, IDictionary<Type, object> instances)

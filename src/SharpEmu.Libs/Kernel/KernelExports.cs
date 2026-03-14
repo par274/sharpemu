@@ -11,6 +11,9 @@ public static class KernelExports
     private static int _nextFileDescriptor = 2;
     private static readonly object _cxaGate = new();
     private static readonly List<CxaDestructorEntry> _cxaDestructors = new();
+    private static readonly object _coredumpGate = new();
+    private static ulong _coredumpHandler;
+    private static ulong _coredumpHandlerContext;
 
     private readonly record struct CxaDestructorEntry(
         ulong Function,
@@ -25,6 +28,23 @@ public static class KernelExports
     public static int KernelGetCompiledSdkVersion(CpuContext ctx)
     {
         _ = ctx;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "8zLSfEfW5AU",
+        ExportName = "sceCoredumpRegisterCoredumpHandler",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceCoredump")]
+    public static int CoredumpRegisterHandler(CpuContext ctx)
+    {
+        lock (_coredumpGate)
+        {
+            _coredumpHandler = ctx[CpuRegister.Rdi];
+            _coredumpHandlerContext = ctx[CpuRegister.Rsi];
+        }
+
+        ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

@@ -18,6 +18,7 @@ public static class KernelPthreadExtendedCompatExports
     private const int DefaultInheritSched = 0;
     private const int DefaultSchedPolicy = 0;
     private const int DefaultSchedPriority = 0;
+    private const ulong SyntheticRwlockHandleBase = 0x00006003_0000_0000;
 
     private static readonly object _stateGate = new();
     private static readonly Dictionary<ulong, ThreadState> _threadStates = new();
@@ -25,6 +26,7 @@ public static class KernelPthreadExtendedCompatExports
     private static readonly Dictionary<ulong, ReaderWriterLockSlim> _rwlockStates = new();
     private static readonly Dictionary<int, TlsKeyState> _tlsKeys = new();
     private static int _nextTlsKey = 1;
+    private static long _nextSyntheticRwlockHandleId = 1;
 
     [ThreadStatic]
     private static Dictionary<int, ulong>? _threadLocalSpecific;
@@ -591,19 +593,31 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var syntheticHandle = AllocateSyntheticHandle(SyntheticRwlockHandleBase, ref _nextSyntheticRwlockHandleId);
         lock (_stateGate)
         {
-            if (_rwlockStates.Remove(rwlockAddress, out var existing))
+            var resolvedAddress = ResolveRwlockHandle(ctx, rwlockAddress);
+            if (_rwlockStates.Remove(resolvedAddress, out var existing))
             {
                 existing.Dispose();
             }
 
-            _rwlockStates[rwlockAddress] = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
+            var rwlock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
+            _rwlockStates[rwlockAddress] = rwlock;
+            _rwlockStates[syntheticHandle] = rwlock;
         }
 
+        _ = ctx.TryWriteUInt64(rwlockAddress, syntheticHandle);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "ytQULN-nhL4",
+        ExportName = "pthread_rwlock_init",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockInit(CpuContext ctx) => PthreadRwlockInit(ctx);
 
     [SysAbiExport(
         Nid = "BB+kb08Tl9A",
@@ -618,10 +632,15 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var resolvedAddress = ResolveRwlockHandle(ctx, rwlockAddress);
         ReaderWriterLockSlim? state;
         lock (_stateGate)
         {
-            _rwlockStates.Remove(rwlockAddress, out state);
+            _rwlockStates.Remove(resolvedAddress, out state);
+            if (resolvedAddress != rwlockAddress)
+            {
+                _rwlockStates.Remove(rwlockAddress);
+            }
         }
 
         if (state is null)
@@ -629,24 +648,46 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        _ = ctx.TryWriteUInt64(rwlockAddress, 0);
         state.Dispose();
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
+        Nid = "1471ajPzxh0",
+        ExportName = "pthread_rwlock_destroy",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockDestroy(CpuContext ctx) => PthreadRwlockDestroy(ctx);
+
+    [SysAbiExport(
         Nid = "Ox9i0c7L5w0",
         ExportName = "scePthreadRwlockRdlock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PthreadRwlockRdlock(CpuContext ctx) => PthreadRwlockLockCore(ctx[CpuRegister.Rdi], write: false);
+    public static int PthreadRwlockRdlock(CpuContext ctx) => PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: false);
+
+    [SysAbiExport(
+        Nid = "iGjsr1WAtI0",
+        ExportName = "pthread_rwlock_rdlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockRdlock(CpuContext ctx) => PthreadRwlockRdlock(ctx);
 
     [SysAbiExport(
         Nid = "mqdNorrB+gI",
         ExportName = "scePthreadRwlockWrlock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PthreadRwlockWrlock(CpuContext ctx) => PthreadRwlockLockCore(ctx[CpuRegister.Rdi], write: true);
+    public static int PthreadRwlockWrlock(CpuContext ctx) => PthreadRwlockLockCore(ctx, ctx[CpuRegister.Rdi], write: true);
+
+    [SysAbiExport(
+        Nid = "sIlRvQqsN2Y",
+        ExportName = "pthread_rwlock_wrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockWrlock(CpuContext ctx) => PthreadRwlockWrlock(ctx);
 
     [SysAbiExport(
         Nid = "+L98PIbGttk",
@@ -661,13 +702,7 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        ReaderWriterLockSlim? rwlock;
-        lock (_stateGate)
-        {
-            _rwlockStates.TryGetValue(rwlockAddress, out rwlock);
-        }
-
-        if (rwlock is null)
+        if (!TryResolveRwlockState(ctx, rwlockAddress, createIfZero: true, out _, out var rwlock))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
@@ -694,6 +729,13 @@ public static class KernelPthreadExtendedCompatExports
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "EgmLo6EWgso",
+        ExportName = "pthread_rwlock_unlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadRwlockUnlock(CpuContext ctx) => PthreadRwlockUnlock(ctx);
 
     [SysAbiExport(
         Nid = "mqULNdimTn0",
@@ -731,6 +773,13 @@ public static class KernelPthreadExtendedCompatExports
     }
 
     [SysAbiExport(
+        Nid = "geDaqgH9lTg",
+        ExportName = "scePthreadKeyCreate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int OrbisPthreadKeyCreate(CpuContext ctx) => PosixPthreadKeyCreate(ctx);
+
+    [SysAbiExport(
         Nid = "6BpEZuDT7YI",
         ExportName = "pthread_key_delete",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -750,6 +799,13 @@ public static class KernelPthreadExtendedCompatExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "PrdHuuDekhY",
+        ExportName = "scePthreadKeyDelete",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int OrbisPthreadKeyDelete(CpuContext ctx) => PosixPthreadKeyDelete(ctx);
 
     [SysAbiExport(
         Nid = "WrOLvHU0yQM",
@@ -775,6 +831,13 @@ public static class KernelPthreadExtendedCompatExports
     }
 
     [SysAbiExport(
+        Nid = "+BzXYkqYeLE",
+        ExportName = "scePthreadSetspecific",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int OrbisPthreadSetspecific(CpuContext ctx) => PosixPthreadSetspecific(ctx);
+
+    [SysAbiExport(
         Nid = "0-KXaS70xy4",
         ExportName = "pthread_getspecific",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -798,21 +861,23 @@ public static class KernelPthreadExtendedCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static int PthreadRwlockLockCore(ulong rwlockAddress, bool write)
+    [SysAbiExport(
+        Nid = "eoht7mQOCmo",
+        ExportName = "scePthreadGetspecific",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int OrbisPthreadGetspecific(CpuContext ctx) => PosixPthreadGetspecific(ctx);
+
+    private static int PthreadRwlockLockCore(CpuContext ctx, ulong rwlockAddress, bool write)
     {
         if (rwlockAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        ReaderWriterLockSlim rwlock;
-        lock (_stateGate)
+        if (!TryResolveRwlockState(ctx, rwlockAddress, createIfZero: true, out _, out var rwlock))
         {
-            if (!_rwlockStates.TryGetValue(rwlockAddress, out rwlock!))
-            {
-                rwlock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
-                _rwlockStates[rwlockAddress] = rwlock;
-            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         try
@@ -832,6 +897,100 @@ public static class KernelPthreadExtendedCompatExports
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static ulong ResolveRwlockHandle(CpuContext ctx, ulong rwlockAddress)
+    {
+        if (rwlockAddress == 0)
+        {
+            return 0;
+        }
+
+        lock (_stateGate)
+        {
+            if (_rwlockStates.ContainsKey(rwlockAddress))
+            {
+                return rwlockAddress;
+            }
+        }
+
+        if (ctx.TryReadUInt64(rwlockAddress, out var pointedHandle) && pointedHandle != 0)
+        {
+            lock (_stateGate)
+            {
+                if (_rwlockStates.ContainsKey(pointedHandle))
+                {
+                    return pointedHandle;
+                }
+            }
+        }
+
+        return rwlockAddress;
+    }
+
+    private static bool TryResolveRwlockState(CpuContext ctx, ulong rwlockAddress, bool createIfZero, out ulong resolvedAddress, out ReaderWriterLockSlim? rwlock)
+    {
+        resolvedAddress = 0;
+        rwlock = null;
+        if (rwlockAddress == 0)
+        {
+            return false;
+        }
+
+        lock (_stateGate)
+        {
+            if (_rwlockStates.TryGetValue(rwlockAddress, out rwlock))
+            {
+                resolvedAddress = rwlockAddress;
+                return true;
+            }
+        }
+
+        if (!ctx.TryReadUInt64(rwlockAddress, out var pointedHandle))
+        {
+            return false;
+        }
+
+        if (pointedHandle != 0)
+        {
+            lock (_stateGate)
+            {
+                if (_rwlockStates.TryGetValue(pointedHandle, out rwlock))
+                {
+                    _rwlockStates[rwlockAddress] = rwlock;
+                    resolvedAddress = pointedHandle;
+                    return true;
+                }
+            }
+
+            resolvedAddress = pointedHandle;
+            return false;
+        }
+
+        if (!createIfZero)
+        {
+            resolvedAddress = rwlockAddress;
+            return false;
+        }
+
+        var createdRwlock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
+        var syntheticHandle = AllocateSyntheticHandle(SyntheticRwlockHandleBase, ref _nextSyntheticRwlockHandleId);
+        lock (_stateGate)
+        {
+            _rwlockStates[rwlockAddress] = createdRwlock;
+            _rwlockStates[syntheticHandle] = createdRwlock;
+        }
+
+        _ = ctx.TryWriteUInt64(rwlockAddress, syntheticHandle);
+        resolvedAddress = syntheticHandle;
+        rwlock = createdRwlock;
+        return true;
+    }
+
+    private static ulong AllocateSyntheticHandle(ulong baseAddress, ref long nextId)
+    {
+        var id = unchecked((ulong)Interlocked.Increment(ref nextId));
+        return baseAddress + (id << 4);
     }
 
     private static ThreadState GetOrCreateThreadStateLocked(ulong thread)

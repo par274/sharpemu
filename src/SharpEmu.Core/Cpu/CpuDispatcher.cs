@@ -12,6 +12,12 @@ namespace SharpEmu.Core.Cpu;
 
 public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
 {
+    private enum EntryFrameKind
+    {
+        ProcessEntry,
+        ModuleInitializer,
+    }
+
     private const ulong StackBaseAddress = 0x7FFF_F000_0000UL;
     private const ulong StackSize = 0x0020_0000UL;
     private const ulong TlsBaseAddress = 0x7FFE_0000_0000UL;
@@ -88,13 +94,44 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         }
     }
 
+    public OrbisGen2Result DispatchModuleInitializer(
+        ulong entryPoint,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string>? importStubs = null,
+        IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
+        string moduleName = "module",
+        CpuExecutionOptions executionOptions = default)
+    {
+        Console.Error.WriteLine("[DISPATCHER] === DispatchModuleInitializer START ===");
+        Console.Error.WriteLine($"[DISPATCHER] moduleInit=0x{entryPoint:X16}, generation={generation}, module={moduleName}");
+
+        try
+        {
+            return DispatchEntryCore(
+                entryPoint,
+                generation,
+                importStubs,
+                runtimeSymbols,
+                moduleName,
+                executionOptions,
+                EntryFrameKind.ModuleInitializer);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[DISPATCHER] FATAL EXCEPTION in DispatchModuleInitializer: {ex.GetType().Name}: {ex.Message}");
+            Console.Error.WriteLine($"[DISPATCHER] Stack trace: {ex.StackTrace}");
+            throw;
+        }
+    }
+
     private OrbisGen2Result DispatchEntryCore(
         ulong entryPoint,
         Generation generation,
         IReadOnlyDictionary<ulong, string>? importStubs = null,
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
         string processImageName = "eboot.bin",
-        CpuExecutionOptions executionOptions = default)
+        CpuExecutionOptions executionOptions = default,
+        EntryFrameKind frameKind = EntryFrameKind.ProcessEntry)
     {
         Console.Error.WriteLine("[DISPATCHER] DispatchEntryCore STARTING...");
 
@@ -164,23 +201,33 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         var effectiveImportStubs = importStubs is null
             ? new Dictionary<ulong, string>()
             : new Dictionary<ulong, string>(importStubs);
-        var programExitHandlerStubAddress = TryMapDynlibFallbackStubRegion();
-        if (programExitHandlerStubAddress == 0)
+        var entryParamsConfigured = false;
+        if (frameKind == EntryFrameKind.ProcessEntry)
         {
-            return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
-        if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress))
-        {
-            return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
-        if (ShouldInjectBootstrapPayload(entryPoint))
-        {
-            if (!TryInstallBootstrapPayload(context, effectiveImportStubs))
+            var programExitHandlerStubAddress = TryMapDynlibFallbackStubRegion();
+            if (programExitHandlerStubAddress == 0)
             {
                 return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
+
+            if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress))
+            {
+                return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            entryParamsConfigured = true;
+
+            if (ShouldInjectBootstrapPayload(entryPoint))
+            {
+                if (!TryInstallBootstrapPayload(context, effectiveImportStubs))
+                {
+                    return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+            }
+        }
+        else if (!InitializeModuleInitializerFrame(context))
+        {
+            return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         var entryFrameDiagnostic = BuildEntryFrameDiagnostic(
@@ -188,7 +235,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             context,
             sentinelEnabled: true,
             sentinelValue: returnToHostStubAddress,
-            entryParamsConfigured: true);
+            entryParamsConfigured: entryParamsConfigured);
 
         if (executionOptions.CpuEngine != CpuExecutionEngine.NativeOnly)
         {
@@ -353,6 +400,17 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
 
         context[CpuRegister.Rdi] = entryParamsAddress;
         context[CpuRegister.Rsi] = programExitHandlerAddress;
+        context[CpuRegister.Rdx] = 0;
+        context[CpuRegister.Rcx] = 0;
+        context[CpuRegister.R8] = 0;
+        context[CpuRegister.R9] = 0;
+        return true;
+    }
+
+    private static bool InitializeModuleInitializerFrame(CpuContext context)
+    {
+        context[CpuRegister.Rdi] = 0;
+        context[CpuRegister.Rsi] = 0;
         context[CpuRegister.Rdx] = 0;
         context[CpuRegister.Rcx] = 0;
         context[CpuRegister.R8] = 0;

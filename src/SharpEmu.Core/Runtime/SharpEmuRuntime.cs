@@ -19,6 +19,8 @@ namespace SharpEmu.Core.Runtime;
 
 public sealed class SharpEmuRuntime : ISharpEmuRuntime
 {
+    private readonly record struct LoadedModuleImage(string Path, SelfImage Image);
+
     private static readonly HashSet<string> PreloadSkipModules = new(StringComparer.OrdinalIgnoreCase)
     {
         "libkernel.prx",
@@ -138,12 +140,31 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         var generation = image.ElfHeader.AbiVersion == 2 ? Generation.Gen5 : Generation.Gen4;
         var activeImportStubs = new Dictionary<ulong, string>(image.ImportStubs);
         var activeRuntimeSymbols = new Dictionary<string, ulong>(image.RuntimeSymbols, StringComparer.Ordinal);
-        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
-        RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
         var processImageName = Path.GetFileName(ebootPath);
         if (string.IsNullOrWhiteSpace(processImageName))
         {
             processImageName = "eboot.bin";
+        }
+
+        HleDataSymbols.ConfigureProcessImageName(processImageName);
+        MergeKnownHleDataSymbols(activeRuntimeSymbols);
+        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, activeImportStubs, activeRuntimeSymbols);
+        RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
+        var initializerResult = RunAllInitializers(
+            image,
+            loadedModuleImages,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols,
+            processImageName);
+        if (initializerResult is { } failedInitializerResult)
+        {
+            Console.Error.WriteLine($"[RUNTIME] Initializer dispatch failed: {failedInitializerResult}");
+            LastExecutionTrace = _cpuDispatcher.LastImportResolutionTrace;
+            LastMilestoneLog = _cpuDispatcher.LastMilestoneLog;
+            LastSessionSummary = BuildSessionSummary(_cpuDispatcher.LastSessionSummary);
+            LastBasicBlockTrace = _cpuDispatcher.LastBasicBlockTrace;
+            return failedInitializerResult;
         }
 
         Console.Error.WriteLine($"[RUNTIME] Dispatching, gen: {generation}");
@@ -329,12 +350,150 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         return result;
     }
 
-    private List<SelfImage> LoadAdjacentSceModules(
+    private OrbisGen2Result? RunAllInitializers(
+        SelfImage mainImage,
+        IReadOnlyList<LoadedModuleImage> loadedModuleImages,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
+        string processImageName)
+    {
+        var moduleStartResult = RunPreloadedModuleInitializers(
+            loadedModuleImages,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols);
+        if (moduleStartResult is not null)
+        {
+            return moduleStartResult;
+        }
+
+        // On current PS5 dumps DT_INIT commonly resolves to imageBase+0x10, which is inside
+        // the mapped ELF header rather than a callable guest routine. Startup must remain
+        // guest-driven until the PS5 init/module ABI is identified precisely.
+        return null;
+    }
+
+    private OrbisGen2Result? RunPreloadedModuleInitializers(
+        IReadOnlyList<LoadedModuleImage> loadedModuleImages,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols)
+    {
+        for (var i = 0; i < loadedModuleImages.Count; i++)
+        {
+            var loadedModule = loadedModuleImages[i];
+            var initEntryPoint = loadedModule.Image.InitFunctionEntryPoint;
+            if (initEntryPoint < 0x10000)
+            {
+                continue;
+            }
+
+            var moduleName = Path.GetFileName(loadedModule.Path);
+            if (string.IsNullOrWhiteSpace(moduleName))
+            {
+                moduleName = $"module#{i}";
+            }
+
+            Console.Error.WriteLine(
+                $"[RUNTIME] Starting module {moduleName}: dt_init=0x{initEntryPoint:X16}");
+
+            var result = _cpuDispatcher.DispatchModuleInitializer(
+                initEntryPoint,
+                generation,
+                activeImportStubs,
+                activeRuntimeSymbols,
+                moduleName,
+                _cpuExecutionOptions);
+            if (result != OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Module start failed: {moduleName} -> {result}");
+                return result;
+            }
+        }
+
+        return null;
+    }
+
+    private OrbisGen2Result? RunImageInitializers(
+        string label,
+        SelfImage image,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
+        string processImageName)
+    {
+        if (image.PreInitializerFunctions.Count == 0 && image.InitializerFunctions.Count == 0)
+        {
+            return null;
+        }
+
+        Console.Error.WriteLine(
+            $"[RUNTIME] Running initializers for {label}: preinit={image.PreInitializerFunctions.Count}, init={image.InitializerFunctions.Count}");
+
+        var result = RunInitializerList(
+            $"{label}:preinit",
+            image.PreInitializerFunctions,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols,
+            processImageName);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        return RunInitializerList(
+            $"{label}:init",
+            image.InitializerFunctions,
+            generation,
+            activeImportStubs,
+            activeRuntimeSymbols,
+            processImageName);
+    }
+
+    private OrbisGen2Result? RunInitializerList(
+        string label,
+        IReadOnlyList<ulong> initializerFunctions,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string> activeImportStubs,
+        IReadOnlyDictionary<string, ulong> activeRuntimeSymbols,
+        string processImageName)
+    {
+        for (var i = 0; i < initializerFunctions.Count; i++)
+        {
+            var initializerAddress = initializerFunctions[i];
+            if (initializerAddress < 0x10000)
+            {
+                continue;
+            }
+
+            Console.Error.WriteLine(
+                $"[RUNTIME]   Initializer {label}[{i}] -> 0x{initializerAddress:X16}");
+
+            var result = _cpuDispatcher.DispatchEntry(
+                initializerAddress,
+                generation,
+                activeImportStubs,
+                activeRuntimeSymbols,
+                processImageName,
+                _cpuExecutionOptions);
+            if (result != OrbisGen2Result.ORBIS_GEN2_OK)
+            {
+                return result;
+            }
+        }
+
+        return null;
+    }
+
+    private List<LoadedModuleImage> LoadAdjacentSceModules(
         string ebootPath,
         IDictionary<ulong, string> importStubs,
         IDictionary<string, ulong> runtimeSymbols)
     {
-        var loadedImages = new List<SelfImage>();
+        var loadedImages = new List<LoadedModuleImage>();
         var ebootDirectory = Path.GetDirectoryName(ebootPath);
         if (string.IsNullOrWhiteSpace(ebootDirectory))
         {
@@ -418,7 +577,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 mergedImportCount += MergeImportStubs(importStubs, moduleImage.ImportStubs, modulePath);
                 mergedSymbolCount += MergeRuntimeSymbols(runtimeSymbols, moduleImage.RuntimeSymbols);
                 RegisterLoadedModule(modulePath, moduleImage, isMain: false, isSystemModule: false);
-                loadedImages.Add(moduleImage);
+                loadedImages.Add(new LoadedModuleImage(modulePath, moduleImage));
                 loadedModules++;
 
                 Console.Error.WriteLine(
@@ -438,7 +597,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
     private void RebindImportedDataSymbols(
         SelfImage mainImage,
-        IReadOnlyList<SelfImage> loadedModuleImages,
+        IReadOnlyList<LoadedModuleImage> loadedModuleImages,
         IReadOnlyDictionary<string, ulong> runtimeSymbols)
     {
         var rebound = 0;
@@ -447,7 +606,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         rebound += RebindImportedDataSymbols(mainImage, runtimeSymbols, ref unresolved);
         for (var i = 0; i < loadedModuleImages.Count; i++)
         {
-            rebound += RebindImportedDataSymbols(loadedModuleImages[i], runtimeSymbols, ref unresolved);
+            rebound += RebindImportedDataSymbols(loadedModuleImages[i].Image, runtimeSymbols, ref unresolved);
         }
 
         if (rebound != 0 || unresolved != 0)
@@ -468,6 +627,10 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         var rebound = 0;
+        var logRebind = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_DATA_REBIND"),
+            "1",
+            StringComparison.Ordinal);
         for (var i = 0; i < image.ImportedRelocations.Count; i++)
         {
             var relocation = image.ImportedRelocations[i];
@@ -479,6 +642,12 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             if (!runtimeSymbols.TryGetValue(relocation.Nid, out var symbolAddress) ||
                 !IsUsableRuntimeSymbolAddress(symbolAddress))
             {
+                if (logRebind)
+                {
+                    Console.Error.WriteLine(
+                        $"[RUNTIME] Imported data unresolved: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} addend=0x{unchecked((ulong)relocation.Addend):X16}");
+                }
+
                 unresolved++;
                 continue;
             }
@@ -486,14 +655,41 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             var reboundValue = AddSigned(symbolAddress, relocation.Addend);
             if (!TryWriteUInt64(_virtualMemory, relocation.TargetAddress, reboundValue))
             {
+                if (logRebind)
+                {
+                    Console.Error.WriteLine(
+                        $"[RUNTIME] Imported data write-failed: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
+                }
+
                 unresolved++;
                 continue;
+            }
+
+            if (logRebind)
+            {
+                Console.Error.WriteLine(
+                    $"[RUNTIME] Imported data rebound: nid={relocation.Nid} target=0x{relocation.TargetAddress:X16} value=0x{reboundValue:X16}");
             }
 
             rebound++;
         }
 
         return rebound;
+    }
+
+    private static void MergeKnownHleDataSymbols(IDictionary<string, ulong> runtimeSymbols)
+    {
+        foreach (var nid in HleDataSymbols.EnumerateKnownNids())
+        {
+            if (runtimeSymbols.ContainsKey(nid) ||
+                !HleDataSymbols.TryGetAddress(nid, out var symbolAddress) ||
+                !IsUsableRuntimeSymbolAddress(symbolAddress))
+            {
+                continue;
+            }
+
+            runtimeSymbols[nid] = symbolAddress;
+        }
     }
 
     private static int MergeImportStubs(

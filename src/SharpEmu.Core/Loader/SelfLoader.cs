@@ -38,8 +38,13 @@ public sealed class SelfLoader : ISelfLoader
     private const long DtSymTab = 0x06;
     private const long DtRela = 0x07;
     private const long DtRelaSize = 0x08;
+    private const long DtInit = 0x0C;
     private const long DtStrSize = 0x0A;
     private const long DtJmpRel = 0x17;
+    private const long DtInitArray = 0x19;
+    private const long DtInitArraySize = 0x1B;
+    private const long DtPreInitArray = 0x20;
+    private const long DtPreInitArraySize = 0x21;
     private const long DtSceJmpRel = 0x61000029;
     private const long DtScePltRelSize = 0x6100002D;
     private const long DtSceRela = 0x6100002F;
@@ -61,8 +66,8 @@ public sealed class SelfLoader : ISelfLoader
     private const ulong Ps4ModuleSearchStart = 0x0000000002000000UL;
     private const ulong Ps4ModuleSearchEnd = 0x0000000040000000UL;
     private const ulong ModulePlacementStep = 0x00200000UL;
-    private const ulong FocusRelocGuestStart = 0x00000008030FC300UL;
-    private const ulong FocusRelocGuestEnd = 0x00000008030FC3F0UL;
+    private const ulong FocusRelocGuestStart = 0x0000000807BA25B0UL;
+    private const ulong FocusRelocGuestEnd = 0x0000000807BA2608UL;
     private const byte SymbolBindLocal = 0;
     private const byte SymbolBindGlobal = 1;
     private const byte SymbolBindWeak = 2;
@@ -74,6 +79,7 @@ public sealed class SelfLoader : ISelfLoader
     private static readonly IReadOnlyDictionary<ulong, string> EmptyImportStubs = new Dictionary<ulong, string>();
     private static readonly IReadOnlyDictionary<string, ulong> EmptyRuntimeSymbols =
         new Dictionary<string, ulong>(StringComparer.Ordinal);
+    private static readonly IReadOnlyList<ulong> EmptyInitializerFunctions = Array.Empty<ulong>();
     private static readonly int SelfHeaderSize = Unsafe.SizeOf<SelfHeader>();
     private static readonly int SelfSegmentSize = Unsafe.SizeOf<SelfSegment>();
     private static readonly int ProgramHeaderSize = Unsafe.SizeOf<ProgramHeader>();
@@ -218,6 +224,15 @@ public sealed class SelfLoader : ISelfLoader
         var finalizedRuntimeSymbols = runtimeSymbols.Count == 0
             ? EmptyRuntimeSymbols
             : runtimeSymbols;
+        CollectInitializerFunctions(
+            imageData,
+            loadContext,
+            programHeaders,
+            virtualMemory,
+            imageBase,
+            out var initFunctionEntryPoint,
+            out var preInitializerFunctions,
+            out var initializerFunctions);
         var procParamAddress = ResolveProcParamAddress(programHeaders, imageBase);
 
         Console.WriteLine($"[LOADER] ELF e_entry: 0x{elfHeader.EntryPoint:X16}");
@@ -251,6 +266,9 @@ public sealed class SelfLoader : ISelfLoader
             finalizedImportStubs,
             finalizedRuntimeSymbols,
             importedRelocations,
+            preInitializerFunctions,
+            initializerFunctions,
+            initFunctionEntryPoint,
             imageBase,
             procParamAddress);
     }
@@ -929,6 +947,131 @@ public sealed class SelfLoader : ISelfLoader
         }
     }
 
+    private static void CollectInitializerFunctions(
+        ReadOnlySpan<byte> imageData,
+        LoadContext loadContext,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        IVirtualMemory virtualMemory,
+        ulong imageBase,
+        out ulong initFunctionEntryPoint,
+        out IReadOnlyList<ulong> preInitializerFunctions,
+        out IReadOnlyList<ulong> initializerFunctions)
+    {
+        initFunctionEntryPoint = 0;
+        preInitializerFunctions = EmptyInitializerFunctions;
+        initializerFunctions = EmptyInitializerFunctions;
+
+        if (!TryGetProgramHeader(programHeaders, ProgramHeaderType.Dynamic, out var dynamicHeader, out var dynamicHeaderIndex) ||
+            dynamicHeader.FileSize == 0)
+        {
+            return;
+        }
+
+        if (!TryLoadDynamicTableBytes(
+                imageData,
+                loadContext,
+                virtualMemory,
+                imageBase,
+                dynamicHeader,
+                dynamicHeaderIndex,
+                out var dynamicTable))
+        {
+            return;
+        }
+
+        var dynamicInfo = ParseDynamicInfo(dynamicTable);
+        var preInitializers = new List<ulong>(4);
+        var initializers = new List<ulong>(8);
+        initFunctionEntryPoint = ResolveMappedAddressOrFallback(virtualMemory, dynamicInfo.InitOffset, imageBase);
+        if (initFunctionEntryPoint < 0x10000)
+        {
+            initFunctionEntryPoint = 0;
+        }
+
+        AppendInitializerArrayEntries(
+            preInitializers,
+            imageData,
+            virtualMemory,
+            imageBase,
+            dynamicInfo.PreInitArrayOffset,
+            dynamicInfo.PreInitArraySize);
+
+        AppendResolvedInitializer(initializers, dynamicInfo.InitOffset, virtualMemory, imageBase);
+        AppendInitializerArrayEntries(
+            initializers,
+            imageData,
+            virtualMemory,
+            imageBase,
+            dynamicInfo.InitArrayOffset,
+            dynamicInfo.InitArraySize);
+
+        if (preInitializers.Count != 0)
+        {
+            preInitializerFunctions = preInitializers;
+        }
+
+        if (initializers.Count != 0)
+        {
+            initializerFunctions = initializers;
+        }
+
+        if (preInitializers.Count != 0 || initializers.Count != 0)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER] Initializers discovered: preinit={preInitializers.Count}, init={initializers.Count}");
+        }
+    }
+
+    private static void AppendInitializerArrayEntries(
+        ICollection<ulong> destination,
+        ReadOnlySpan<byte> imageData,
+        IVirtualMemory virtualMemory,
+        ulong imageBase,
+        ulong arrayOffset,
+        ulong arraySize)
+    {
+        if (arrayOffset == 0 || arraySize < sizeof(ulong))
+        {
+            return;
+        }
+
+        if (!TryLoadTableBytes(imageData, virtualMemory, imageBase, arrayOffset, arraySize, out var arrayBytes))
+        {
+            return;
+        }
+
+        var entryCount = arrayBytes.Length / sizeof(ulong);
+        for (var i = 0; i < entryCount; i++)
+        {
+            var entryOffset = i * sizeof(ulong);
+            var entryAddress = BinaryPrimitives.ReadUInt64LittleEndian(arrayBytes.AsSpan(entryOffset, sizeof(ulong)));
+            AppendResolvedInitializer(destination, entryAddress, virtualMemory, imageBase);
+        }
+    }
+
+    private static void AppendResolvedInitializer(
+        ICollection<ulong> destination,
+        ulong functionAddress,
+        IVirtualMemory virtualMemory,
+        ulong imageBase)
+    {
+        var resolvedAddress = ResolveMappedAddressOrFallback(virtualMemory, functionAddress, imageBase);
+        if (resolvedAddress < 0x10000)
+        {
+            return;
+        }
+
+        foreach (var existing in destination)
+        {
+            if (existing == resolvedAddress)
+            {
+                return;
+            }
+        }
+
+        destination.Add(resolvedAddress);
+    }
+
     private static IReadOnlyList<ImportedSymbolRelocation> BuildImportedRelocations(
         IReadOnlyList<RelocationDescriptor> descriptors)
     {
@@ -1371,11 +1514,16 @@ public sealed class SelfLoader : ISelfLoader
         ulong strTabSize = 0;
         ulong symTabOffset = 0;
         ulong symTabSize = 0;
+        ulong initOffset = 0;
         ulong relaOffset = 0;
         ulong relaSize = 0;
         ulong jmpRelOffset = 0;
         ulong jmpRelSize = 0;
         ulong pltGotOffset = 0;
+        ulong initArrayOffset = 0;
+        ulong initArraySize = 0;
+        ulong preInitArrayOffset = 0;
+        ulong preInitArraySize = 0;
 
         for (var offset = 0; offset + DynamicEntrySize <= dynamicTable.Length; offset += DynamicEntrySize)
         {
@@ -1423,10 +1571,45 @@ public sealed class SelfLoader : ISelfLoader
                     }
 
                     break;
+                case DtInit:
+                    if (initOffset == 0)
+                    {
+                        initOffset = value;
+                    }
+
+                    break;
                 case DtJmpRel:
                     if (jmpRelOffset == 0)
                     {
                         jmpRelOffset = value;
+                    }
+
+                    break;
+                case DtInitArray:
+                    if (initArrayOffset == 0)
+                    {
+                        initArrayOffset = value;
+                    }
+
+                    break;
+                case DtInitArraySize:
+                    if (initArraySize == 0)
+                    {
+                        initArraySize = value;
+                    }
+
+                    break;
+                case DtPreInitArray:
+                    if (preInitArrayOffset == 0)
+                    {
+                        preInitArrayOffset = value;
+                    }
+
+                    break;
+                case DtPreInitArraySize:
+                    if (preInitArraySize == 0)
+                    {
+                        preInitArraySize = value;
                     }
 
                     break;
@@ -1476,11 +1659,16 @@ public sealed class SelfLoader : ISelfLoader
             strTabSize,
             symTabOffset,
             symTabSize,
+            initOffset,
             relaOffset,
             relaSize,
             jmpRelOffset,
             jmpRelSize,
-            pltGotOffset);
+            pltGotOffset,
+            initArrayOffset,
+            initArraySize,
+            preInitArrayOffset,
+            preInitArraySize);
     }
 
     private static bool IsSupportedRelocationType(uint relocationType)
@@ -2087,11 +2275,16 @@ public sealed class SelfLoader : ISelfLoader
         ulong StrTabSize,
         ulong SymTabOffset,
         ulong SymTabSize,
+        ulong InitOffset,
         ulong RelaOffset,
         ulong RelaSize,
         ulong JmpRelOffset,
         ulong JmpRelSize,
-        ulong PltGotOffset)
+        ulong PltGotOffset,
+        ulong InitArrayOffset,
+        ulong InitArraySize,
+        ulong PreInitArrayOffset,
+        ulong PreInitArraySize)
     {
         public bool HasImportMetadata =>
             StrTabOffset != 0 &&

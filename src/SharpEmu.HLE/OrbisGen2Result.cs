@@ -46,6 +46,11 @@ public enum OrbisGen2Result : int
     ORBIS_GEN2_ERROR_BUSY = unchecked((int)0x80020010),
 
     /// <summary>
+    /// Indicates that the operation should be retried later.
+    /// </summary>
+    ORBIS_GEN2_ERROR_TRY_AGAIN = unchecked((int)0x80020023),
+
+    /// <summary>
     /// Indicates that behavior is recognized but not implemented yet.
     /// </summary>
     ORBIS_GEN2_ERROR_NOT_IMPLEMENTED = unchecked((int)0x8002FFFF),

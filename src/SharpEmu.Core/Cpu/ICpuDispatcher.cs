@@ -34,4 +34,12 @@ public interface ICpuDispatcher
         IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
         string processImageName = "eboot.bin",
         CpuExecutionOptions executionOptions = default);
+
+    OrbisGen2Result DispatchModuleInitializer(
+        ulong entryPoint,
+        Generation generation,
+        IReadOnlyDictionary<ulong, string>? importStubs = null,
+        IReadOnlyDictionary<string, ulong>? runtimeSymbols = null,
+        string moduleName = "module",
+        CpuExecutionOptions executionOptions = default);
 }

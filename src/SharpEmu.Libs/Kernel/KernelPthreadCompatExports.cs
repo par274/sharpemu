@@ -14,6 +14,7 @@ public static class KernelPthreadCompatExports
     private const int MutexTypeNormal = 4;
     private const ulong SyntheticMutexHandleBase = 0x00006000_0000_0000;
     private const ulong SyntheticMutexAttrHandleBase = 0x00006001_0000_0000;
+    private const ulong SyntheticCondHandleBase = 0x00006002_0000_0000;
 
     private static readonly object _stateGate = new();
     private static readonly Dictionary<ulong, PthreadMutexState> _mutexStates = new();
@@ -22,6 +23,7 @@ public static class KernelPthreadCompatExports
     private static readonly HashSet<ulong> _condAttrStates = new();
     private static long _nextSyntheticMutexHandleId = 1;
     private static long _nextSyntheticMutexAttrHandleId = 1;
+    private static long _nextSyntheticCondHandleId = 1;
 
     private sealed class PthreadMutexState
     {
@@ -228,14 +230,14 @@ public static class KernelPthreadCompatExports
         ExportName = "scePthreadCondInit",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PthreadCondInit(CpuContext ctx) => PthreadCondInitCore(ctx[CpuRegister.Rdi]);
+    public static int PthreadCondInit(CpuContext ctx) => PthreadCondInitCore(ctx, ctx[CpuRegister.Rdi]);
 
     [SysAbiExport(
         Nid = "g+PZd2hiacg",
         ExportName = "scePthreadCondDestroy",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PthreadCondDestroy(CpuContext ctx) => PthreadCondDestroyCore(ctx[CpuRegister.Rdi]);
+    public static int PthreadCondDestroy(CpuContext ctx) => PthreadCondDestroyCore(ctx, ctx[CpuRegister.Rdi]);
 
     [SysAbiExport(
         Nid = "WKAXJ4XBPQ4",
@@ -370,6 +372,7 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        _ = ctx.TryWriteUInt64(mutexAddress, 0);
         state.Semaphore.Dispose();
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -381,20 +384,10 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var resolvedAddress = ResolveMutexHandle(ctx, mutexAddress);
-        PthreadMutexState state;
-        lock (_stateGate)
+        if (!TryResolveMutexState(ctx, mutexAddress, createIfZero: true, out var resolvedAddress, out var state))
         {
-            if (!_mutexStates.TryGetValue(resolvedAddress, out state!))
-            {
-                state = new PthreadMutexState();
-                _mutexStates[resolvedAddress] = state;
-            }
-
-            if (resolvedAddress != mutexAddress)
-            {
-                _mutexStates[mutexAddress] = state;
-            }
+            TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, null, KernelPthreadState.GetCurrentThreadHandle(), (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
@@ -449,14 +442,7 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var resolvedAddress = ResolveMutexHandle(ctx, mutexAddress);
-        PthreadMutexState? state;
-        lock (_stateGate)
-        {
-            _mutexStates.TryGetValue(resolvedAddress, out state);
-        }
-
-        if (state is null)
+        if (!TryResolveMutexState(ctx, mutexAddress, createIfZero: true, out var resolvedAddress, out var state))
         {
             TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, null, KernelPthreadState.GetCurrentThreadHandle(), (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
@@ -620,6 +606,65 @@ public static class KernelPthreadCompatExports
         return mutexAddress;
     }
 
+    private static bool TryResolveMutexState(CpuContext ctx, ulong mutexAddress, bool createIfZero, out ulong resolvedAddress, out PthreadMutexState? state)
+    {
+        resolvedAddress = 0;
+        state = null;
+        if (mutexAddress == 0)
+        {
+            return false;
+        }
+
+        lock (_stateGate)
+        {
+            if (_mutexStates.TryGetValue(mutexAddress, out state))
+            {
+                resolvedAddress = mutexAddress;
+                return true;
+            }
+        }
+
+        if (!ctx.TryReadUInt64(mutexAddress, out var pointedHandle))
+        {
+            return false;
+        }
+
+        if (pointedHandle != 0)
+        {
+            lock (_stateGate)
+            {
+                if (_mutexStates.TryGetValue(pointedHandle, out state))
+                {
+                    _mutexStates[mutexAddress] = state;
+                    resolvedAddress = pointedHandle;
+                    return true;
+                }
+            }
+
+            resolvedAddress = pointedHandle;
+            return false;
+        }
+
+        if (!createIfZero)
+        {
+            resolvedAddress = mutexAddress;
+            return false;
+        }
+
+        var createdState = new PthreadMutexState();
+        var syntheticHandle = AllocateSyntheticHandle(SyntheticMutexHandleBase, ref _nextSyntheticMutexHandleId);
+        lock (_stateGate)
+        {
+            _mutexStates[mutexAddress] = createdState;
+            _mutexStates[syntheticHandle] = createdState;
+        }
+
+        _ = ctx.TryWriteUInt64(mutexAddress, syntheticHandle);
+        resolvedAddress = syntheticHandle;
+        state = createdState;
+        return true;
+    }
+
     private static ulong ResolveMutexAttrHandle(CpuContext ctx, ulong attrAddress)
     {
         if (attrAddress == 0)
@@ -665,39 +710,137 @@ public static class KernelPthreadCompatExports
         }
     }
 
+    private static ulong ResolveCondHandle(CpuContext ctx, ulong condAddress)
+    {
+        if (condAddress == 0)
+        {
+            return 0;
+        }
+
+        lock (_stateGate)
+        {
+            if (_condStates.ContainsKey(condAddress))
+            {
+                return condAddress;
+            }
+        }
+
+        if (ctx.TryReadUInt64(condAddress, out var pointedHandle) && pointedHandle != 0)
+        {
+            lock (_stateGate)
+            {
+                if (_condStates.ContainsKey(pointedHandle))
+                {
+                    return pointedHandle;
+                }
+            }
+        }
+
+        return condAddress;
+    }
+
+    private static bool TryResolveCondState(CpuContext? ctx, ulong condAddress, bool createIfZero, out ulong resolvedAddress, out PthreadCondState? state)
+    {
+        resolvedAddress = 0;
+        state = null;
+        if (condAddress == 0)
+        {
+            return false;
+        }
+
+        lock (_stateGate)
+        {
+            if (_condStates.TryGetValue(condAddress, out state))
+            {
+                resolvedAddress = condAddress;
+                return true;
+            }
+        }
+
+        if (ctx is null || !ctx.TryReadUInt64(condAddress, out var pointedHandle))
+        {
+            return false;
+        }
+
+        if (pointedHandle != 0)
+        {
+            lock (_stateGate)
+            {
+                if (_condStates.TryGetValue(pointedHandle, out state))
+                {
+                    _condStates[condAddress] = state;
+                    resolvedAddress = pointedHandle;
+                    return true;
+                }
+            }
+
+            resolvedAddress = pointedHandle;
+            return false;
+        }
+
+        if (!createIfZero)
+        {
+            resolvedAddress = condAddress;
+            return false;
+        }
+
+        var createdState = new PthreadCondState();
+        var syntheticHandle = AllocateSyntheticHandle(SyntheticCondHandleBase, ref _nextSyntheticCondHandleId);
+        lock (_stateGate)
+        {
+            _condStates[condAddress] = createdState;
+            _condStates[syntheticHandle] = createdState;
+        }
+
+        _ = ctx.TryWriteUInt64(condAddress, syntheticHandle);
+        resolvedAddress = syntheticHandle;
+        state = createdState;
+        return true;
+    }
+
     private static ulong AllocateSyntheticHandle(ulong baseAddress, ref long nextId)
     {
         var id = unchecked((ulong)Interlocked.Increment(ref nextId));
         return baseAddress + (id << 4);
     }
 
-    private static int PthreadCondInitCore(ulong condAddress)
+    private static int PthreadCondInitCore(CpuContext ctx, ulong condAddress)
     {
         if (condAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var syntheticHandle = AllocateSyntheticHandle(SyntheticCondHandleBase, ref _nextSyntheticCondHandleId);
         lock (_stateGate)
         {
-            _condStates[condAddress] = new PthreadCondState();
+            var state = new PthreadCondState();
+            _condStates[condAddress] = state;
+            _condStates[syntheticHandle] = state;
         }
 
+        _ = ctx.TryWriteUInt64(condAddress, syntheticHandle);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static int PthreadCondDestroyCore(ulong condAddress)
+    private static int PthreadCondDestroyCore(CpuContext ctx, ulong condAddress)
     {
         if (condAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var resolvedAddress = ResolveCondHandle(ctx, condAddress);
         lock (_stateGate)
         {
-            _condStates.Remove(condAddress);
+            _condStates.Remove(resolvedAddress);
+            if (resolvedAddress != condAddress)
+            {
+                _condStates.Remove(condAddress);
+            }
         }
 
+        _ = ctx.TryWriteUInt64(condAddress, 0);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -708,14 +851,9 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        PthreadCondState state;
-        lock (_stateGate)
+        if (!TryResolveCondState(ctx, condAddress, createIfZero: true, out _, out var state))
         {
-            if (!_condStates.TryGetValue(condAddress, out state!))
-            {
-                state = new PthreadCondState();
-                _condStates[condAddress] = state;
-            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         var waitResult = (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -770,14 +908,9 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        PthreadCondState state;
-        lock (_stateGate)
+        if (!TryResolveCondState(null, condAddress, createIfZero: false, out _, out var state))
         {
-            if (!_condStates.TryGetValue(condAddress, out state!))
-            {
-                state = new PthreadCondState();
-                _condStates[condAddress] = state;
-            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         lock (state.SyncRoot)

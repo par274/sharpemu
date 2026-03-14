@@ -39,7 +39,10 @@ public static class KernelRuntimeCompatExports
     private static readonly RdtscDelegate? _rdtscReader = CreateRdtscReader();
     private static readonly ulong _kernelTscFrequency = ResolveKernelTscFrequency();
     private static readonly ulong _stackChkGuardValue = 0xC0DEC0DECAFEBABEUL;
-    private static readonly nint _stackChkGuardObjectAddress = AllocateStackChkGuardObject();
+    private static readonly nint _stackChkGuardObjectAddress =
+        HleDataSymbols.TryGetAddress("f7uOxY9mM1U", out var stackChkGuardAddress)
+            ? unchecked((nint)stackChkGuardAddress)
+            : AllocateStackChkGuardObject();
     private static ulong _applicationHeapApiAddress;
     private static ulong _processProcParamAddress;
     private static ulong _nextReservedVirtualBase = 0x6000_0000_0UL;

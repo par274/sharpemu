@@ -10,6 +10,10 @@ namespace SharpEmu.Libs.CxxAbi;
 
 public static class CxaGuardExports
 {
+    private const ulong GuardCompleteValue = 0x0000_0000_0000_0001;
+    private const ulong GuardPendingValue = 0x0000_0000_0000_0100;
+    private const ulong GuardStateMask = 0x0000_0000_0000_FFFF;
+
     private sealed class GuardState
     {
         public int OwnerThreadId { get; set; }
@@ -36,13 +40,13 @@ public static class CxaGuardExports
         var spinner = new SpinWait();
         while (true)
         {
-            if (!TryReadGuardInitialized(ctx, guardPtr, out var initialized))
+            if (!TryReadGuardState(ctx, guardPtr, out _, out var initialized, out var inProgress))
             {
                 ctx[CpuRegister.Rax] = 0;
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            LogGuardState(ctx, "guard_acquire", guardPtr, initialized);
+            LogGuardState(ctx, "guard_acquire", guardPtr, initialized, inProgress);
 
             if (initialized)
             {
@@ -58,6 +62,13 @@ public static class CxaGuardExports
             };
             if (_inProgress.TryAdd(guardPtr, newState))
             {
+                if (!TryWriteGuardState(ctx, guardPtr, GuardPendingValue))
+                {
+                    _inProgress.TryRemove(guardPtr, out _);
+                    ctx[CpuRegister.Rax] = 0;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
                 ctx[CpuRegister.Rax] = 1;
                 LogGuardResult("guard_acquire", guardPtr, result: 1, initialized, inProgress: true, ownerThreadId: currentThreadId);
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -117,14 +128,14 @@ public static class CxaGuardExports
             }
         }
 
-        if (!TryWriteGuardInitialized(ctx, guardPtr, initialized: true))
+        if (!TryWriteGuardState(ctx, guardPtr, GuardCompleteValue))
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         _inProgress.TryRemove(guardPtr, out _);
-        LogGuardState(ctx, "guard_release", guardPtr, initialized: true);
+        LogGuardState(ctx, "guard_release", guardPtr, initialized: true, inProgress: false);
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -152,60 +163,50 @@ public static class CxaGuardExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        _ = TryWriteGuardInitialized(ctx, guardPtr, initialized: false);
+        _ = TryWriteGuardState(ctx, guardPtr, 0);
         _inProgress.TryRemove(guardPtr, out _);
-        LogGuardState(ctx, "guard_abort", guardPtr, initialized: false);
+        LogGuardState(ctx, "guard_abort", guardPtr, initialized: false, inProgress: false);
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static bool TryReadGuardInitialized(CpuContext ctx, ulong guardPtr, out bool initialized)
+    private static bool TryReadGuardState(CpuContext ctx, ulong guardPtr, out ulong word, out bool initialized, out bool inProgress)
     {
+        word = 0;
         initialized = false;
-
-        var aligned = guardPtr & ~7UL;
-        var shift = (int)((guardPtr & 7UL) * 8);
-
-        if (!ctx.TryReadUInt64(aligned, out var word))
+        inProgress = false;
+        if (!ctx.TryReadUInt64(guardPtr, out word))
         {
             return false;
         }
 
-        var b0 = (byte)((word >> shift) & 0xFF);
-        initialized = (b0 & 0x01) != 0;
+        initialized = (word & GuardCompleteValue) != 0;
+        inProgress = (word & 0x0000_0000_0000_FF00) != 0;
         return true;
     }
 
-    private static bool TryWriteGuardInitialized(CpuContext ctx, ulong guardPtr, bool initialized)
+    private static bool TryWriteGuardState(CpuContext ctx, ulong guardPtr, ulong stateValue)
     {
-        var aligned = guardPtr & ~7UL;
-        var shift = (int)((guardPtr & 7UL) * 8);
-        var mask = 0xFFUL << shift;
-
-        if (!ctx.TryReadUInt64(aligned, out var word))
+        if (!ctx.TryReadUInt64(guardPtr, out var word))
         {
             return false;
         }
 
-        var b0 = (byte)((word >> shift) & 0xFF);
-        b0 = initialized ? (byte)(b0 | 0x01) : (byte)(b0 & ~0x01);
-
-        var newWord = (word & ~mask) | ((ulong)b0 << shift);
-        return ctx.TryWriteUInt64(aligned, newWord);
+        var newWord = (word & ~GuardStateMask) | (stateValue & GuardStateMask);
+        return ctx.TryWriteUInt64(guardPtr, newWord);
     }
 
-    private static void LogGuardState(CpuContext ctx, string op, ulong guardPtr, bool initialized)
+    private static void LogGuardState(CpuContext ctx, string op, ulong guardPtr, bool initialized, bool inProgress)
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUARDS"), "1", StringComparison.Ordinal))
         {
             return;
         }
 
-        var aligned = guardPtr & ~7UL;
-        var readable = ctx.TryReadUInt64(aligned, out var word);
+        var readable = ctx.TryReadUInt64(guardPtr, out var word);
         Console.Error.WriteLine(
-            $"[LOADER][TRACE] {op}: guard=0x{guardPtr:X16} aligned=0x{aligned:X16} init={initialized} word={(readable ? $"0x{word:X16}" : "<unreadable>")}");
+            $"[LOADER][TRACE] {op}: guard=0x{guardPtr:X16} init={initialized} in_progress={inProgress} word={(readable ? $"0x{word:X16}" : "<unreadable>")}");
     }
 
     private static void LogGuardResult(string op, ulong guardPtr, int result, bool initialized, bool inProgress, int ownerThreadId)

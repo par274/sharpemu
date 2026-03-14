@@ -237,6 +237,7 @@ public sealed partial class DirectExecutionBackend
 		try
 		{
 			OrbisGen2Result orbisGen2Result;
+			bool dispatchResolved = true;
 			if (string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
 			{
 				orbisGen2Result = DispatchBootstrapBridge();
@@ -247,34 +248,31 @@ public sealed partial class DirectExecutionBackend
 			}
 			else
 			{
-				orbisGen2Result = _moduleManager.Dispatch(importStubEntry.Nid, _cpuContext);
+				dispatchResolved = _moduleManager.TryDispatch(importStubEntry.Nid, _cpuContext, out orbisGen2Result);
 			}
-			switch (orbisGen2Result)
+			if (!dispatchResolved)
 			{
-				case OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND:
-					LastError = "Missing HLE export for NID: " + importStubEntry.Nid;
-					Console.Error.WriteLine($"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16}");
-					if (importStubEntry.Nid == "L-Q3LEjIbgA")
+				LastError = "Missing HLE export for NID: " + importStubEntry.Nid;
+				Console.Error.WriteLine($"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16}");
+				if (importStubEntry.Nid == "L-Q3LEjIbgA")
+				{
+					string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
 					{
-						string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
-						{
-							int num10 = c;
-							return num10.ToString("X2");
-						}));
-						Console.Error.WriteLine($"[LOADER][WARN] map_direct nid raw len={importStubEntry.Nid.Length} chars=[{value18}]");
-						Delegate function;
-						bool value19 = _moduleManager.TryGetFunction(importStubEntry.Nid, out function);
-						ExportedFunction export2;
-						bool value20 = _moduleManager.TryGetExport(importStubEntry.Nid, out export2);
-						Console.Error.WriteLine($"[LOADER][WARN] map_direct lookup with import nid: function={value19}, export={value20}");
-						Console.Error.WriteLine(_moduleManager.TryGetExport("L-Q3LEjIbgA", out ExportedFunction export3) ? $"[LOADER][WARN] Canonical map_direct exists as {export3.LibraryName}:{export3.Name}, target={export3.Target}, ctx_target={_cpuContext.TargetGeneration}" : "[LOADER][WARN] Canonical map_direct export lookup also missing");
-					}
-					break;
-				default:
-					Console.Error.WriteLine($"[LOADER][WARN] Import#{num} result: {orbisGen2Result} ({importStubEntry.Nid})");
-					break;
-				case OrbisGen2Result.ORBIS_GEN2_OK:
-					break;
+						int num10 = c;
+						return num10.ToString("X2");
+					}));
+					Console.Error.WriteLine($"[LOADER][WARN] map_direct nid raw len={importStubEntry.Nid.Length} chars=[{value18}]");
+					Delegate function;
+					bool value19 = _moduleManager.TryGetFunction(importStubEntry.Nid, out function);
+					ExportedFunction export2;
+					bool value20 = _moduleManager.TryGetExport(importStubEntry.Nid, out export2);
+					Console.Error.WriteLine($"[LOADER][WARN] map_direct lookup with import nid: function={value19}, export={value20}");
+					Console.Error.WriteLine(_moduleManager.TryGetExport("L-Q3LEjIbgA", out ExportedFunction export3) ? $"[LOADER][WARN] Canonical map_direct exists as {export3.LibraryName}:{export3.Name}, target={export3.Target}, ctx_target={_cpuContext.TargetGeneration}" : "[LOADER][WARN] Canonical map_direct export lookup also missing");
+				}
+			}
+			else if (orbisGen2Result != OrbisGen2Result.ORBIS_GEN2_OK)
+			{
+				Console.Error.WriteLine($"[LOADER][WARN] Import#{num} result: {orbisGen2Result} ({importStubEntry.Nid})");
 			}
 			_cpuContext[CpuRegister.Rbx] = value3;
 			_cpuContext[CpuRegister.Rbp] = value4;
@@ -334,7 +332,12 @@ public sealed partial class DirectExecutionBackend
 		{
 			return false;
 		}
-		RecordImportLoopSignature(BuildImportLoopSignature(nid, returnRip, arg0, arg1));
+		if (!_importNidHashCache.TryGetValue(nid, out var value))
+		{
+			value = StableHash64(nid);
+			_importNidHashCache[nid] = value;
+		}
+		RecordImportLoopSignature(value, returnRip, BuildImportLoopSignature(value, returnRip, arg0, arg1));
 		if (!HasRepeatingImportLoopPattern())
 		{
 			if (_importLoopPatternHits > 0)
@@ -347,21 +350,18 @@ public sealed partial class DirectExecutionBackend
 		return _importLoopPatternHits >= 6;
 	}
 
-	private ulong BuildImportLoopSignature(string nid, ulong returnRip, ulong arg0, ulong arg1)
+	private ulong BuildImportLoopSignature(ulong nidHash, ulong returnRip, ulong arg0, ulong arg1)
 	{
-		if (!_importNidHashCache.TryGetValue(nid, out var value))
-		{
-			value = StableHash64(nid);
-			_importNidHashCache[nid] = value;
-		}
 		ulong num = returnRip >> 2;
 		ulong num2 = ((arg0 >> 4) * 11400714819323198485uL) ^ ((arg1 >> 4) * 14029467366897019727uL);
-		return num ^ value * 11400714819323198485uL ^ num2;
+		return num ^ nidHash * 11400714819323198485uL ^ num2;
 	}
 
-	private void RecordImportLoopSignature(ulong signature)
+	private void RecordImportLoopSignature(ulong nidHash, ulong returnRip, ulong signature)
 	{
 		_importLoopSignatures[_importLoopSignatureWriteIndex] = signature;
+		_importLoopNidHashes[_importLoopSignatureWriteIndex] = nidHash;
+		_importLoopReturnRips[_importLoopSignatureWriteIndex] = returnRip;
 		_importLoopSignatureWriteIndex = (_importLoopSignatureWriteIndex + 1) % _importLoopSignatures.Length;
 		if (_importLoopSignatureCount < _importLoopSignatures.Length)
 		{
@@ -405,7 +405,7 @@ public sealed partial class DirectExecutionBackend
 				}
 			}
 		}
-		return true;
+		return IsSevereImportLoopPattern(num);
 	}
 
 	private ulong GetImportLoopSignatureFromTail(int offset)
@@ -416,6 +416,51 @@ public sealed partial class DirectExecutionBackend
 			num += _importLoopSignatures.Length;
 		}
 		return _importLoopSignatures[num % _importLoopSignatures.Length];
+	}
+
+	private bool IsSevereImportLoopPattern(int sampleCount)
+	{
+		int num = CountDistinctImportLoopValuesFromTail(_importLoopNidHashes, sampleCount, 3);
+		if (num > 2)
+		{
+			return false;
+		}
+		int num2 = CountDistinctImportLoopValuesFromTail(_importLoopReturnRips, sampleCount, 3);
+		return num2 <= 2;
+	}
+
+	private int CountDistinctImportLoopValuesFromTail(ulong[] source, int sampleCount, int stopAfter)
+	{
+		int num = Math.Min(sampleCount, _importLoopSignatureCount);
+		int num2 = 0;
+		for (int i = 0; i < num; i++)
+		{
+			ulong importLoopValueFromTail = GetImportLoopValueFromTail(source, i);
+			bool flag = false;
+			for (int j = 0; j < i; j++)
+			{
+				if (GetImportLoopValueFromTail(source, j) == importLoopValueFromTail)
+				{
+					flag = true;
+					break;
+				}
+			}
+			if (!flag && ++num2 >= stopAfter)
+			{
+				return num2;
+			}
+		}
+		return num2;
+	}
+
+	private ulong GetImportLoopValueFromTail(ulong[] source, int offset)
+	{
+		int num = _importLoopSignatureWriteIndex - 1 - offset;
+		while (num < 0)
+		{
+			num += source.Length;
+		}
+		return source[num % source.Length];
 	}
 
 	private bool ShouldSuppressStrlenTrace(string nid)
