@@ -727,6 +727,16 @@ public static class VideoOutExports
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, 0);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
+        // Ghost of Yotei reads a flip-pending flag past the classic 0x28-byte
+        // struct (observed at +0x34 in its poll loop, ret site 0x800CD1335 in
+        // the decrypted eboot) and spins on sceKernelUsleep(1) while it is
+        // nonzero. The caller never pre-zeroes that stack buffer, so an
+        // untouched field reads back as garbage. Flips complete synchronously
+        // in this emulator (see SubmitFlip and sceVideoOutIsFlipPending,
+        // which always reports not-pending), so the whole extended region
+        // must read zero here too.
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x28, 0);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x30, 0);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
