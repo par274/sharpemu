@@ -1122,7 +1122,14 @@ public static class VideoOutExports
 
         if (category > 1 || option != 0)
         {
-            return OrbisVideoOutErrorInvalidValue;
+            // Ghost of Yotei registers its display buffers with a nonzero
+            // category/option pair; rejecting the registration guarantees the
+            // title can never flip. Treat unknown categories as the standard
+            // uncompressed layout instead of failing the whole registration.
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] videoout.register_buffers2 nonstandard " +
+                $"category=0x{categoryRaw:X} option=0x{option:X} handle={handle} " +
+                $"set={setIndex} start={bufferIndexStart} count={bufferNum}");
         }
 
         if (!TryReadBufferAttribute(ctx, attributeAddress, true, out var attribute))
