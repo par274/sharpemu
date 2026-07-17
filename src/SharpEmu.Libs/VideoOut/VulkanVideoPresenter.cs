@@ -1491,6 +1491,18 @@ internal static unsafe class VulkanVideoPresenter
                     _guestImageWorkSequences[texture.Address] = workSequence;
                 }
             }
+
+            // Guest compute can be submitted (and synchronously waited on)
+            // before any draw or VideoOut open has started the presenter —
+            // Ghost of Yotei clears its G-Buffer from a compute ACB during
+            // boot and then blocks in WaitForGuestWork while holding the
+            // submitted-GPU gate, deadlocking the whole command pipeline.
+            // Start the consumer exactly like the draw paths do; Run() falls
+            // back to a default window size until the first presentation.
+            if (_thread is null)
+            {
+                StartPresenterLocked();
+            }
         }
 
         return workSequence;
