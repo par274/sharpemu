@@ -1080,6 +1080,45 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Symbol name unconfirmed (not in ps5_names.txt); resolved from the
+    // decrypted eboot's call site only. Called immediately after
+    // sceAgcCreatePrimState with the SAME ucRegistersAddress base (Ghost of
+    // Yotei: caller lea's [rbp-0x130] for both), and a later fixed-size
+    // (immediate 0x20, not read from any header) scan of that buffer reads
+    // 32 (offset,value) pairs starting at that base and open-address-probes
+    // them as a register hash table -- an out-of-bounds probe index sourced
+    // from an unwritten pair here was the AV (read at an absurd offset
+    // derived from uninitialized guest-stack bytes). CreatePrimState only
+    // populates the first 3 pairs (bytes 0-23); zero the rest of the
+    // scanned window so every unpopulated slot is a harmless failed probe
+    // instead of guest-stack garbage.
+    [SysAbiExport(
+        Nid = "dbOlWdppb4o",
+        ExportName = "sceAgcAddPrimStateRegisters",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AddPrimStateRegisters(CpuContext ctx)
+    {
+        var ucRegistersAddress = ctx[CpuRegister.Rdi];
+        if (ucRegistersAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        const int prefilledPairBytes = 3 * 8; // sceAgcCreatePrimState's 3 (offset,value) pairs
+        const int scannedTableBytes = 0x20 * 8; // caller's hardcoded probe-window size
+        Span<byte> zero = stackalloc byte[scannedTableBytes - prefilledPairBytes];
+        zero.Clear();
+        if (!ctx.Memory.TryWrite(ucRegistersAddress + prefilledPairBytes, zero))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceAgc($"agc.add_prim_state_registers uc=0x{ucRegistersAddress:X16}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     // NID captured from shipped titles; the friendly name collides with a real catalog symbol of a different NID. Rename pending AGC API confirmation.
     #pragma warning disable SHEM004
     [SysAbiExport(
