@@ -53,6 +53,7 @@ public static partial class AgcExports
     private const uint ItDispatchDirect = 0x15;
     private const uint ItDispatchIndirect = 0x16;
     private const uint ItSetPredication = 0x20;
+    private const uint ItCondExec = 0x22;
     private const uint ItWaitRegMem = 0x3C;
     private const uint ItIndirectBuffer = 0x3F;
     private const uint ItEventWrite = 0x46;
@@ -13770,6 +13771,37 @@ public static partial class AgcExports
     {
         ctx[CpuRegister.Rax] = 4u * sizeof(uint);
         return (int)ctx[CpuRegister.Rax];
+    }
+
+    // COND_EXEC gates the following execCount dwords on a 32-bit predicate in
+    // memory. Our submitted-packet walker skips unknown PM4 ops, so the recorded
+    // packet degrades to "predicate always true" — the gated commands always run.
+    [SysAbiExport(
+        Nid = "BIPexNBSGog",
+        ExportName = "sceAgcDcbCondExec",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbCondExec(CpuContext ctx)
+    {
+        var dcb = ctx[CpuRegister.Rdi];
+        var predicateAddress = ctx[CpuRegister.Rsi];
+        var execCountDwords = (uint)ctx[CpuRegister.Rdx];
+        if (dcb == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, dcb, 5, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(5, ItCondExec, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, (uint)(predicateAddress & 0xFFFF_FFFFUL)) ||
+            !ctx.TryWriteUInt32(cmd + 8, (uint)(predicateAddress >> 32)) ||
+            !ctx.TryWriteUInt32(cmd + 12, 0) ||
+            !ctx.TryWriteUInt32(cmd + 16, execCountDwords & 0x3FFF))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        return ReturnPointer(ctx, cmd);
     }
 
     // How a title continues a frame whose command arena filled: it branches from

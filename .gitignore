@@ -42,4 +42,5 @@ ehthumbs.db
 
 .vs/
 .idea/
-.vscode/
+.vscode/clean_test/
+.debug/

@@ -1522,6 +1522,19 @@ public static class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Trinity is the PS5 Pro SoC; base-PS5 emulation reports "not Trinity",
+    // mirroring KernelIsNeoMode (the PS4 Pro equivalent) above.
+    [SysAbiExport(
+        Nid = "tU5e3f9gSiU",
+        ExportName = "sceKernelIsTrinityMode",
+        Target = Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelIsTrinityMode(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "Xjoosiw+XPI",
         ExportName = "sceKernelUuidCreate",
