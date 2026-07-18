@@ -340,6 +340,9 @@ public static partial class AgcExports
     // used to detect arena switches the moment they happen (see
     // TrackCbReleaseMemTarget).
     private static readonly Dictionary<ulong, (ulong Base, ulong Cursor)> _builderArenaLastSeen = new();
+    // Every builder header ever seen recording a release_mem, for the
+    // monitor's periodic current-arena sweep.
+    private static readonly HashSet<ulong> _knownBuilderHeaders = new();
     // Unsubmitted tails of arenas their builder already abandoned; flushed by
     // DrainPendingOrphanPreambles. Ring memory is never zeroed, so the content
     // stays valid after the switch.
@@ -424,6 +427,7 @@ public static partial class AgcExports
                 headers.Add(commandBufferAddress);
             }
 
+            _knownBuilderHeaders.Add(commandBufferAddress);
             if (haveHeader)
             {
                 if (_builderArenaLastSeen.TryGetValue(commandBufferAddress, out var seen) &&
@@ -519,7 +523,8 @@ public static partial class AgcExports
 
         // Flush arenas their builders abandoned since the last drain (see
         // TrackCbReleaseMemTarget) — cursor-based header submission can no
-        // longer reach them. The game-submitted alias check still applies.
+        // longer reach them. Clipped against game submissions like every
+        // other slice.
         while (true)
         {
             (ulong Header, ulong Base, ulong Start, ulong End) slice;
@@ -532,23 +537,9 @@ public static partial class AgcExports
 
                 slice = _orphanPreambleClosedSlices[0];
                 _orphanPreambleClosedSlices.RemoveAt(0);
-                var aliasesGameRing = false;
-                foreach (var (rangeStart, rangeEnd) in _gameSubmittedRanges)
-                {
-                    if (slice.Start < rangeEnd && slice.End > rangeStart)
-                    {
-                        aliasesGameRing = true;
-                        break;
-                    }
-                }
-
-                if (aliasesGameRing)
-                {
-                    continue;
-                }
             }
 
-            SubmitOrphanSlice(ctx, gpuState, slice.Header, slice.Start, slice.End, targetAddress: 0);
+            SubmitOrphanSliceClipped(ctx, gpuState, slice.Header, slice.Start, slice.End, targetAddress: 0);
         }
 
         while (true)
@@ -645,26 +636,6 @@ public static partial class AgcExports
         ulong sliceStart;
         lock (_orphanPreambleGate)
         {
-            foreach (var (rangeStart, rangeEnd) in _gameSubmittedRanges)
-            {
-                if (commandAddress < rangeEnd && limitAddress > rangeStart)
-                {
-                    // Alias of a ring the game genuinely submits; never ours
-                    // to duplicate. Mark (0,0) to silence future re-scans.
-                    if (!_orphanPreambleSubmitted.TryGetValue(headerAddress, out var seen) ||
-                        seen.Base != 0)
-                    {
-                        _orphanPreambleSubmitted[headerAddress] = (0, 0);
-                        Console.Error.WriteLine(
-                            $"[LOADER][WARN] agc.orphan_preamble_skip header=0x{headerAddress:X16} " +
-                            $"target=0x{targetAddress:X16} (aliases game-submitted ring " +
-                            $"0x{rangeStart:X16}-0x{rangeEnd:X16})");
-                    }
-
-                    return;
-                }
-            }
-
             if (_orphanPreambleSubmitted.TryGetValue(headerAddress, out var last))
             {
                 if (last.Base == 0)
@@ -695,7 +666,91 @@ public static partial class AgcExports
             _orphanPreambleSubmitted[headerAddress] = (commandAddress, cursor);
         }
 
-        SubmitOrphanSlice(ctx, gpuState, headerAddress, sliceStart, cursor, targetAddress);
+        SubmitOrphanSliceClipped(ctx, gpuState, headerAddress, sliceStart, cursor, targetAddress);
+    }
+
+    // One 64KB builder arena can host BOTH content the game submits itself
+    // (compute[72]'s ring lives mid-arena) AND preamble packets it never
+    // submits (at the arena head). A whole-arena alias skip therefore starved
+    // the un-submitted part (observed live: 0x806AB69D0's counter packets,
+    // the frame gate the game CPU-polls), while submitting the whole slice
+    // would double-execute the game part (increment=True write_data packets
+    // corrupt their counters when run twice). Clip: submit only the sub-
+    // ranges of the slice no game submission covers.
+    private static void SubmitOrphanSliceClipped(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong headerAddress,
+        ulong sliceStart,
+        ulong sliceEnd,
+        ulong targetAddress)
+    {
+        while (sliceStart < sliceEnd)
+        {
+            ulong segmentEnd;
+            lock (_orphanPreambleGate)
+            {
+                // Skip forward past any game range covering sliceStart, then
+                // run until the next game range (or the slice end).
+                var advanced = true;
+                while (advanced)
+                {
+                    advanced = false;
+                    foreach (var (rangeStart, rangeEnd) in _gameSubmittedRanges)
+                    {
+                        if (sliceStart >= rangeStart && sliceStart < rangeEnd)
+                        {
+                            sliceStart = rangeEnd;
+                            advanced = true;
+                        }
+                    }
+                }
+
+                if (sliceStart >= sliceEnd)
+                {
+                    return;
+                }
+
+                segmentEnd = sliceEnd;
+                foreach (var (rangeStart, _) in _gameSubmittedRanges)
+                {
+                    if (rangeStart > sliceStart && rangeStart < segmentEnd)
+                    {
+                        segmentEnd = rangeStart;
+                    }
+                }
+            }
+
+            SubmitOrphanSlice(ctx, gpuState, headerAddress, sliceStart, segmentEnd, targetAddress);
+            sliceStart = segmentEnd;
+        }
+    }
+
+    // Submits every known builder's fresh current-arena content, without
+    // needing a stall trigger. Stall triggers only fire when a SUBMITTED
+    // queue suspends on a tracked label; the game also polls builder-written
+    // labels purely from the CPU side (usleep loops), where nothing ever
+    // registers a waiter — those packets are only picked up here. Cheap:
+    // ForceSubmitOrphanPreambleHeader is 4 qword reads and returns
+    // immediately when nothing new was recorded.
+    private static void SweepBuilderArenas(CpuContext ctx, SubmittedGpuState gpuState)
+    {
+        ulong[] headers;
+        lock (_orphanPreambleGate)
+        {
+            if (_knownBuilderHeaders.Count == 0)
+            {
+                return;
+            }
+
+            headers = new ulong[_knownBuilderHeaders.Count];
+            _knownBuilderHeaders.CopyTo(headers);
+        }
+
+        foreach (var headerAddress in headers)
+        {
+            ForceSubmitOrphanPreambleHeader(ctx, gpuState, headerAddress, targetAddress: 0);
+        }
     }
 
     private static void SubmitOrphanSlice(
@@ -4320,6 +4375,16 @@ public static partial class AgcExports
             TraceAgc(
                 $"agc.dcb.ring_tail_superseded addr=0x{state.RingTailParkAddress:X16} " +
                 $"queue={state.QueueName} submission={state.ActiveSubmissionId}");
+            // NOTE: the recorded game range for this chunk deliberately keeps
+            // its full extent even though the tail past the park never ran on
+            // this queue. Trimming it (tried live) lets the arena sweep submit
+            // that tail, which the game's OWN chained re-parse of the same
+            // ring executes again two frames later — double-running
+            // increment=True write_data packets and corrupting their counters
+            // (observed: frame cadence collapsed from 5-8 flips to 3). The
+            // cost of keeping it: a lagging counter whose next-value packet
+            // lands in that tail stays unpicked until the game re-chains
+            // through it — an accepted gap for now.
             state.RingTailParkAddress = 0;
             state.IsSuspended = false;
             state.HasActiveSubmission = false;
@@ -4482,6 +4547,18 @@ public static partial class AgcExports
 
             commandAddress = chainAddress;
             dwordCount = chainDwords;
+            if (!state.IsForceSubmittedRing)
+            {
+                // Chunks a game queue chains through are game-executed content
+                // even though no submit packet names them. Recording them keeps
+                // the orphan machinery's alias check honest: without this, the
+                // arena sweep force-submitted the graphics ring's chunk-2+
+                // builder content and the same packets then executed AGAIN via
+                // the game's own chained parse (observed live: duplicate
+                // flip_capture of one frame; increment=True write_data packets
+                // would corrupt their counters the same way).
+                RecordGameSubmittedRange(commandAddress, dwordCount);
+            }
         }
     }
 
@@ -6780,27 +6857,46 @@ public static partial class AgcExports
 
         while (true)
         {
-            int resumed;
-            int remaining;
+            var madeProgress = false;
             lock (gpuState.Gate)
             {
-                resumed = DrainResumableDcbs(ctx, gpuState, tracePackets: _traceAgc);
-                remaining = GpuWaitRegistry.CountForMemory(ctx.Memory);
-                if (_traceAgc && resumed != 0)
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER][TRACE] agc.wait_monitor_resumed count={resumed} " +
-                        $"remaining={remaining}");
-                }
-
-                SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot(
-                    ctx.Memory);
-                GpuWaitProfile.RecordMonitorPoll(resumed != 0);
-                GpuWaitProfile.ReportIfDue(remaining);
-                if (remaining == 0)
+                var before = GpuWaitRegistry.CountForMemory(ctx.Memory);
+                // With the orphan force-submit machinery active the monitor
+                // must OUTLIVE the waits: the game also polls builder-written
+                // labels from the CPU side (usleep loops, no WAIT_REG_MEM, so
+                // no waiter and no stall trigger ever fires). Observed live as
+                // the frame-6 wall: every GPU wait satisfied, threads polling
+                // 0x20000000E0==5 forever while the data=5 packet sat un-
+                // submitted in a builder's current arena. The periodic arena
+                // sweep below is the only thing that can pick those up.
+                if (before == 0 && !_forceSubmitOrphanPreamblesEnabled)
                 {
                     gpuState.WaitMonitorRunning = false;
                     return;
+                }
+
+                var remaining = before;
+                if (before != 0)
+                {
+                    var resumed = DrainResumableDcbs(ctx, gpuState, tracePackets: _traceAgc);
+                    remaining = GpuWaitRegistry.CountForMemory(ctx.Memory);
+                    madeProgress = resumed != 0;
+                    if (_traceAgc && resumed != 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][TRACE] agc.wait_monitor_resumed count={resumed} " +
+                            $"remaining={remaining}");
+                    }
+
+                    SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot(
+                        ctx.Memory);
+                    GpuWaitProfile.RecordMonitorPoll(resumed != 0);
+                    GpuWaitProfile.ReportIfDue(remaining);
+                    if (remaining == 0 && !_forceSubmitOrphanPreamblesEnabled)
+                    {
+                        gpuState.WaitMonitorRunning = false;
+                        return;
+                    }
                 }
             }
 
@@ -6821,9 +6917,10 @@ public static partial class AgcExports
                 }
 
                 DrainPendingOrphanPreambles(ctx, gpuState);
+                SweepBuilderArenas(ctx, gpuState);
             }
 
-            delayMilliseconds = resumed != 0
+            delayMilliseconds = madeProgress
                 ? 1
                 : Math.Min(delayMilliseconds * 2, 16);
             lock (gpuState.WaitMonitorSignalGate)
