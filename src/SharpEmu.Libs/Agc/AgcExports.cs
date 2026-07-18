@@ -1464,6 +1464,20 @@ public static partial class AgcExports
         // game-authored WAIT_REG_MEM suspends never set this and are never
         // abandoned.
         public ulong RingTailParkAddress { get; set; }
+
+        // Set by ParseSubmittedDcbCore to the address one-past the last FULLY
+        // processed packet in the current parse window (updated only after a
+        // packet's effects have actually run — never past a suspend/failure
+        // point). ParseSubmittedDcb resets this to the window's commandAddress
+        // before each ParseSubmittedDcbCore call and reads it back after, to
+        // record only the truly-consumed extent as game-submitted — NOT the
+        // window's full declared size, which used to be claimed unconditionally
+        // and permanently starved the orphan sweep of packets a suspended queue
+        // never got back to in that same chunk (observed live: builder-written
+        // counters lagging their game-recorded value, e.g. built=6/executed=3,
+        // because the trailing 3 increments sat past a mid-chunk WAIT_REG_MEM
+        // in a chunk the eager full-size claim had already marked "covered").
+        public ulong LastParsedAddress { get; set; }
     }
 
     private sealed class SubmittedGpuState
@@ -4506,6 +4520,7 @@ public static partial class AgcExports
 
             state.PendingChainAddress = 0;
             state.PendingChainDwords = 0;
+            state.LastParsedAddress = commandAddress;
             var windowByteCount = checked((int)(dwordCount * sizeof(uint)));
             var rented = GuestDataPool.Shared.Rent(windowByteCount);
             bool suspended;
@@ -4533,6 +4548,27 @@ public static partial class AgcExports
                 GuestDataPool.Shared.Return(rented);
             }
 
+            // Chunks a game queue enters — the original submission's own
+            // window AND every chunk chained through — are game-executed
+            // content even though no submit packet names the chained ones.
+            // Recording keeps the orphan machinery's alias check honest, but
+            // ONLY for what ParseSubmittedDcbCore actually ran: claiming the
+            // full declared/chunk size unconditionally (the previous
+            // approach) permanently starved the orphan sweep of packets a
+            // queue suspended mid-chunk never got back to — observed live as
+            // builder-written counters lagging their game-recorded value
+            // (e.g. built=6/executed=3). Without this record at all, the
+            // sweep would re-run chunk-2+ content the game's own chained
+            // parse already executed (observed: duplicate flip_capture of one
+            // frame — increment=True write_data corrupts counters run twice).
+            if (!state.IsForceSubmittedRing && state.LastParsedAddress > commandAddress)
+            {
+                var consumedDwords = (uint)Math.Min(
+                    (state.LastParsedAddress - commandAddress) / sizeof(uint),
+                    dwordCount);
+                RecordGameSubmittedRange(commandAddress, consumedDwords);
+            }
+
             if (suspended)
             {
                 return true;
@@ -4547,18 +4583,6 @@ public static partial class AgcExports
 
             commandAddress = chainAddress;
             dwordCount = chainDwords;
-            if (!state.IsForceSubmittedRing)
-            {
-                // Chunks a game queue chains through are game-executed content
-                // even though no submit packet names them. Recording them keeps
-                // the orphan machinery's alias check honest: without this, the
-                // arena sweep force-submitted the graphics ring's chunk-2+
-                // builder content and the same packets then executed AGAIN via
-                // the game's own chained parse (observed live: duplicate
-                // flip_capture of one frame; increment=True write_data packets
-                // would corrupt their counters the same way).
-                RecordGameSubmittedRange(commandAddress, dwordCount);
-            }
         }
     }
 
@@ -5157,7 +5181,21 @@ public static partial class AgcExports
                         displayBuffer.Height);
                 }
 
-                _ = VideoOutExports.SubmitFlipFromAgc(ctx, handle, displayBufferIndex, unchecked((int)flipMode), flipArg);
+                // A SetFlip packet reached via the orphan force-submit path is
+                // the game's OWN packet, physically shared with a real queue's
+                // ring (observed live: builder 0x804F171A0 IS the graphics
+                // ring's own builder — force-submitting its not-yet-covered
+                // tail can race ahead of dcb.graphics's natural chunk-chain
+                // parse and reach this same SetFlip first). The real queue
+                // reaches and executes the identical packet again once it
+                // catches up — presenting a duplicate flip via a synthetic
+                // "orphan" queue that was never a legitimate present source.
+                // Only a genuine game queue (never force-submitted) may flip.
+                if (!state.IsForceSubmittedRing)
+                {
+                    _ = VideoOutExports.SubmitFlipFromAgc(ctx, handle, displayBufferIndex, unchecked((int)flipMode), flipArg);
+                }
+
                 state.SawIndexedDraw = false;
                 state.GuestDrawKind = GuestDrawKind.None;
                 if (state.PendingTargetlessDraw is { } unusedPendingDraw)
@@ -5173,6 +5211,11 @@ public static partial class AgcExports
             }
 
             offset += length;
+            // See SubmittedDcbState.LastParsedAddress: only reached once this
+            // packet's effects have fully run, so every return point above
+            // (failure/suspend, always before this line for the packet that
+            // triggered it) leaves it at the correct truly-consumed boundary.
+            state.LastParsedAddress = commandAddress + (ulong)offset * sizeof(uint);
         }
 
         FlushPendingAcquireInvalidation(ctx, state, tracePackets);
