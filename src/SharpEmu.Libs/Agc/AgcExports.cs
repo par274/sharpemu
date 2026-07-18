@@ -332,14 +332,31 @@ public static partial class AgcExports
     // Value (0,0) marks headers permanently skipped (unreadable / wrong
     // class / aliases a game ring).
     private static readonly Dictionary<ulong, (ulong Base, ulong Cursor)> _orphanPreambleSubmitted = new();
+    // Headers whose "unreadable at trigger time" skip was already logged once.
+    // Unreadability is transient (object not yet constructed), so these stay
+    // eligible for later triggers — this set only deduplicates the log line.
+    private static readonly HashSet<ulong> _orphanPreambleUnreadableLogged = new();
+    // Last {base, cursor} seen on each builder header at packet-record time,
+    // used to detect arena switches the moment they happen (see
+    // TrackCbReleaseMemTarget).
+    private static readonly Dictionary<ulong, (ulong Base, ulong Cursor)> _builderArenaLastSeen = new();
+    // Unsubmitted tails of arenas their builder already abandoned; flushed by
+    // DrainPendingOrphanPreambles. Ring memory is never zeroed, so the content
+    // stays valid after the switch.
+    private static readonly List<(ulong Header, ulong Base, ulong Start, ulong End)> _orphanPreambleClosedSlices = new();
 
-    // All confirmed orphan preamble headers share this C++ vtable
-    // (session-10 live reads, stable across runs). The same cb_release_mem
-    // tracking also sees the game's REAL rings (graphics DCB, computes) whose
-    // builder objects use other classes — submitting those duplicates or
-    // pre-executes live game work. Title-specific by nature, like the whole
-    // env-gated diagnostic.
-    private const ulong OrphanBuilderVtable = 0x8009F5750UL;
+    // Ring-builder classes whose orphaned (never-game-submitted) rings are
+    // eligible for force-submit. Live census of every cmd_alloc_full callback:
+    // 0x8009F5750 is the graphics-flavor builder (~90 instances, including
+    // the REAL graphics DCB builder 0x804F11F20) and 0x800AB4550 is the
+    // async-compute-flavor builder (7 instances, including the real rings of
+    // compute owners 82/32/83 AND never-submitted producers like 0x806AB69D0
+    // that hold frame 3's only kick writers). Both classes contain a mix of
+    // game-submitted and orphaned rings, so this class check only excludes
+    // genuinely foreign objects (e.g. the AGC driver object) — the actual
+    // double-submit protection is the game-submitted-range alias check below.
+    private static bool IsKnownBuilderVtable(ulong vtable) =>
+        vtable is 0x8009F5750UL or 0x800AB4550UL;
     // Command ranges the GAME itself submitted (DriverSubmitDcb/Acb). The
     // cb_release_mem "buf" objects include the real rings too (the graphics
     // DCB records its per-frame release_mem through the same builder API), and
@@ -361,9 +378,12 @@ public static partial class AgcExports
 
     // Called from sceAgcCbReleaseMem whenever the game builds a release_mem
     // packet targeting the CPU-visible label pool — the same pool the 3
-    // known-stuck compute queues' WAIT_REG_MEM checks. Cheap: only records
-    // an address pair, no I/O.
-    private static void TrackCbReleaseMemTarget(ulong commandBufferAddress, ulong destinationAddress)
+    // known-stuck compute queues' WAIT_REG_MEM checks. Cheap: records the
+    // address pair and refreshes the builder's arena snapshot (3 qword reads).
+    private static void TrackCbReleaseMemTarget(
+        CpuContext ctx,
+        ulong commandBufferAddress,
+        ulong destinationAddress)
     {
         // Deliberately NOT filtered to the small IsCpuVisibleLabel pool: the
         // known-stuck targets found this session (0x2011669FE0 etc.) live
@@ -374,6 +394,22 @@ public static partial class AgcExports
         {
             return;
         }
+
+        // Arena snapshot: builders switch to a different arena between frames
+        // (frame N and N+2 share one), and a switch that happens between two
+        // monitor drains permanently orphans the outgoing arena's unsubmitted
+        // tail — the header no longer points at it, so cursor-based submission
+        // can never find it again (observed live: builder 0x806AB2030's
+        // frame-2 arena held compute[72]'s only kick producer and was lost
+        // this way, deadlocking frame 3). Snapshot the header here, on every
+        // packet the builder records; when the base changes, queue the closed
+        // arena's remaining slice for the next drain.
+        ulong closedBase = 0, closedStart = 0, closedEnd = 0;
+        ulong arenaCursor = 0;
+        var haveHeader =
+            TryReadUInt64(ctx, commandBufferAddress, out var arenaBase) &&
+            TryReadUInt64(ctx, commandBufferAddress + 0x10, out arenaCursor) &&
+            arenaBase != 0;
 
         lock (_orphanPreambleGate)
         {
@@ -387,6 +423,37 @@ public static partial class AgcExports
             {
                 headers.Add(commandBufferAddress);
             }
+
+            if (haveHeader)
+            {
+                if (_builderArenaLastSeen.TryGetValue(commandBufferAddress, out var seen) &&
+                    seen.Base != 0 &&
+                    seen.Base != arenaBase &&
+                    seen.Cursor > seen.Base)
+                {
+                    closedBase = seen.Base;
+                    closedEnd = seen.Cursor;
+                    closedStart =
+                        _orphanPreambleSubmitted.TryGetValue(commandBufferAddress, out var submitted) &&
+                        submitted.Base == seen.Base
+                            ? submitted.Cursor
+                            : seen.Base;
+                    if (closedStart < closedEnd)
+                    {
+                        _orphanPreambleClosedSlices.Add(
+                            (commandBufferAddress, closedBase, closedStart, closedEnd));
+                    }
+                }
+
+                _builderArenaLastSeen[commandBufferAddress] = (arenaBase, arenaCursor);
+            }
+        }
+
+        if (closedBase != 0 && closedStart < closedEnd)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] agc.orphan_arena_closed header=0x{commandBufferAddress:X16} " +
+                $"base=0x{closedBase:X16} slice=0x{closedStart:X16}-0x{closedEnd:X16}");
         }
     }
 
@@ -450,6 +517,40 @@ public static partial class AgcExports
             return;
         }
 
+        // Flush arenas their builders abandoned since the last drain (see
+        // TrackCbReleaseMemTarget) — cursor-based header submission can no
+        // longer reach them. The game-submitted alias check still applies.
+        while (true)
+        {
+            (ulong Header, ulong Base, ulong Start, ulong End) slice;
+            lock (_orphanPreambleGate)
+            {
+                if (_orphanPreambleClosedSlices.Count == 0)
+                {
+                    break;
+                }
+
+                slice = _orphanPreambleClosedSlices[0];
+                _orphanPreambleClosedSlices.RemoveAt(0);
+                var aliasesGameRing = false;
+                foreach (var (rangeStart, rangeEnd) in _gameSubmittedRanges)
+                {
+                    if (slice.Start < rangeEnd && slice.End > rangeStart)
+                    {
+                        aliasesGameRing = true;
+                        break;
+                    }
+                }
+
+                if (aliasesGameRing)
+                {
+                    continue;
+                }
+            }
+
+            SubmitOrphanSlice(ctx, gpuState, slice.Header, slice.Start, slice.End, targetAddress: 0);
+        }
+
         while (true)
         {
             ulong targetAddress;
@@ -494,27 +595,28 @@ public static partial class AgcExports
             !TryReadUInt64(ctx, headerAddress + 0x20, out var vtable) ||
             commandAddress == 0)
         {
-            // Not a readable ring header (e.g. the AGC driver object also
-            // shows up as a cb_release_mem "buf"). Mark (0,0) so the monitor
-            // re-scan doesn't log this skip forever.
+            // Not a readable ring header RIGHT NOW. This is transient, not a
+            // classification: a builder triggered before its object is fully
+            // constructed reads as garbage/null here but becomes a perfectly
+            // valid producer later (observed live: builder 0x806AB69D0 was
+            // skipped this way at boot, then held frame 3's only producers —
+            // a permanent (0,0) mark deadlocked the frame). Log once, leave
+            // the header eligible for future triggers.
             lock (_orphanPreambleGate)
             {
-                if (_orphanPreambleSubmitted.TryGetValue(headerAddress, out var seen) &&
-                    seen.Base == 0)
+                if (!_orphanPreambleUnreadableLogged.Add(headerAddress))
                 {
                     return;
                 }
-
-                _orphanPreambleSubmitted[headerAddress] = (0, 0);
             }
 
             Console.Error.WriteLine(
                 $"[LOADER][WARN] agc.orphan_preamble_skip header=0x{headerAddress:X16} " +
-                $"target=0x{targetAddress:X16} (unreadable at trigger time)");
+                $"target=0x{targetAddress:X16} (unreadable at trigger time; will retry)");
             return;
         }
 
-        if (vtable != OrphanBuilderVtable)
+        if (!IsKnownBuilderVtable(vtable))
         {
             lock (_orphanPreambleGate)
             {
@@ -570,14 +672,20 @@ public static partial class AgcExports
                     return; // permanently skipped
                 }
 
-                if (last.Base == commandAddress && cursor <= last.Cursor)
+                if (last.Base == commandAddress && cursor == last.Cursor)
                 {
                     return; // no new content since the last slice
                 }
 
-                // Same chunk grown -> submit only the delta; chunk moved ->
-                // restart from the new base.
-                sliceStart = last.Base == commandAddress ? last.Cursor : commandAddress;
+                // Same arena grown -> submit only the delta. Arena moved OR
+                // cursor REGRESSED (the builder wrapped back to a previously
+                // used arena for a new frame — same base, lower cursor) ->
+                // restart from the arena base. Treating regression as "no new
+                // content" silently dropped every re-used arena's packets
+                // (observed live on the frame-3 deadlock).
+                sliceStart = last.Base == commandAddress && cursor > last.Cursor
+                    ? last.Cursor
+                    : commandAddress;
             }
             else
             {
@@ -587,7 +695,23 @@ public static partial class AgcExports
             _orphanPreambleSubmitted[headerAddress] = (commandAddress, cursor);
         }
 
-        var dwordCount = (uint)((cursor - sliceStart) / 4);
+        SubmitOrphanSlice(ctx, gpuState, headerAddress, sliceStart, cursor, targetAddress);
+    }
+
+    private static void SubmitOrphanSlice(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong headerAddress,
+        ulong sliceStart,
+        ulong sliceEnd,
+        ulong targetAddress)
+    {
+        var dwordCount = (uint)((sliceEnd - sliceStart) / 4);
+        if (dwordCount == 0)
+        {
+            return;
+        }
+
         uint owner;
         lock (_orphanPreambleGate)
         {
@@ -950,6 +1074,25 @@ public static partial class AgcExports
     private static readonly object _registerDefaultsGate = new();
     private static readonly ConditionalWeakTable<object, RegisterDefaultsAllocation> _registerDefaultsAllocations = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
+
+    // Every native worker thread wraps the ONE shared virtual memory in its own
+    // TrackedCpuMemory, so ctx.Memory identity differs across threads even
+    // though all reads/writes hit the same guest address space. Keying GPU
+    // state on the raw ctx.Memory therefore FRACTURES it per submitting thread
+    // (observed live: a frame-2 SubmitAcb from a different pooled worker landed
+    // in a fresh SubmittedGpuState whose SubmissionSequence restarted at 1, and
+    // its waits were invisible to the wait monitor's memory-reference filter —
+    // the queue then hung forever). Unwrap decorator chains to the shared root
+    // so all threads resolve to one canonical GPU state.
+    private static object CanonicalMemory(object memory)
+    {
+        while (memory is SharpEmu.HLE.ICpuMemoryWrapper wrapper)
+        {
+            memory = wrapper.Inner;
+        }
+
+        return memory;
+    }
 
     private static readonly RegisterDefaultGroup[] PrimaryRegisterDefaults =
         CreatePrimaryRegisterDefaults();
@@ -2439,7 +2582,7 @@ public static partial class AgcExports
         TraceAgc(
             $"agc.cb_release_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
             $"action=0x{action:X2} gcr=0x{gcrControl:X4} dst=0x{destinationAddress:X16} data_sel={dataSelection} data=0x{data:X16}");
-        TrackCbReleaseMemTarget(commandBufferAddress, destinationAddress);
+        TrackCbReleaseMemTarget(ctx, commandBufferAddress, destinationAddress);
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -3922,7 +4065,7 @@ public static partial class AgcExports
 
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         RecordGameSubmittedRange(commandAddress, dwordCount);
-        var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
         {
             gpuState.Graphics.QueueName = "dcb.graphics";
@@ -3986,7 +4129,7 @@ public static partial class AgcExports
 
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         RecordGameSubmittedRange(commandAddress, dwordCount);
-        var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
         {
             if (!gpuState.ComputeQueues.TryGetValue(ownerHandle, out var queueState))
@@ -5190,6 +5333,7 @@ public static partial class AgcExports
             return null;
         }
 
+        memory = CanonicalMemory(memory);
         var producer = new LabelProducerTrace
         {
             Sequence = Interlocked.Increment(ref _labelProducerSequence),
@@ -5304,6 +5448,7 @@ public static partial class AgcExports
         bool stale,
         ulong? currentValue = null)
     {
+        memory = CanonicalMemory(memory);
         LabelProducerTrace? producer = null;
         lock (_labelProducerGate)
         {
@@ -6294,7 +6439,7 @@ public static partial class AgcExports
         GpuWaitRegistry.Register(waiter.WaitAddress, waiter);
         state.RingTailParkAddress = wordAddress;
         var gpuState = _submittedGpuStates.GetValue(
-            ctx.Memory,
+            CanonicalMemory(ctx.Memory),
             static _ => new SubmittedGpuState());
         EnsureGpuWaitMonitor(ctx, gpuState);
         if (tracePacket)
@@ -6575,7 +6720,7 @@ public static partial class AgcExports
 
         GpuWaitRegistry.Register(waitAddress, waiter);
         var gpuState = _submittedGpuStates.GetValue(
-            ctx.Memory,
+            CanonicalMemory(ctx.Memory),
             static _ => new SubmittedGpuState());
         EnsureGpuWaitMonitor(ctx, gpuState);
         TryForceSubmitOrphanPreamble(ctx, gpuState, waitAddress);
@@ -14288,12 +14433,24 @@ public static partial class AgcExports
         public string ToStringAndClear() => _enabled ? _inner.ToStringAndClear() : string.Empty;
     }
 
+    // Monotonic seconds since process start, prefixed on every AGC trace line.
+    // The frame pipeline's serial dependency chains (queue A's kick written by
+    // queue B's parse progress, itself gated on the game's own appends) span
+    // tens of seconds; without per-line timing the logs cannot attribute the
+    // latency between game-side production and emulator-side resume delay.
+    private static readonly long _traceStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+
+    private static string TraceSeconds() =>
+        ((System.Diagnostics.Stopwatch.GetTimestamp() - _traceStartTicks) /
+         (double)System.Diagnostics.Stopwatch.Frequency).ToString(
+            "F3", System.Globalization.CultureInfo.InvariantCulture);
+
     private static void TraceAgc(
         [System.Runtime.CompilerServices.InterpolatedStringHandlerArgument] ref AgcTraceHandler message)
     {
         if (_traceAgc)
         {
-            Console.Error.WriteLine($"[LOADER][TRACE] {message.ToStringAndClear()}");
+            Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message.ToStringAndClear()}");
         }
     }
 
@@ -14304,7 +14461,7 @@ public static partial class AgcExports
             return;
         }
 
-        Console.Error.WriteLine($"[LOADER][TRACE] {message}");
+        Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message}");
     }
 
     private static void TraceAgcShader(
@@ -14312,7 +14469,7 @@ public static partial class AgcExports
     {
         if (_traceAgcShader)
         {
-            Console.Error.WriteLine($"[LOADER][TRACE] {message.ToStringAndClear()}");
+            Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message.ToStringAndClear()}");
         }
     }
 
@@ -14323,7 +14480,7 @@ public static partial class AgcExports
             return;
         }
 
-        Console.Error.WriteLine($"[LOADER][TRACE] {message}");
+        Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message}");
     }
 
     private static string FormatShaderDwords(IReadOnlyList<uint> values) =>
@@ -14802,7 +14959,7 @@ public static partial class AgcExports
         var tracePackets = string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"), "1", StringComparison.Ordinal);
 
-        var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
         {
             Gen5ShaderScalarEvaluator.BeginGlobalMemoryReadScope();
@@ -14893,7 +15050,7 @@ public static partial class AgcExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var state = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (state.Gate)
         {
             state.ResourceRegistrationInitialized = true;
@@ -14921,7 +15078,7 @@ public static partial class AgcExports
     public static int DriverRegisterDefaultOwner(CpuContext ctx)
     {
         var owner = (uint)ctx[CpuRegister.Rdi];
-        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var state = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (state.Gate)
         {
             state.DefaultOwner = owner;
@@ -14950,7 +15107,7 @@ public static partial class AgcExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var state = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         uint owner;
         lock (state.Gate)
         {
@@ -15062,7 +15219,7 @@ public static partial class AgcExports
     public static int DriverUnregisterResource(CpuContext ctx)
     {
         var resourceHandle = (uint)ctx[CpuRegister.Rdi];
-        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var state = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (state.Gate)
         {
             if (!state.RegisteredResources.Remove(resourceHandle))

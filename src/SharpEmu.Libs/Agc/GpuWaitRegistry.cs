@@ -60,6 +60,24 @@ internal static class GpuWaitRegistry
     // address) so distinct guest processes never alias.
     private static readonly Dictionary<(object, ulong), ulong> _lastProduced = new();
 
+    // Waiter.Memory is used purely as an identity filter so each guest memory
+    // space drains only its own waits. Per-thread CpuContext.Memory instances
+    // are distinct TrackedCpuMemory decorators over ONE shared virtual memory,
+    // so raw references from different threads never match each other — a wait
+    // registered by one worker thread was invisible to a monitor created from
+    // another's context (observed live as queues hung on already-written
+    // labels). Canonicalize every memory reference to the undecorated root at
+    // registration and at every filter site.
+    private static object? Canonicalize(object? memory)
+    {
+        while (memory is SharpEmu.HLE.ICpuMemoryWrapper wrapper)
+        {
+            memory = wrapper.Inner;
+        }
+
+        return memory;
+    }
+
     public static int Count
     {
         get
@@ -79,6 +97,7 @@ internal static class GpuWaitRegistry
 
     public static int CountForMemory(object memory)
     {
+        memory = Canonicalize(memory)!;
         lock (_gate)
         {
             var total = 0;
@@ -155,6 +174,7 @@ internal static class GpuWaitRegistry
     public static void Register(ulong address, WaitingDcb waiter)
     {
         waiter.WaitAddress = address;
+        waiter.Memory = Canonicalize(waiter.Memory);
         lock (_gate)
         {
             if (!_waiters.TryGetValue(address, out var list))
@@ -177,6 +197,7 @@ internal static class GpuWaitRegistry
         object memory,
         Func<ulong, bool, ulong?> readValue)
     {
+        memory = Canonicalize(memory)!;
         List<WaitingDcb>? woken = null;
         lock (_gate)
         {
@@ -237,6 +258,7 @@ internal static class GpuWaitRegistry
         long nowTicks,
         long maxAgeTicks)
     {
+        memory = Canonicalize(memory)!;
         List<WaitingDcb>? stale = null;
         lock (_gate)
         {
@@ -273,6 +295,7 @@ internal static class GpuWaitRegistry
         ulong start,
         ulong length)
     {
+        memory = Canonicalize(memory)!;
         var matches = new List<(ulong Address, int Count)>();
         if (length == 0)
         {
