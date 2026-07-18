@@ -356,6 +356,41 @@ internal static class GpuWaitRegistry
     }
 
     /// <summary>
+    /// Removes the waiter registered at <paramref name="address"/> whose State
+    /// is <paramref name="state"/>. Used when an explicit new submission
+    /// supersedes a synthetic ring-tail park (the CP write-pointer wait): the
+    /// abandoned ring's remaining words will never be written, so the waiter
+    /// would otherwise pin the queue forever. Returns false when no such
+    /// waiter exists (e.g. it was already collected by a concurrent resume).
+    /// </summary>
+    public static bool TryRemoveByState(object state, ulong address)
+    {
+        lock (_gate)
+        {
+            if (!_waiters.TryGetValue(address, out var list))
+            {
+                return false;
+            }
+
+            for (var i = list.Count - 1; i >= 0; i--)
+            {
+                if (ReferenceEquals(list[i].State, state))
+                {
+                    list.RemoveAt(i);
+                    if (list.Count == 0)
+                    {
+                        _waiters.Remove(address);
+                    }
+
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Removes and returns waiters carrying a <see cref="WaitingDcb.RetryDeadlineTicks"/>
     /// that has elapsed. Used for indirect-dispatch dimension retries: the caller
     /// resumes them so a genuinely empty dispatch (dims that never become non-zero)
