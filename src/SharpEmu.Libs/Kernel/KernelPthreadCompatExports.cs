@@ -918,15 +918,22 @@ public static class KernelPthreadCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
                     }
 
-                    // Several Gen5 runtimes layer their own owner/count bookkeeping
-                    // over a NORMAL kernel mutex. Returning EDEADLK here
-                    // leaves that guest bookkeeping out of sync with the HLE owner and
-                    // turns the wrapper into a permanent lock/unlock retry loop. Keep
-                    // the compatibility recursion used by the original implementation;
-                    // ERRORCHECK mutexes still take the strict EDEADLK path below.
-                    state.RecursionCount++;
-                    TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                    // FreeBSD maps NORMAL/ADAPTIVE to checked non-recursive behavior:
+                    // self-lock is an error, never implicit recursion. Upstream's
+                    // "compatibility recursion" (#383, silently incrementing instead)
+                    // is deliberately reverted on this branch: Ghost of Yotei's
+                    // FaWorkerIo1 worker relies on the self-relock genuinely failing
+                    // with EDEADLK (its own error path tolerates that, matching the
+                    // benign EDEADLK probes seen elsewhere in this title's boot) —
+                    // treating it as silent recursion instead leaves the mutex held
+                    // across FaWorkerIo1's subsequent cond_wait, permanently starving
+                    // every other thread that needs it (verified live: import#13056,
+                    // reproducible 3/3, also reproduces on pure upstream/main alone
+                    // at import#18432 — same mechanism, not a merge artifact). If
+                    // another title needs the permissive behavior, it should be
+                    // reconciled per-title rather than as this function's default.
+                    TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
                 }
                 else
                 {
