@@ -2148,6 +2148,56 @@ public static partial class Gen5SpirvTranslator
                     StoreV(instruction.Destinations[0].Value, shuffled);
                     return true;
                 }
+                case "DsWriteAddtidB32":
+                {
+                    // ds_write_addtid_b32 has no address VGPR: each active lane
+                    // stores its DATA0 dword to LDS at the byte address
+                    // M0[15:0] + OFFSET0 + laneId*4, giving one contiguous slot
+                    // per lane. M0 is scalar register 124; laneId is the lane
+                    // within the wave. StoreLds already guards on the exec mask.
+                    if (instruction.Sources.Count < 1)
+                    {
+                        error = "missing DS write-addtid source";
+                        return false;
+                    }
+
+                    var addtidBase = BitwiseAnd(LoadS(124), UInt(0xFFFF));
+                    var addtidLaneByte = _module.AddInstruction(
+                        SpirvOp.ShiftLeftLogical,
+                        _uintType,
+                        GuestWaveLane(),
+                        UInt(2));
+                    StoreLds(
+                        LdsPointer(
+                            IAdd(addtidBase, addtidLaneByte),
+                            control.Offset0),
+                        GetRawSource(instruction, 0));
+                    return true;
+                }
+                case "DsReadAddtidB32":
+                {
+                    // Read counterpart of ds_write_addtid_b32: load the dword at
+                    // LDS[ M0[15:0] + OFFSET0 + laneId*4 ] into VDST.
+                    if (instruction.Destinations.Count < 1)
+                    {
+                        error = "missing DS read-addtid destination";
+                        return false;
+                    }
+
+                    var readAddtidBase = BitwiseAnd(LoadS(124), UInt(0xFFFF));
+                    var readAddtidLaneByte = _module.AddInstruction(
+                        SpirvOp.ShiftLeftLogical,
+                        _uintType,
+                        GuestWaveLane(),
+                        UInt(2));
+                    var readAddtidValue = Load(
+                        _uintType,
+                        LdsPointer(
+                            IAdd(readAddtidBase, readAddtidLaneByte),
+                            control.Offset0));
+                    StoreV(instruction.Destinations[0].Value, readAddtidValue);
+                    return true;
+                }
                 default:
                     if (Gen5ShaderTranslator.IsDataShareAtomic(instruction.Opcode))
                     {

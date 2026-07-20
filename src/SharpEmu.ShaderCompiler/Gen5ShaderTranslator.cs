@@ -1300,6 +1300,8 @@ public static class Gen5ShaderTranslator
             0x37 => "DsRead2B32",
             0x38 => "DsRead2St64B32",
             0x4D => "DsWriteB64",
+            0xB0 => "DsWriteAddtidB32",
+            0xB1 => "DsReadAddtidB32",
             0x76 => "DsReadB64",
             0x77 => "DsRead2B64",
             0xDE => "DsWriteB96",
@@ -2115,6 +2117,13 @@ public static class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorData1),
                     ],
                     "DsSwizzleB32" => [Gen5Operand.Vector(vectorData0)],
+                    // ds_write_addtid_b32 takes no address VGPR: the LDS byte
+                    // address is M0[15:0] + offset + laneId*4. Only DATA0 (the
+                    // dword to store) is a real operand.
+                    "DsWriteAddtidB32" => [Gen5Operand.Vector(vectorData0)],
+                    // ds_read_addtid_b32 reads LDS[M0[15:0] + offset +
+                    // laneId*4]; no VGPR operands, only the VDST destination.
+                    "DsReadAddtidB32" => [],
                     // DS_CMPST operand order is reversed vs buffer/image cmpswap:
                     // DATA0 holds the comparator, DATA1 holds the new value.
                     "DsCmpstB32" or "DsCmpstRtnB32" => [
@@ -2130,7 +2139,7 @@ public static class Gen5ShaderTranslator
                 };
                 destinations = opcode switch
                 {
-                    "DsReadB32" or "DsSwizzleB32" => [
+                    "DsReadB32" or "DsSwizzleB32" or "DsReadAddtidB32" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
                     "DsRead2B32" or "DsRead2St64B32" or "DsReadB64" => [
