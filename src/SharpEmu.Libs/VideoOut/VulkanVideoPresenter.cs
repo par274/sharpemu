@@ -12,6 +12,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.KHR;
 using Silk.NET.Vulkan.Extensions.EXT;
+using Silk.NET.Windowing;
+using Silk.NET.Windowing.Glfw;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Numerics;
@@ -416,6 +418,40 @@ internal static unsafe class VulkanVideoPresenter
              out var renderBudgetMs) && renderBudgetMs >= 0
             ? renderBudgetMs
             : OperatingSystem.IsMacOS() ? 12L : 0L) *
+        System.Diagnostics.Stopwatch.Frequency / 1000L;
+    // A synchronous guest-work producer (the AGC sweep parsing a command
+    // stream) completes one round trip — enqueue, WaitForGuestWork, observe
+    // the completion — and enqueues its NEXT item within microseconds. If the
+    // drain loop exits on its first empty poll, that next item sits queued
+    // until the following vsync frame, turning every round trip into a full
+    // frame period (~16.7ms at 60Hz) — a boot-time sweep of thousands of
+    // packets then silences flips for minutes while game submissions block
+    // behind the sweep's gate (observed live: multi-minute "freeze" whose
+    // stacks showed WaitForGuestWork on one side and an idle render loop on
+    // the other). Waiting this short beat for the follow-up item keeps the
+    // exchange on the current frame. SHARPEMU_RENDER_FOLLOWUP_WAIT_MS
+    // overrides; 0 disables.
+    private static readonly int _guestWorkFollowupWaitMs =
+        int.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_RENDER_FOLLOWUP_WAIT_MS"),
+            out var followupWaitMs) && followupWaitMs >= 0
+            ? followupWaitMs
+            : 2;
+    // Wall-clock cap on how long follow-up waits may extend a single
+    // Render()'s drain phase. Without it a continuously-producing sweep
+    // chains items back-to-back for the full _maxGuestWorkPerRender (1024),
+    // and the presentation code after the drain loop runs so rarely that
+    // captured flips stop reaching the screen (observed live: 9 flips
+    // captured, 1 presented). Past this budget the loop breaks, presents,
+    // and picks the backlog up on the next frame.
+    // SHARPEMU_RENDER_FOLLOWUP_BUDGET_MS overrides; 0 disables follow-up
+    // extension entirely.
+    private static readonly long _guestWorkFollowupBudgetTicks =
+        (long.TryParse(
+             Environment.GetEnvironmentVariable("SHARPEMU_RENDER_FOLLOWUP_BUDGET_MS"),
+             out var followupBudgetMs) && followupBudgetMs >= 0
+            ? followupBudgetMs
+            : 24L) *
         System.Diagnostics.Stopwatch.Frequency / 1000L;
     // Max time the main-thread Render() will block waiting for a frame slot's
     // GPU fence before skipping the frame and returning to the event pump.
@@ -2887,6 +2923,28 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
+    // See _guestWorkFollowupWaitMs. Parks on the same monitor that
+    // EnqueueGuestWorkLocked pulses, so a producer finishing its round-trip
+    // turnaround wakes this immediately instead of after the full timeout.
+    private static bool WaitForFollowupGuestWork(int timeoutMilliseconds)
+    {
+        lock (_gate)
+        {
+            if (_pendingGuestWorkCount > 0)
+            {
+                return true;
+            }
+
+            if (_closed)
+            {
+                return false;
+            }
+
+            System.Threading.Monitor.Wait(_gate, timeoutMilliseconds);
+            return _pendingGuestWorkCount > 0;
+        }
+    }
+
     private static void CompleteGuestWork(in PendingGuestWork pending)
     {
         SharpEmu.HLE.GuestImageWriteTracker.FlushPendingDiagnostics();
@@ -3074,6 +3132,26 @@ internal static unsafe class VulkanVideoPresenter
         target is not null &&
         (state.TestEnable || state.WriteEnable || state.ClearEnable);
 
+    // R8G8B8A8Unorm (8/8/8/8) and A2R10G10B10UnormPack32/B10G10R10A2UnormPack32
+    // (2/10/10/10) are the same texel block size (4 bytes), so Vulkan allows
+    // a mutable-format image view to alias between them -- but their bit
+    // layouts are completely different. A raw view reinterpretation is a
+    // bit-cast, not a conversion: an opaque-black R8G8B8A8 pixel (bytes
+    // 00 00 00 FF) reinterpreted this way reads back as approximately
+    // (R=0.985, G=0, B=0) -- the exact uniform red observed across the whole
+    // Ghost of Yotei G-buffer investigation (see PROGRESS.md). Real
+    // conversion is required for this specific pair; every other
+    // reinterpret keeps the existing cheap bit-cast (matches real hardware
+    // and is correct when the two formats really do share a bit layout,
+    // e.g. R8G8B8A8 vs B8G8R8A8 channel-order swaps).
+    internal static bool RequiresRealFormatConversion(Format from, Format to)
+    {
+        static bool Is10Bit(Format f) =>
+            f is Format.A2R10G10B10UnormPack32 or Format.A2B10G10R10UnormPack32;
+        return (from == Format.R8G8B8A8Unorm && Is10Bit(to)) ||
+               (Is10Bit(from) && to == Format.R8G8B8A8Unorm);
+    }
+
     private readonly record struct Presentation(
         byte[]? Pixels,
         uint Width,
@@ -3089,6 +3167,23 @@ internal static unsafe class VulkanVideoPresenter
 
     private sealed class Presenter : IDisposable
     {
+        // Registers GLFW directly instead of leaving Window.Create's first call
+        // to fall through to Silk.NET's reflection-based platform auto-detection
+        // (Window.get_Platforms -> DoLoadFirstPartyPlatformsViaReflection), which
+        // probes for every optional windowing backend by name via Assembly.Load
+        // -- including Silk.NET.Windowing.Sdl, which SharpEmu never ships. That
+        // probe's FileNotFoundException throw/catch, landing on this thread mid a
+        // reverse-P/Invoke transition, was root-caused (WinDbg, live repro) as the
+        // trigger for the CLR's "attempted to call a UnmanagedCallersOnly method
+        // from managed code" fatal (coreclr!ReversePInvokeBadTransition) -- see
+        // PROGRESS.md. GLFW is the only backend SharpEmu deploys, so registering
+        // it explicitly makes the reflection probe (and the exception it throws)
+        // never happen at all.
+        static Presenter()
+        {
+            GlfwWindowing.Use();
+        }
+
         private const string FullscreenBarycentricVertexSpirv =
             "AwIjBwAAAQALAAgAMgAAAAAAAAARAAIAAQAAAAsABgABAAAAR0xTTC5zdGQuNDUwAAAAAA4AAwAAAAAAAQAAAA8ACAAAAAAABAAAAG1haW4AAAAADQAAABoAAAApAAAAAwADAAIAAADCAQAABQAEAAQAAABtYWluAAAAAAUABgALAAAAZ2xfUGVyVmVydGV4AAAAAAYABgALAAAAAAAAAGdsX1Bvc2l0aW9uAAYABwALAAAAAQAAAGdsX1BvaW50U2l6ZQAAAAAGAAcACwAAAAIAAABnbF9DbGlwRGlzdGFuY2UABgAHAAsAAAADAAAAZ2xfQ3VsbERpc3RhbmNlAAUAAwANAAAAAAAAAAUABgAaAAAAZ2xfVmVydGV4SW5kZXgAAAUABQAdAAAAaW5kZXhhYmxlAAAABQAFACkAAABiYXJ5Y2VudHJpYwAFAAUALwAAAGluZGV4YWJsZQAAAEcAAwALAAAAAgAAAEgABQALAAAAAAAAAAsAAAAAAAAASAAFAAsAAAABAAAACwAAAAEAAABIAAUACwAAAAIAAAALAAAAAwAAAEgABQALAAAAAwAAAAsAAAAEAAAARwAEABoAAAALAAAAKgAAAEcABAApAAAAHgAAAAAAAAATAAIAAgAAACEAAwADAAAAAgAAABYAAwAGAAAAIAAAABcABAAHAAAABgAAAAQAAAAVAAQACAAAACAAAAAAAAAAKwAEAAgAAAAJAAAAAQAAABwABAAKAAAABgAAAAkAAAAeAAYACwAAAAcAAAAGAAAACgAAAAoAAAAgAAQADAAAAAMAAAALAAAAOwAEAAwAAAANAAAAAwAAABUABAAOAAAAIAAAAAEAAAArAAQADgAAAA8AAAAAAAAAFwAEABAAAAAGAAAAAgAAACsABAAIAAAAEQAAAAMAAAAcAAQAEgAAABAAAAARAAAAKwAEAAYAAAATAAAAAACAvywABQAQAAAAFAAAABMAAAATAAAAKwAEAAYAAAAVAAAAAABAQCwABQAQAAAAFgAAABUAAAATAAAALAAFABAAAAAXAAAAEwAAABUAAAAsAAYAEgAAABgAAAAUAAAAFgAAABcAAAAgAAQAGQAAAAEAAAAOAAAAOwAEABkAAAAaAAAAAQAAACAABAAcAAAABwAAABIAAAAgAAQAHgAAAAcAAAAQAAAAKwAEAAYAAAAhAAAAAAAAACsABAAGAAAAIgAAAAAAgD8gAAQAJgAAAAMAAAAHAAAAIAAEACgAAAADAAAAEAAAADsABAAoAAAAKQAAAAMAAAAsAAUAEAAAACoAAAAiAAAAIQAAACwABQAQAAAAKwAAACEAAAAiAAAALAAFABAAAAAsAAAAIQAAACEAAAAsAAYAEgAAAC0AAAAqAAAAKwAAACwAAAA2AAUAAgAAAAQAAAAAAAAAAwAAAPgAAgAFAAAAOwAEABwAAAAdAAAABwAAADsABAAcAAAALwAAAAcAAAA9AAQADgAAABsAAAAaAAAAPgADAB0AAAAYAAAAQQAFAB4AAAAfAAAAHQAAABsAAAA9AAQAEAAAACAAAAAfAAAAUQAFAAYAAAAjAAAAIAAAAAAAAABRAAUABgAAACQAAAAgAAAAAQAAAFAABwAHAAAAJQAAACMAAAAkAAAAIQAAACIAAABBAAUAJgAAACcAAAANAAAADwAAAD4AAwAnAAAAJQAAAD0ABAAOAAAALgAAABoAAAA+AAMALwAAAC0AAABBAAUAHgAAADAAAAAvAAAALgAAAD0ABAAQAAAAMQAAADAAAAA+AAMAKQAAADEAAAD9AAEAOAABAA==";
 
@@ -3561,6 +3656,13 @@ internal static unsafe class VulkanVideoPresenter
             public RenderPass RenderPass;
             public RenderPass InitialRenderPass;
             public Framebuffer Framebuffer;
+            // Passes that alternate the same guest address between a small
+            // set of sibling formats (e.g. a compute UAV write re-bound as a
+            // render target in another DFMT) reinterpret every frame. Caching
+            // the promoted views/render pass/framebuffer per format avoids
+            // rebuilding them from scratch each time the same format comes
+            // back around.
+            public Dictionary<Format, ReinterpretedGuestImageViews> ReinterpretCache { get; } = new();
             public Dictionary<GuestDepthKey, DepthFramebufferResource> DepthFramebuffers { get; } = new();
             public bool Initialized;
             public bool InitialUploadPending;
@@ -3568,6 +3670,13 @@ internal static unsafe class VulkanVideoPresenter
             public ulong CpuContentFingerprint;
             public bool SupportsStorageUsage;
         }
+
+        private readonly record struct ReinterpretedGuestImageViews(
+            ImageView View,
+            ImageView[] MipViews,
+            RenderPass RenderPass,
+            RenderPass InitialRenderPass,
+            Framebuffer Framebuffer);
 
         private sealed record PendingGuestSubmission(
             Fence Fence,
@@ -6029,6 +6138,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 _deferredGuestImageVersionDestroys.Dequeue();
                 DestroyGuestImage(imageEntry.Image);
+                FlipProgressTracker.RecordFlip(imageEntry.Image.FlipVersion);
                 TraceVulkanShader(
                     $"vk.flip_retired version={imageEntry.Image.FlipVersion} " +
                     $"timeline={imageEntry.RetireTimeline} reason=presentation-dropped");
@@ -6054,6 +6164,7 @@ internal static unsafe class VulkanVideoPresenter
                     _frameGuestImageVersions[slot] = null;
                     _capturedGuestFlipVersions.Remove(unsubmittedVersion.FlipVersion);
                     DestroyGuestImage(unsubmittedVersion);
+                    FlipProgressTracker.RecordFlip(unsubmittedVersion.FlipVersion);
                     TraceVulkanShader(
                         $"vk.flip_retired version={unsubmittedVersion.FlipVersion} " +
                         $"frame_slot={slot} reason=frame-not-submitted");
@@ -6087,6 +6198,7 @@ internal static unsafe class VulkanVideoPresenter
                 _frameGuestImageVersions[slot] = null;
                 _capturedGuestFlipVersions.Remove(guestImageVersion.FlipVersion);
                 DestroyGuestImage(guestImageVersion);
+                FlipProgressTracker.RecordFlip(guestImageVersion.FlipVersion);
                 TraceVulkanShader(
                     $"vk.flip_retired version={guestImageVersion.FlipVersion} " +
                     $"frame_slot={slot} timeline={_frameTimelines[slot]}");
@@ -10104,7 +10216,35 @@ internal static unsafe class VulkanVideoPresenter
 
             var source = guestBuffer.Data.AsSpan(0, guestBuffer.Length);
             var shadow = allocation.Shadow.AsSpan(checked((int)guestOffset), guestBuffer.Length);
-            if (!source.SequenceEqual(shadow))
+            var needsRefresh = !source.SequenceEqual(shadow);
+            if (!needsRefresh && _guestMemory is not null)
+            {
+                // `guestBuffer.Data` is a snapshot captured when this
+                // dispatch's bindings were resolved, which can run before an
+                // earlier-queued GPU write that should refresh this buffer
+                // has actually landed in guest memory. Comparing only that
+                // snapshot against the cached shadow can therefore miss
+                // genuinely new content sitting in live guest memory,
+                // permanently starving readers that alias this address under
+                // a different queue than the writer (see PROGRESS.md,
+                // Ghost of Yotei G-buffer investigation).
+                var live = GuestDataPool.Shared.Rent(guestBuffer.Length);
+                try
+                {
+                    var liveSpan = live.AsSpan(0, guestBuffer.Length);
+                    if (_guestMemory.TryRead(guestBuffer.BaseAddress, liveSpan) &&
+                        !liveSpan.SequenceEqual(shadow))
+                    {
+                        needsRefresh = true;
+                    }
+                }
+                finally
+                {
+                    GuestDataPool.Shared.Return(live);
+                }
+            }
+
+            if (needsRefresh)
             {
                 if (!guestBuffer.Writable &&
                     (allocation.LastUseTimeline > _completedTimeline ||
@@ -13476,6 +13616,69 @@ internal static unsafe class VulkanVideoPresenter
                     return existing;
                 }
 
+                if (existing.Width == target.Width &&
+                    existing.Height == target.Height &&
+                    existing.MipLevels == mipLevels &&
+                    IsCompatibleViewFormat(existing.Format, format))
+                {
+                    // Same guest address/extent, sibling format (same Vulkan
+                    // format-compatibility class, e.g. a compute UAV write in
+                    // one DFMT re-bound as a render/sample target in another).
+                    // Real hardware reinterprets the same bytes; recreating a
+                    // brand-new zero-filled image here (the path below) threw
+                    // away whatever a prior pass had actually written and left
+                    // the new binding permanently blank — observed on Yotei as
+                    // an address ping-ponging between R8G8B8A8Unorm and
+                    // A2R10G10B10UnormPack32 every frame with the GPU-written
+                    // side never being the one sampled.
+                    if (requiresStorage && !existing.SupportsStorageUsage)
+                    {
+                        throw new InvalidOperationException(
+                            $"Guest image 0x{target.Address:X16} was created without storage usage.");
+                    }
+
+                    if (_traceGuestImageEvents)
+                    {
+                        Console.Error.WriteLine(
+                            $"[GIMG] reinterpret addr=0x{target.Address:X} " +
+                            $"{existing.Format}->{format} {target.Width}x{target.Height} " +
+                            $"initialized={existing.Initialized}");
+                    }
+
+                    // Callers that skip GetOrCreateGuestImage's own
+                    // Handle==0 lazy-promotion check (single-target offscreen
+                    // draws read firstTarget.RenderPass/InitialRenderPass
+                    // directly) need a live render pass immediately, not on
+                    // the next exact-match lookup — ask for it up front
+                    // unless this bind is storage-only (compute UAV).
+                    ReinterpretGuestImageFormat(existing, format, !requiresStorage, target);
+                    existing.GuestFormat = guestFormat;
+                    existing.IsCpuBacked = false;
+                    existing.CpuContentFingerprint = 0;
+                    if (!requiresStorage && existing.RenderPass.Handle == 0)
+                    {
+                        // A cache hit can restore a format that was last
+                        // active only as a storage bind (never promoted).
+                        var attachmentView = existing.MipViews.Length > 0
+                            ? existing.MipViews[0]
+                            : existing.View;
+                        var promoted = CreateRenderPassAndFramebuffer(
+                            existing.Format,
+                            attachmentView,
+                            existing.Width,
+                            existing.Height);
+                        existing.RenderPass = promoted.RenderPass;
+                        existing.InitialRenderPass = promoted.InitialRenderPass;
+                        existing.Framebuffer = promoted.Framebuffer;
+                        var promotedName = GuestImageDebugName(target, format);
+                        SetDebugName(ObjectType.RenderPass, promoted.RenderPass.Handle, $"{promotedName} renderpass");
+                        SetDebugName(ObjectType.RenderPass, promoted.InitialRenderPass.Handle, $"{promotedName} initial-renderpass");
+                        SetDebugName(ObjectType.Framebuffer, promoted.Framebuffer.Handle, $"{promotedName} framebuffer");
+                    }
+
+                    return existing;
+                }
+
                 if (_traceGuestImageEvents)
                 {
                     Console.Error.WriteLine(
@@ -14228,6 +14431,393 @@ internal static unsafe class VulkanVideoPresenter
             mipLevel >= 32
                 ? 1
                 : Math.Max(dimension >> (int)mipLevel, 1u);
+        private unsafe (Image Image, DeviceMemory Memory) CreateTransferScratchImage(
+            Format format,
+            uint width,
+            uint height)
+        {
+            var imageInfo = new ImageCreateInfo
+            {
+                SType = StructureType.ImageCreateInfo,
+                ImageType = ImageType.Type2D,
+                Format = format,
+                Extent = new Extent3D(width, height, 1),
+                MipLevels = 1,
+                ArrayLayers = 1,
+                Samples = SampleCountFlags.Count1Bit,
+                Tiling = ImageTiling.Optimal,
+                Usage = ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit,
+                SharingMode = SharingMode.Exclusive,
+                InitialLayout = ImageLayout.Undefined,
+            };
+            Check(_vk.CreateImage(_device, &imageInfo, null, out var image), "vkCreateImage(format-convert scratch)");
+            _vk.GetImageMemoryRequirements(_device, image, out var requirements);
+            var allocationInfo = new MemoryAllocateInfo
+            {
+                SType = StructureType.MemoryAllocateInfo,
+                AllocationSize = requirements.Size,
+                MemoryTypeIndex = FindMemoryType(
+                    requirements.MemoryTypeBits,
+                    MemoryPropertyFlags.DeviceLocalBit),
+            };
+            Check(
+                _vk.AllocateMemory(_device, &allocationInfo, null, out var memory),
+                "vkAllocateMemory(format-convert scratch)");
+            Check(_vk.BindImageMemory(_device, image, memory, 0), "vkBindImageMemory(format-convert scratch)");
+            return (image, memory);
+        }
+
+        // Converts the bytes backing `resource.Image`'s first mip in place
+        // from `fromFormat` to `toFormat`, going through two throwaway
+        // images so the interpretation used by vkCmdCopyImage/vkCmdBlitImage
+        // never depends on whichever format `resource.Image` happened to be
+        // created with originally (mutable-format images don't track a
+        // reliable "current" format for that purpose -- SharpEmu's own
+        // GuestImageResource.Format bookkeeping is the only source of truth
+        // for that). oldTyped gets a byte-identical copy of the current
+        // contents under fromFormat (a raw block copy: always well-defined
+        // for same-size texel formats), a real blit converts that into
+        // newTyped under toFormat, and a final raw block copy writes the
+        // converted bytes back into resource.Image.
+        private unsafe void ConvertGuestImageBytesInPlace(
+            GuestImageResource resource,
+            Format fromFormat,
+            Format toFormat)
+        {
+            var (oldTyped, oldMemory) = CreateTransferScratchImage(fromFormat, resource.Width, resource.Height);
+            var (newTyped, newMemory) = CreateTransferScratchImage(toFormat, resource.Width, resource.Height);
+            try
+            {
+                var commandBuffer = AllocateGuestCommandBuffer();
+                var beginInfo = new CommandBufferBeginInfo
+                {
+                    SType = StructureType.CommandBufferBeginInfo,
+                    Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
+                };
+                Check(
+                    _vk.BeginCommandBuffer(commandBuffer, &beginInfo),
+                    "vkBeginCommandBuffer(format-convert)");
+
+                var toTransferSrc = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.MemoryWriteBit,
+                    DstAccessMask = AccessFlags.TransferReadBit,
+                    OldLayout = ImageLayout.General,
+                    NewLayout = ImageLayout.TransferSrcOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = resource.Image,
+                    SubresourceRange = ColorSubresourceRange(0, 1),
+                };
+                _vk.CmdPipelineBarrier(
+                    commandBuffer, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &toTransferSrc);
+
+                var oldTypedToDst = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = 0,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                    OldLayout = ImageLayout.Undefined,
+                    NewLayout = ImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = oldTyped,
+                    SubresourceRange = ColorSubresourceRange(0, 1),
+                };
+                _vk.CmdPipelineBarrier(
+                    commandBuffer, PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &oldTypedToDst);
+
+                var copyRegion = new ImageCopy
+                {
+                    SrcSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                    SrcOffset = new Offset3D(0, 0, 0),
+                    DstSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                    DstOffset = new Offset3D(0, 0, 0),
+                    Extent = new Extent3D(resource.Width, resource.Height, 1),
+                };
+                _vk.CmdCopyImage(
+                    commandBuffer,
+                    resource.Image, ImageLayout.TransferSrcOptimal,
+                    oldTyped, ImageLayout.TransferDstOptimal,
+                    1, &copyRegion);
+
+                var oldTypedToSrc = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.TransferReadBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.TransferSrcOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = oldTyped,
+                    SubresourceRange = ColorSubresourceRange(0, 1),
+                };
+                _vk.CmdPipelineBarrier(
+                    commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &oldTypedToSrc);
+
+                var newTypedToDst = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = 0,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                    OldLayout = ImageLayout.Undefined,
+                    NewLayout = ImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = newTyped,
+                    SubresourceRange = ColorSubresourceRange(0, 1),
+                };
+                _vk.CmdPipelineBarrier(
+                    commandBuffer, PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &newTypedToDst);
+
+                var blitRegion = new ImageBlit
+                {
+                    SrcSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                    SrcOffsets = new ImageBlit.SrcOffsetsBuffer
+                    {
+                        Element0 = new Offset3D(0, 0, 0),
+                        Element1 = new Offset3D(checked((int)resource.Width), checked((int)resource.Height), 1),
+                    },
+                    DstSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                    DstOffsets = new ImageBlit.DstOffsetsBuffer
+                    {
+                        Element0 = new Offset3D(0, 0, 0),
+                        Element1 = new Offset3D(checked((int)resource.Width), checked((int)resource.Height), 1),
+                    },
+                };
+                _vk.CmdBlitImage(
+                    commandBuffer,
+                    oldTyped, ImageLayout.TransferSrcOptimal,
+                    newTyped, ImageLayout.TransferDstOptimal,
+                    1, &blitRegion, Filter.Nearest);
+
+                var newTypedToSrc = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.TransferReadBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.TransferSrcOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = newTyped,
+                    SubresourceRange = ColorSubresourceRange(0, 1),
+                };
+                _vk.CmdPipelineBarrier(
+                    commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &newTypedToSrc);
+
+                var resourceToDst = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferReadBit,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                    OldLayout = ImageLayout.TransferSrcOptimal,
+                    NewLayout = ImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = resource.Image,
+                    SubresourceRange = ColorSubresourceRange(0, 1),
+                };
+                _vk.CmdPipelineBarrier(
+                    commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &resourceToDst);
+
+                _vk.CmdCopyImage(
+                    commandBuffer,
+                    newTyped, ImageLayout.TransferSrcOptimal,
+                    resource.Image, ImageLayout.TransferDstOptimal,
+                    1, &copyRegion);
+
+                var resourceToGeneral = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.General,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = resource.Image,
+                    SubresourceRange = ColorSubresourceRange(0, 1),
+                };
+                _vk.CmdPipelineBarrier(
+                    commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit,
+                    0, 0, null, 0, null, 1, &resourceToGeneral);
+
+                Check(_vk.EndCommandBuffer(commandBuffer), "vkEndCommandBuffer(format-convert)");
+                SubmitGuestCommandBuffer(commandBuffer, [], []);
+
+                if (_traceGuestImageEvents)
+                {
+                    Console.Error.WriteLine(
+                        "[FORMAT-CONVERT] " +
+                        $"source_format={fromFormat} target_format={toFormat} " +
+                        $"address=0x{resource.Address:X16} " +
+                        "reason=bit-incompatible-view-reinterpret " +
+                        $"size={resource.Width}x{resource.Height}");
+                }
+            }
+            finally
+            {
+                _vk.DestroyImage(_device, oldTyped, null);
+                _vk.FreeMemory(_device, oldMemory, null);
+                _vk.DestroyImage(_device, newTyped, null);
+                _vk.FreeMemory(_device, newMemory, null);
+            }
+        }
+
+        // Opt-in: a control test showed the boot sequence stalling far
+        // earlier and far more consistently with this fix built in than
+        // without it, even though the new code path is never reached before
+        // the stall point -- source unconfirmed (possibly coincidental
+        // sample size, possibly some indirect JIT/startup timing effect),
+        // but not acceptable to leave on by default until that's understood.
+        // The pairing-detection logic and its unit tests stay in place
+        // either way: they're inert and document the bit-cast math
+        // independently of whether the live conversion runs.
+        private static readonly bool _realFormatConversionEnabled = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_ENABLE_REAL_FORMAT_CONVERSION"),
+            "1",
+            StringComparison.Ordinal);
+
+        private void ReinterpretGuestImageFormat(
+            GuestImageResource resource,
+            Format format,
+            bool promoteRenderPass,
+            GuestRenderTarget target)
+        {
+            if (_realFormatConversionEnabled &&
+                RequiresRealFormatConversion(resource.Format, format))
+            {
+                ConvertGuestImageBytesInPlace(resource, resource.Format, format);
+                // The bytes now represent `format`, not whatever any cached
+                // view for a different format previously assumed -- keeping
+                // those cached views around would let a later ping-pong back
+                // to one of them silently reuse now-stale byte assumptions.
+                foreach (var cachedEntry in resource.ReinterpretCache.Values)
+                {
+                    DestroyReinterpretedGuestImageViews(cachedEntry);
+                }
+                resource.ReinterpretCache.Clear();
+            }
+
+            // Rebuild only the format-dependent derived objects (views, the
+            // render pass/framebuffer pair) in place over the SAME
+            // Image/Memory. Destroying and reallocating the image itself
+            // here would defeat the point: the whole reason for this path is
+            // to keep the physical bytes a prior GPU write left behind
+            // instead of starting over blank. Passes that ping-pong the same
+            // address between a couple of sibling formats every frame (the
+            // observed Yotei pattern) would otherwise pay a fresh
+            // CreateRenderPass/CreateFramebuffer/CreateImageView round trip
+            // per swap; cache the promoted set per format and reuse it.
+            var previous = new ReinterpretedGuestImageViews(
+                resource.View,
+                resource.MipViews,
+                resource.RenderPass,
+                resource.InitialRenderPass,
+                resource.Framebuffer);
+            resource.ReinterpretCache.TryAdd(resource.Format, previous);
+
+            if (resource.ReinterpretCache.Remove(format, out var cached))
+            {
+                resource.View = cached.View;
+                resource.MipViews = cached.MipViews;
+                resource.RenderPass = cached.RenderPass;
+                resource.InitialRenderPass = cached.InitialRenderPass;
+                resource.Framebuffer = cached.Framebuffer;
+                resource.Format = format;
+                return;
+            }
+
+            var viewInfo = new ImageViewCreateInfo
+            {
+                SType = StructureType.ImageViewCreateInfo,
+                Image = resource.Image,
+                ViewType = ImageViewType.Type2D,
+                Format = format,
+                Components = new ComponentMapping(
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity),
+                SubresourceRange = ColorSubresourceRange(0, resource.MipLevels),
+            };
+            Check(
+                _vk.CreateImageView(_device, &viewInfo, null, out var newView),
+                "vkCreateImageView(guest reinterpret)");
+            resource.View = newView;
+
+            var mipViews = new ImageView[resource.MipLevels];
+            for (uint mipLevel = 0; mipLevel < resource.MipLevels; mipLevel++)
+            {
+                viewInfo.SubresourceRange = ColorSubresourceRange(mipLevel, 1);
+                Check(
+                    _vk.CreateImageView(_device, &viewInfo, null, out var mipView),
+                    "vkCreateImageView(guest reinterpret mip)");
+                mipViews[mipLevel] = mipView;
+            }
+
+            resource.MipViews = mipViews;
+            resource.Format = format;
+
+            if (promoteRenderPass)
+            {
+                var attachmentView = resource.MipViews.Length > 0
+                    ? resource.MipViews[0]
+                    : resource.View;
+                var promoted = CreateRenderPassAndFramebuffer(
+                    resource.Format,
+                    attachmentView,
+                    resource.Width,
+                    resource.Height);
+                resource.RenderPass = promoted.RenderPass;
+                resource.InitialRenderPass = promoted.InitialRenderPass;
+                resource.Framebuffer = promoted.Framebuffer;
+                var promotedName = GuestImageDebugName(target, format);
+                SetDebugName(ObjectType.RenderPass, promoted.RenderPass.Handle, $"{promotedName} renderpass");
+                SetDebugName(ObjectType.RenderPass, promoted.InitialRenderPass.Handle, $"{promotedName} initial-renderpass");
+                SetDebugName(ObjectType.Framebuffer, promoted.Framebuffer.Handle, $"{promotedName} framebuffer");
+            }
+        }
+
+        private void DestroyReinterpretedGuestImageViews(ReinterpretedGuestImageViews views)
+        {
+            if (views.Framebuffer.Handle != 0)
+            {
+                _vk.DestroyFramebuffer(_device, views.Framebuffer, null);
+            }
+
+            if (views.RenderPass.Handle != 0)
+            {
+                _vk.DestroyRenderPass(_device, views.RenderPass, null);
+            }
+
+            if (views.InitialRenderPass.Handle != 0)
+            {
+                _vk.DestroyRenderPass(_device, views.InitialRenderPass, null);
+            }
+
+            if (views.View.Handle != 0)
+            {
+                _vk.DestroyImageView(_device, views.View, null);
+            }
+
+            foreach (var mipView in views.MipViews)
+            {
+                if (mipView.Handle != 0)
+                {
+                    _vk.DestroyImageView(_device, mipView, null);
+                }
+            }
+        }
 
         private void DestroyGuestImage(GuestImageResource resource)
         {
@@ -14245,6 +14835,12 @@ internal static unsafe class VulkanVideoPresenter
                 }
             }
             resource.FormatViews.Clear();
+
+            foreach (var cached in resource.ReinterpretCache.Values)
+            {
+                DestroyReinterpretedGuestImageViews(cached);
+            }
+            resource.ReinterpretCache.Clear();
 
             if (resource.Framebuffer.Handle != 0)
             {
@@ -14449,13 +15045,21 @@ internal static unsafe class VulkanVideoPresenter
             return imageClass != 0 && imageClass == GetFormatCompatibilityClass(viewFormat);
         }
 
+        // Vulkan format compatibility classes (spec "Compatible Formats"):
+        // any two color formats in the same class may alias through a
+        // MUTABLE_FORMAT image view. Guest images are always created with
+        // that flag, so an incomplete table here silently downgrades a
+        // GPU-written render target to a zero-filled CPU upload when a pass
+        // re-samples it through a sibling format (observed on Yotei: R8Srgb
+        // view over an R8Unorm image).
         private static uint GetFormatCompatibilityClass(Format format) =>
             format switch
             {
                 Format.R8Unorm or
+                Format.R8SNorm or
+                Format.R8Srgb or
                 Format.R8Uint or
-                Format.R8Sint or
-                Format.R8SNorm => 8,
+                Format.R8Sint => 8,
                 // Every single-channel 16-bit format shares this class, not just
                 // the float one. Omitting the rest made GetVulkanImageByteCount
                 // return zero for them, and a zero expected size rejects the
@@ -14469,26 +15073,36 @@ internal static unsafe class VulkanVideoPresenter
                 Format.R16Sint or
                 Format.R8G8Unorm or
                 Format.R8G8SNorm or
+                Format.R8G8Srgb or
                 Format.R8G8Uint or
                 Format.R8G8Sint => 16,
                 Format.R32Uint or
                 Format.R32Sint or
                 Format.R32Sfloat or
                 Format.R16G16Unorm or
+                Format.R16G16SNorm or
                 Format.R16G16Uint or
                 Format.R16G16Sint or
                 Format.R16G16Sfloat or
                 Format.R8G8B8A8Unorm or
+                Format.R8G8B8A8SNorm or
                 Format.R8G8B8A8Srgb or
                 Format.R8G8B8A8Uint or
                 Format.R8G8B8A8Sint or
+                Format.B8G8R8A8Unorm or
+                Format.B8G8R8A8SNorm or
+                Format.B8G8R8A8Srgb or
+                Format.A8B8G8R8UnormPack32 or
+                Format.A8B8G8R8SrgbPack32 or
                 Format.A2R10G10B10UnormPack32 or
                 Format.A2B10G10R10UnormPack32 or
-                Format.B10G11R11UfloatPack32 => 32,
+                Format.B10G11R11UfloatPack32 or
+                Format.E5B9G9R9UfloatPack32 => 32,
                 Format.R32G32Uint or
                 Format.R32G32Sint or
                 Format.R32G32Sfloat or
                 Format.R16G16B16A16Unorm or
+                Format.R16G16B16A16SNorm or
                 Format.R16G16B16A16Uint or
                 Format.R16G16B16A16Sint or
                 Format.R16G16B16A16Sfloat => 64,
@@ -14596,10 +15210,13 @@ internal static unsafe class VulkanVideoPresenter
 
             var completedWork = 0;
             HashSet<string>? deferredOrderedQueues = null;
-            var workBudgetTicks = _renderWorkBudgetTicks;
-            var renderWorkDeadline = workBudgetTicks > 0
-                ? System.Diagnostics.Stopwatch.GetTimestamp() + workBudgetTicks
+            var drainStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            var renderWorkDeadline = _renderWorkBudgetTicks > 0
+                ? drainStartTicks + _renderWorkBudgetTicks
                 : long.MaxValue;
+            var followupDeadline = _guestWorkFollowupBudgetTicks > 0
+                ? drainStartTicks + _guestWorkFollowupBudgetTicks
+                : long.MinValue;
             var workLimit = _maxGuestWorkPerRender;
             // Prefer ordered sync / flip heads while the queue is elevated so
             // label wakeups are not starved behind fat compute/draw items on
@@ -14637,7 +15254,20 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (!tookGuestWork)
                 {
-                    break;
+                    // Only wait for a follow-up when this frame already
+                    // completed something: that completion is what a
+                    // synchronous producer is turning around on right now.
+                    var nowTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (completedWork == 0 ||
+                        _guestWorkFollowupWaitMs <= 0 ||
+                        nowTicks >= followupDeadline ||
+                        nowTicks >= renderWorkDeadline ||
+                        !WaitForFollowupGuestWork(_guestWorkFollowupWaitMs))
+                    {
+                        break;
+                    }
+
+                    continue;
                 }
 
                 if (!string.Equals(
@@ -16378,10 +17008,18 @@ internal static unsafe class VulkanVideoPresenter
                     Image = guestImage.Image,
                     SubresourceRange = ColorSubresourceRange(0, guestImage.MipLevels),
                 };
+                // The consuming access can land in a later, separately
+                // submitted command buffer (e.g. a compute writer feeding a
+                // fragment-shader sampler in the next draw). Narrowing
+                // dstStageMask to the writer's own stage only orders it
+                // against other work in that same stage, so a downstream
+                // read in a different stage can observe stale/undefined
+                // image contents. Use AllCommandsBit for the destination so
+                // every later consumer is covered regardless of stage.
                 _vk.CmdPipelineBarrier(
                     _commandBuffer,
                     shaderStage,
-                    shaderStage,
+                    PipelineStageFlags.AllCommandsBit,
                     0,
                     0,
                     null,

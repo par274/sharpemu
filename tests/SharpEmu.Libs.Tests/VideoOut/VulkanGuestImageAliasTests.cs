@@ -53,7 +53,6 @@ public sealed class VulkanGuestImageAliasTests
     }
 
     [Theory]
-    [InlineData(Format.R8Srgb, Format.R8Unorm)]
     [InlineData(Format.BC3SrgbBlock, Format.BC3UnormBlock)]
     public void CounterpartsOutsideTheViewClassTableAreNotAliased(
         Format existing,
@@ -66,6 +65,19 @@ public sealed class VulkanGuestImageAliasTests
             VulkanVideoPresenter.IsCompatibleGuestImageViewFormat(existing, requested));
         Assert.False(
             VulkanVideoPresenter.IsAliasableGuestImageFormat(existing, requested));
+    }
+
+    [Fact]
+    public void R8SrgbAndR8UnormShareOneCompatibilityClass()
+    {
+        // GetFormatCompatibilityClass groups every single-channel 8-bit
+        // format together (Yotei: an R8Srgb view over an R8Unorm image was
+        // dropping GPU-written content because the pair used to fall
+        // outside the table entirely).
+        Assert.True(
+            VulkanVideoPresenter.IsCompatibleGuestImageViewFormat(
+                Format.R8Srgb,
+                Format.R8Unorm));
     }
 
     [Fact]
