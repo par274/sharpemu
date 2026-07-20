@@ -379,6 +379,26 @@ internal static class GpuWaitRegistry
     }
 
     /// <summary>
+    /// Copies every currently registered waiter, for stall diagnostics only
+    /// (SharpEmu.Core's flip-stall watchdog). Not filtered by memory identity:
+    /// the watchdog has no CpuContext.Memory to canonicalize against and wants
+    /// a whole-process view.
+    /// </summary>
+    public static List<WaitingDcb> SnapshotAll()
+    {
+        var snapshot = new List<WaitingDcb>();
+        lock (_gate)
+        {
+            foreach (var (_, list) in _waiters)
+            {
+                snapshot.AddRange(list);
+            }
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
     /// Removes the waiter registered at <paramref name="address"/> whose State
     /// is <paramref name="state"/>. Used when an explicit new submission
     /// supersedes a synthetic ring-tail park (the CP write-pointer wait): the
@@ -622,6 +642,29 @@ internal static class GpuWaitRegistry
         return broken;
     }
 
+    // With the orphan force-submit machinery, producers run eagerly rather
+    // than at the game's own dependency pace, so a monotonically increasing
+    // completion counter can pass a value BEFORE its equal-compare waiter
+    // registers (observed live: label 0x2000000420 executed data=6 then 7,
+    // then the ==6 wait arrived and hung forever; label 0x2000000020 jumped
+    // 5→7 with the built 6 clipped away entirely). Real hardware never sees
+    // this because queue order enforces produce-after-wait. Treating == as
+    // "reached or passed" for these counters is exactly what the game's frame
+    // gates mean. Scoped to runs with the orphan machinery enabled (the only
+    // configuration where producers can outrun waiter registration) so titles
+    // running without it keep exact hardware semantics — a label the game
+    // resets and re-counts must not satisfy early. SHARPEMU_GPU_WAIT_EQ_EXACT=1
+    // restores strict equality even under the orphan machinery, for A/B.
+    private static readonly bool _equalCompareExact =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_GPU_WAIT_EQ_EXACT"),
+            "1",
+            StringComparison.Ordinal) ||
+        !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES"),
+            "1",
+            StringComparison.Ordinal);
+
     public static bool Compare(in WaitingDcb waiter, ulong value)
     {
         var masked = value & waiter.Mask;
@@ -631,7 +674,7 @@ internal static class GpuWaitRegistry
             0 => true,
             1 => masked < reference,
             2 => masked <= reference,
-            3 => masked == reference,
+            3 => _equalCompareExact ? masked == reference : masked >= reference,
             4 => masked != reference,
             5 => masked >= reference,
             6 => masked > reference,
