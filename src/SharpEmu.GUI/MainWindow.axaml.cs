@@ -84,7 +84,6 @@ public partial class MainWindow : Window
     private string? _runningGameName;
     private string? _runningGameTitleId;
     private long _runningSinceUnixSeconds;
-    private int _detailLoadGeneration;
     private int _backdropGeneration;
 
     // Bundled key art shown whenever no game-specific backdrop applies; the
@@ -109,6 +108,16 @@ public partial class MainWindow : Window
     private readonly Services.Abstractions.ILogService _logService;
     private readonly ViewModels.SessionViewModel _session;
     private readonly Services.Abstractions.IGamepadInputService _gamepad;
+
+    /// <summary>
+    /// Design-time / runtime-loader constructor. Resolves the shell view-model
+    /// and services from the DI container so the window stays constructible
+    /// without parameters (Avalonia's XAML runtime loader requires this).
+    /// </summary>
+    public MainWindow()
+        : this(GuiLauncher.Services.GetRequiredService<ViewModels.MainViewModel>())
+    {
+    }
 
     public MainWindow(ViewModels.MainViewModel main)
     {
@@ -536,7 +545,7 @@ public partial class MainWindow : Window
         // Page.Library / Page.Options and the toolbar buttons (AddFolder,
         // Rescan, OpenFile) are now XAML-bound to the Localization indexer, so
         // they refresh automatically on language change.
-        SearchBox.Watermark = loc.Get("Library.SearchWatermark");
+        SearchBox.PlaceholderText = loc.Get("Library.SearchWatermark");
 
         CtxLaunch.Header = loc.Get("Library.Context.Launch");
         CtxOpenFolder.Header = loc.Get("Library.Context.OpenFolder");
@@ -611,7 +620,7 @@ public partial class MainWindow : Window
         }
 
         ConsoleSectionTitle.Text = loc.Get("Console.Title");
-        ConsoleSearchBox.Watermark = loc.Get("Console.SearchWatermark");
+        ConsoleSearchBox.PlaceholderText = loc.Get("Console.SearchWatermark");
         AutoScrollCheck.Content = loc.Get("Console.AutoScroll");
         DetachConsoleButton.Content = loc.Get("Console.Split");
         CopyLogButton.Content = loc.Get("Console.Copy");

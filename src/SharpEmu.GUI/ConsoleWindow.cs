@@ -41,7 +41,7 @@ public sealed class ConsoleWindow : Window
 
         _searchBox = new TextBox
         {
-            Watermark = loc.Get("Console.SearchWatermark"),
+            PlaceholderText = loc.Get("Console.SearchWatermark"),
             Width = 320,
             Margin = new Thickness(0, 0, 12, 0),
         };
