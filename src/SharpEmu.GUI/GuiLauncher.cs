@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using ReactiveUI.Avalonia;
 
 namespace SharpEmu.GUI;
 
@@ -29,6 +30,8 @@ public static class GuiLauncher
         => AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .WithInterFont()
+            .UseReactiveUI(_ => { })
+            .RegisterReactiveUIViewsFromEntryAssembly()
             .LogToTrace();
 
     private static void WriteCrashLog(Exception ex)

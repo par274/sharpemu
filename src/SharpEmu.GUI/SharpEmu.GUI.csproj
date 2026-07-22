@@ -33,6 +33,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Avalonia.Desktop" />
     <PackageReference Include="Avalonia.Fonts.Inter" />
     <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="ReactiveUI.Avalonia" />
+    <PackageReference Include="ReactiveUI.SourceGenerators" />
     <PackageReference Include="Tmds.DBus.Protocol" />
   </ItemGroup>
 

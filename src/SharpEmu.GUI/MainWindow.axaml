@@ -15,7 +15,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgBrush}"
         ExtendClientAreaToDecorationsHint="True"
-        ExtendClientAreaChromeHints="PreferSystemChrome"
+        WindowDecorations="Full"
         ExtendClientAreaTitleBarHeightHint="44"
         Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
         KeyDown="OnKeyDown">

@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Collections;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -792,7 +793,7 @@ public partial class MainWindow : Window
             // Leaving F11 should restore a monitor-sized window with the
             // launcher chrome, not fall back to the design-time window size.
             WindowState = WindowState.Maximized;
-            ExtendClientAreaChromeHints = ExtendClientAreaChromeHints.PreferSystemChrome;
+            WindowDecorations = WindowDecorations.Full;
             TitleBar.IsVisible = true;
             StatusBar.IsVisible = true;
             if (_gameFullscreen)
@@ -813,7 +814,7 @@ public partial class MainWindow : Window
         else
         {
             WindowState = WindowState.FullScreen;
-            ExtendClientAreaChromeHints = ExtendClientAreaChromeHints.NoChrome;
+            WindowDecorations = WindowDecorations.None;
             TitleBar.IsVisible = false;
             StatusBar.IsVisible = false;
             if (_isRunning && !_isStopping && !_awaitingFirstFrame && GameView.IsVisible)
