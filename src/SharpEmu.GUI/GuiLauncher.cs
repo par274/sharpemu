@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Microsoft.Extensions.DependencyInjection;
 using ReactiveUI.Avalonia;
+using SharpEmu.GUI.Services.Infrastructure;
 
 namespace SharpEmu.GUI;
 
@@ -12,10 +14,24 @@ namespace SharpEmu.GUI;
 /// </summary>
 public static class GuiLauncher
 {
+    /// <summary>
+    /// The application's service provider, exposed so the legacy code paths
+    /// still wired into <c>MainWindow</c> can reach services while they are
+    /// being migrated. ViewModels should prefer constructor injection.
+    /// </summary>
+    internal static IServiceProvider Services { get; private set; } = default!;
+
     public static int Run()
     {
         try
         {
+            // Build the application's DI container up front. ReactiveUI's own
+            // Splat locator initializes itself separately during Avalonia setup
+            // (UseReactiveUI/RegisterReactiveUIViewsFromEntryAssembly).
+            var services = new ServiceCollection();
+            services.AddSharpEmuGui();
+            Services = services.BuildServiceProvider(validateScopes: true);
+
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(Array.Empty<string>());
             return 0;
         }
@@ -48,3 +64,4 @@ public static class GuiLauncher
         }
     }
 }
+

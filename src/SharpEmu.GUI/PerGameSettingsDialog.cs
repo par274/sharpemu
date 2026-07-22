@@ -5,30 +5,16 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
+using SharpEmu.GUI.ViewModels;
 
 namespace SharpEmu.GUI;
 
 public sealed class PerGameSettingsDialog : Window
 {
-    private static readonly string[] LogLevels =
-        { "Trace", "Debug", "Info", "Warning", "Error", "Critical" };
-
-    private static readonly string[] EnvToggles =
-    {
-        "SHARPEMU_BTHID_UNAVAILABLE",
-        "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
-        "SHARPEMU_WRITABLE_APP0",
-        "SHARPEMU_VK_VALIDATION",
-        "SHARPEMU_DUMP_SPIRV",
-        "SHARPEMU_LOG_DIRECT_MEMORY",
-        "SHARPEMU_LOG_IO",
-        "SHARPEMU_LOG_NP",
-    };
-
-    private readonly string _titleId;
+    private readonly PerGameSettingsViewModel _vm;
 
     private readonly SettingRow _logLevelRow;
-    private readonly ComboBox _logLevel = new() { ItemsSource = LogLevels, Width = 160 };
+    private readonly ComboBox _logLevel = new() { Width = 160 };
 
     private readonly SettingRow _traceRow;
     private readonly NumericUpDown _trace = new()
@@ -46,12 +32,17 @@ public sealed class PerGameSettingsDialog : Window
     private readonly StackPanel _envList = new() { Orientation = Orientation.Vertical, Spacing = 8, Margin = new(0, 4, 0, 0) };
     private readonly List<(string Name, ToggleSwitch Box)> _envBoxes = new();
 
-    public PerGameSettingsDialog(string titleId, string displayName, GuiSettings global)
+    /// <summary>
+    /// Opens a per-game settings dialog. The editable state lives in
+    /// <paramref name="vm"/>; this window only builds the controls and pushes
+    /// their final values back into the VM on save.
+    /// </summary>
+    public PerGameSettingsDialog(PerGameSettingsViewModel vm)
     {
-        _titleId = titleId;
+        _vm = vm;
         var loc = Localization.Instance;
 
-        Title = loc.Format("PerGame.Title", displayName, titleId);
+        Title = vm.Title;
         Width = 520;
         MaxHeight = 720;
         SizeToContent = SizeToContent.Height;
@@ -60,6 +51,7 @@ public sealed class PerGameSettingsDialog : Window
 
         Background = new SolidColorBrush(Color.Parse("#0D1017"));
 
+        _logLevel.ItemsSource = PerGameSettingsViewModel.LogLevels;
         _strict.OnContent = _logToFile.OnContent = loc.Get("Common.On");
         _strict.OffContent = _logToFile.OffContent = loc.Get("Common.Off");
 
@@ -74,7 +66,7 @@ public sealed class PerGameSettingsDialog : Window
             ShowOverride = true,
         };
 
-        foreach (var name in EnvToggles)
+        foreach (var name in PerGameSettingsViewModel.EnvironmentToggleNames)
         {
             var box = new ToggleSwitch { OnContent = name, OffContent = name };
             _envBoxes.Add((name, box));
@@ -119,7 +111,7 @@ public sealed class PerGameSettingsDialog : Window
         root.Children.Add(buttonBar);
         Content = root;
 
-        LoadValues(global);
+        LoadFromVm();
         _envRow.PropertyChanged += (_, e) =>
         {
             if (e.Property == SettingRow.IsOverriddenProperty)
@@ -152,54 +144,43 @@ public sealed class PerGameSettingsDialog : Window
         return card;
     }
 
-    private void LoadValues(GuiSettings global)
+    /// <summary>Seeds the controls from the view-model's resolved state.</summary>
+    private void LoadFromVm()
     {
-        _logLevel.SelectedItem = Array.IndexOf(LogLevels, global.LogLevel) >= 0 ? global.LogLevel : "Info";
-        _trace.Value = global.ImportTraceLimit;
-        _strict.IsChecked = global.StrictDynlibResolution;
-        _logToFile.IsChecked = global.LogToFile;
+        _logLevel.SelectedItem = _vm.SelectedLogLevel;
+        _trace.Value = _vm.ImportTraceLimit;
+        _strict.IsChecked = _vm.IsStrictDynlibResolution;
+        _logToFile.IsChecked = _vm.IsLogToFile;
         foreach (var (name, box) in _envBoxes)
         {
-            box.IsChecked = global.EnvironmentToggles.Contains(name);
+            box.IsChecked = _vm.GetEnvironment(name);
         }
 
-        var existing = PerGameSettings.Load(_titleId);
-        if (existing is null)
-        {
-            return;
-        }
-
-        if (existing.LogLevel is { } level && Array.IndexOf(LogLevels, level) >= 0)
-        {
-            _logLevelRow.IsOverridden = true;
-            _logLevel.SelectedItem = level;
-        }
-
-        if (existing.ImportTraceLimit is { } t) { _traceRow.IsOverridden = true; _trace.Value = t; }
-        if (existing.StrictDynlibResolution is { } s) { _strictRow.IsOverridden = true; _strict.IsChecked = s; }
-        if (existing.LogToFile is { } l) { _logToFileRow.IsOverridden = true; _logToFile.IsChecked = l; }
-        if (existing.EnvironmentToggles is { } env)
-        {
-            _envRow.IsOverridden = true;
-            foreach (var (name, box) in _envBoxes)
-            {
-                box.IsChecked = env.Contains(name);
-            }
-        }
+        _logLevelRow.IsOverridden = _vm.IsLogLevelOverridden;
+        _traceRow.IsOverridden = _vm.IsImportTraceOverridden;
+        _strictRow.IsOverridden = _vm.IsStrictOverridden;
+        _logToFileRow.IsOverridden = _vm.IsLogToFileOverridden;
+        _envRow.IsOverridden = _vm.IsEnvironmentOverridden;
     }
 
+    /// <summary>Pushes the control values back into the VM and persists.</summary>
     private void Persist()
     {
-        var settings = new PerGameSettings
+        _vm.IsLogLevelOverridden = _logLevelRow.IsOverridden;
+        _vm.SelectedLogLevel = (string?)_logLevel.SelectedItem ?? "Info";
+        _vm.IsImportTraceOverridden = _traceRow.IsOverridden;
+        _vm.ImportTraceLimit = (int)(_trace.Value ?? 0);
+        _vm.IsStrictOverridden = _strictRow.IsOverridden;
+        _vm.IsStrictDynlibResolution = _strict.IsChecked == true;
+        _vm.IsLogToFileOverridden = _logToFileRow.IsOverridden;
+        _vm.IsLogToFile = _logToFile.IsChecked == true;
+        _vm.IsEnvironmentOverridden = _envRow.IsOverridden;
+        foreach (var (name, box) in _envBoxes)
         {
-            LogLevel = _logLevelRow.IsOverridden ? _logLevel.SelectedItem as string : null,
-            ImportTraceLimit = _traceRow.IsOverridden ? (int)(_trace.Value ?? 0) : null,
-            StrictDynlibResolution = _strictRow.IsOverridden ? _strict.IsChecked == true : null,
-            LogToFile = _logToFileRow.IsOverridden ? _logToFile.IsChecked == true : null,
-            EnvironmentToggles = _envRow.IsOverridden
-                ? _envBoxes.Where(e => e.Box.IsChecked == true).Select(e => e.Name).ToList()
-                : null,
-        };
-        settings.Save(_titleId);
+            _vm.SetEnvironment(name, box.IsChecked == true);
+        }
+
+        _vm.Save();
     }
 }
+

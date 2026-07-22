@@ -13,6 +13,7 @@ using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using Microsoft.Extensions.DependencyInjection;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Runtime;
 using SharpEmu.HLE.Host;
@@ -30,8 +31,6 @@ namespace SharpEmu.GUI;
 
 public partial class MainWindow : Window
 {
-    private const int MaxConsoleLines = 4000;
-    private const int MaxConsoleLinesPerFlush = 500;
     private const double LaunchBlurRadius = 12;
     private const double BlurTransitionSeconds = 0.24;
 
@@ -49,10 +48,10 @@ public partial class MainWindow : Window
         : StringComparison.Ordinal;
 
     private readonly List<GameEntry> _allGames = new();
-    private readonly ObservableCollection<GameEntry> _visibleGames = new();
-    private readonly AvaloniaList<LogLine> _consoleLines = new();
-    private readonly List<LogLine> _allConsoleLines = new();
-    private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
+    private readonly ObservableCollection<GameEntry> _visibleGames;
+    // Console buffer is owned by ILogService; aliased here for the XAML-bound
+    // ConsoleList and the few remaining imperative reads.
+    private AvaloniaList<LogLine> _consoleLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
     private readonly DispatcherTimer _libraryBlurTimer;
     private BlurEffect? _libraryBlur;
@@ -61,15 +60,14 @@ public partial class MainWindow : Window
     private long _libraryBlurStartedAt;
     private bool _clearLibraryBlurWhenComplete;
 
-    private GuiSettings _settings = new();
-    private EmulatorProcess? _emulator;
+    // Backed by the shared ISettingsService so the OptionsViewModel and the
+    // window mutate the same instance; resolved from the container in OnOpened.
+    private GuiSettings _settings = GuiSettings.Load();
     private GameSurfaceHost? _gameSurfaceHost;
     private ConsoleWindow? _consoleWindow;
     private GuiConsoleMirror? _consoleMirror;
-    private StreamWriter? _fileLog;
     private readonly SndPreviewPlayer _sndPreview = new();
     private string? _emulatorExePath;
-    private PendingLaunch? _pendingLaunch;
     private bool _gameFullscreen;
     private bool _isRunning;
     private bool _isStopping;
@@ -100,26 +98,41 @@ public partial class MainWindow : Window
 
     // Controller navigation state.
     private readonly DispatcherTimer _gamepadTimer;
-    private HostGamepadButtons _previousPadButtons;
-    private long _navLeftNextAt;
-    private long _navRightNextAt;
-    private long _navUpNextAt;
-    private long _navDownNextAt;
 
     //Github http client for latest commit
     private static readonly HttpClient GithubHttpClient = CreateGithubHttpClient();
     private string? _latestCommitSha;
 
-    private sealed record PendingLaunch(
-        string EbootPath,
-        string DisplayName,
-        string? TitleId,
-        string LogLevel,
-        SharpEmuRuntimeOptions RuntimeOptions);
+    private readonly ViewModels.MainViewModel _main;
+    private readonly ViewModels.LibraryViewModel _library;
+    private readonly Services.Abstractions.IEmulatorService _emulatorService;
+    private readonly Services.Abstractions.ILogService _logService;
+    private readonly ViewModels.SessionViewModel _session;
+    private readonly Services.Abstractions.IGamepadInputService _gamepad;
 
-    public MainWindow()
+    public MainWindow(ViewModels.MainViewModel main)
     {
         InitializeComponent();
+        _main = main;
+        _library = main.Library;
+        _session = main.Session;
+        _visibleGames = _library.Games;
+        // Resolve the remaining services the launch pipeline needs. They share
+        // the same container-scoped singletons as the view-models.
+        _emulatorService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IEmulatorService>();
+        _logService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.ILogService>();
+        _gamepad = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGamepadInputService>();
+        _logService.SetEmulatorExePath(_emulatorService.EmulatorExePath);
+
+        // Forward emulator process events to the window's UI reactions.
+        _emulatorService.OutputReceived += OnEmulatorOutput;
+        _emulatorService.Exited += code => OnEmulatorExited(code);
+
+        // Translate gamepad navigation intents into UI actions.
+        _gamepad.PageRequested += page => Dispatcher.UIThread.Post(() => SetActivePage(page));
+        _gamepad.MoveHorizontal += delta => Dispatcher.UIThread.Post(() => MoveSelection(delta));
+        _gamepad.MoveVertical += dir => Dispatcher.UIThread.Post(() => MoveSelection(dir * TilesPerRow()));
+        _gamepad.Activate += () => Dispatcher.UIThread.Post(LaunchSelected);
 
         try
         {
@@ -134,10 +147,11 @@ public partial class MainWindow : Window
         }
 
         GameList.ItemsSource = _visibleGames;
+        _consoleLines = _logService.VisibleLines;
         ConsoleList.ItemsSource = _consoleLines;
         _consoleMirror = GuiConsoleMirror.Install((line, isError) =>
-            _pendingLines.Enqueue((line, isError)));
-        Closed += (_, _) => _emulator?.Stop();
+            _logService.Enqueue(line, isError));
+        Closed += (_, _) => _emulatorService.Stop();
 
         _consoleFlushTimer = new DispatcherTimer
         {
@@ -145,7 +159,7 @@ public partial class MainWindow : Window
         };
         _consoleFlushTimer.Tick += (_, _) =>
         {
-            FlushPendingConsoleLines();
+            _logService.Flush();
             MaybeAutoScroll();
         };
         _consoleFlushTimer.Start();
@@ -170,16 +184,26 @@ public partial class MainWindow : Window
         };
 
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
-        GameList.SelectionChanged += (_, _) => UpdateSelectedGame();
+        GameList.SelectionChanged += (_, _) =>
+        {
+            _library.SelectedGame = GameList.SelectedItem as GameEntry;
+            UpdateSelectedGame();
+        };
         GameList.DoubleTapped += (_, _) => LaunchSelected();
-        SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
+        SearchBox.TextChanged += (_, _) =>
+        {
+            _library.SearchText = SearchBox.Text ?? string.Empty;
+            // The filtered list refresh happens in the VM (throttled); keep
+            // the empty-state and selection sync immediate for responsiveness.
+            RefreshVisibleGames();
+        };
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
         AddFolderButton.Click += async (_, _) => await AddFolderAsync();
         EmptyAddFolderButton.Click += async (_, _) => await AddFolderAsync();
         RescanButton.Click += async (_, _) => await RescanLibraryAsync();
         OpenFileButton.Click += async (_, _) => await OpenFileAsync();
         LaunchButton.Click += (_, _) => LaunchSelected();
-        ClearLogButton.Click += (_, _) => { _consoleLines.Clear(); _allConsoleLines.Clear(); };
+        ClearLogButton.Click += (_, _) => _logService.Clear();
         StopButton.Click += (_, _) => StopEmulator();
         SessionStopButton.Click += (_, _) => StopEmulator();
         SessionConsoleButton.Click += (_, _) => ShowConsoleWindow();
@@ -305,22 +329,16 @@ public partial class MainWindow : Window
     /// </summary>
     private void SetActivePage(int index)
     {
-        if (index == _activePageIndex)
-        {
-            return;
-        }
+        // The shell view-model owns the active-page state (and the save-on-leave
+        // side effect); the window only mirrors it into control visibility.
+        _main.NavigateTo(index);
+        _activePageIndex = _main.ActivePage;
 
-        if (_activePageIndex == 1)
-        {
-            _settings.Save(); // leaving the Options page
-        }
-
-        _activePageIndex = index;
-        SetActiveClass(LibraryTabButton, index == 0);
-        SetActiveClass(OptionsTabButton, index == 1);
-        LibraryPage.IsVisible = index == 0;
-        LibraryToolbar.IsVisible = index == 0;
-        OptionsPage.IsVisible = index == 1;
+        SetActiveClass(LibraryTabButton, _activePageIndex == 0);
+        SetActiveClass(OptionsTabButton, _activePageIndex == 1);
+        LibraryPage.IsVisible = _activePageIndex == 0;
+        LibraryToolbar.IsVisible = _activePageIndex == 0;
+        OptionsPage.IsVisible = _activePageIndex == 1;
     }
 
     private static void SetActiveClass(Button button, bool active)
@@ -427,107 +445,11 @@ public partial class MainWindow : Window
 
     private void PollGamepad()
     {
-        // DualSense wins when both are connected; XInput covers Xbox pads.
-        if (!WindowsDualSenseReader.TryGetState(out var pad) && !WindowsXInputReader.TryGetState(out pad))
-        {
-            _previousPadButtons = HostGamepadButtons.None;
-            return;
-        }
-
-        if (!IsActive)
-        {
-            // Ignore input while the launcher is in the background, e.g. the
-            // game window is focused and using the same controller.
-            _previousPadButtons = pad.Buttons;
-            return;
-        }
-
-        if (_isRunning || _isStopping)
-        {
-            // The game renders inside the launcher window, so the launcher
-            // stays active while playing. The controller belongs to the game
-            // then: no navigation, and Circle/B must never stop the session.
-            _previousPadButtons = pad.Buttons;
-            return;
-        }
-
-        var shoulderPressed = pad.Buttons & ~_previousPadButtons;
-        if ((shoulderPressed & HostGamepadButtons.L1) != 0)
-        {
-            SetActivePage(0);
-        }
-
-        if ((shoulderPressed & HostGamepadButtons.R1) != 0)
-        {
-            SetActivePage(1);
-        }
-
-        if (_activePageIndex != 0)
-        {
-            _previousPadButtons = pad.Buttons;
-            return;
-        }
-
-        var now = Environment.TickCount64;
-        var left = (pad.Buttons & HostGamepadButtons.Left) != 0 || pad.LeftX < 64;
-        var right = (pad.Buttons & HostGamepadButtons.Right) != 0 || pad.LeftX > 192;
-        var up = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
-        var down = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
-
-        if (ShouldNavigate(left, ref _navLeftNextAt, now))
-        {
-            MoveSelection(-1);
-        }
-
-        if (ShouldNavigate(right, ref _navRightNextAt, now))
-        {
-            MoveSelection(1);
-        }
-
-        if (ShouldNavigate(up, ref _navUpNextAt, now))
-        {
-            MoveSelection(-TilesPerRow());
-        }
-
-        if (ShouldNavigate(down, ref _navDownNextAt, now))
-        {
-            MoveSelection(TilesPerRow());
-        }
-
-        var pressed = pad.Buttons & ~_previousPadButtons;
-        if ((pressed & HostGamepadButtons.Cross) != 0)
-        {
-            LaunchSelected();
-        }
-
-        _previousPadButtons = pad.Buttons;
-    }
-
-    /// <summary>
-    /// Edge-triggered with hold-to-repeat: fires on press, then repeats
-    /// after 400ms at 130ms intervals while held.
-    /// </summary>
-    private static bool ShouldNavigate(bool held, ref long nextAt, long now)
-    {
-        if (!held)
-        {
-            nextAt = 0;
-            return false;
-        }
-
-        if (nextAt == 0)
-        {
-            nextAt = now + 400;
-            return true;
-        }
-
-        if (now >= nextAt)
-        {
-            nextAt = now + 130;
-            return true;
-        }
-
-        return false;
+        // The gamepad service polls the controller and raises navigation
+        // intents; the window only feeds it the current UI context. Intents
+        // are marshalled to the UI thread via the event subscriptions set up
+        // in the constructor.
+        _gamepad.Poll(IsActive, _isRunning || _isStopping, _activePageIndex);
     }
 
     private void MoveSelection(int delta)
@@ -565,7 +487,7 @@ public partial class MainWindow : Window
         Title = $"SharpEmu {display}";
         ToolTip.SetTip(VersionText, BuildInfo.Banner);
 
-        _settings = GuiSettings.Load();
+        _settings = GuiLauncher.Services.GetRequiredService<Services.Abstractions.ISettingsService>().Settings;
         Localization.Instance.Load(_settings.Language);
         PopulateLanguageBox();
         ApplyLocalization();
@@ -611,13 +533,10 @@ public partial class MainWindow : Window
     {
         var loc = Localization.Instance;
 
-        LibraryTabButton.Content = loc.Get("Page.Library");
-        OptionsTabButton.Content = loc.Get("Page.Options");
-
+        // Page.Library / Page.Options and the toolbar buttons (AddFolder,
+        // Rescan, OpenFile) are now XAML-bound to the Localization indexer, so
+        // they refresh automatically on language change.
         SearchBox.Watermark = loc.Get("Library.SearchWatermark");
-        AddFolderButton.Content = loc.Get("Library.AddFolder");
-        RescanButton.Content = loc.Get("Library.Rescan");
-        OpenFileButton.Content = loc.Get("Library.OpenFile");
 
         CtxLaunch.Header = loc.Get("Library.Context.Launch");
         CtxOpenFolder.Header = loc.Get("Library.Context.OpenFolder");
@@ -854,9 +773,9 @@ public partial class MainWindow : Window
         _sndPreview.Stop();
         _discord?.Dispose();
         _consoleWindow?.Close();
-        _emulator?.Dispose();
+        _emulatorService.Stop();
         _consoleMirror?.Dispose();
-        DropFileLog();
+        _logService.DropFileLog();
     }
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -980,10 +899,6 @@ public partial class MainWindow : Window
             _availableUpdate is null ? "Updater.Check" : "Updater.DownloadRestart");
     }
 
-    // Environment variables set on this process at the previous launch; children
-    // inherit the process environment, so stale names must be cleared explicitly.
-    private readonly HashSet<string> _appliedEnvironmentVariables = new(StringComparer.OrdinalIgnoreCase);
-
     private void SetEnvironmentToggle(string name, bool enabled)
     {
         if (enabled)
@@ -1046,29 +961,9 @@ public partial class MainWindow : Window
 
     private void LocateEmulator()
     {
-        var exeName = OperatingSystem.IsWindows() ? "SharpEmu.exe" : "SharpEmu";
-        var baseDirectory = AppContext.BaseDirectory;
-        var candidates = new List<string>();
-        if (!string.IsNullOrWhiteSpace(_settings.EmulatorPath))
-        {
-            candidates.Add(_settings.EmulatorPath);
-        }
-
-        // The GUI and CLI share one executable. The selected path is the
-        // isolated child executable and also defines the portable data root.
-        if (Environment.ProcessPath is { } selfPath &&
-            Path.GetFileNameWithoutExtension(selfPath).Equals("SharpEmu", StringComparison.OrdinalIgnoreCase))
-        {
-            candidates.Add(selfPath);
-        }
-
-        candidates.Add(Path.Combine(baseDirectory, exeName));
-        candidates.Add(Path.Combine(baseDirectory, "win-x64", exeName));
-        candidates.Add(Path.Combine(baseDirectory, "..", exeName));
-
-        _emulatorExePath = candidates.FirstOrDefault(File.Exists) is { } found
-            ? Path.GetFullPath(found)
-            : null;
+        _emulatorService.LocateEmulator();
+        _emulatorExePath = _emulatorService.EmulatorExePath;
+        _logService.SetEmulatorExePath(_emulatorExePath);
 
         EmulatorPathText.Text = _emulatorExePath is not null
             ? Localization.Instance.Format("Status.EmulatorPath", _emulatorExePath)
@@ -1120,309 +1015,25 @@ public partial class MainWindow : Window
         EmptyState.IsVisible = false;
         LoadingState.IsVisible = true;
 
-        var games = await Task.Run(() => ScanFolders(folders, excluded));
+        // The scan runs in the injected library service; the view-model owns
+        // the resulting collection and kicks off cover/size enrichment.
+        var library = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGameLibraryService>();
+        var games = await Task.Run(() => library.ScanFolders(folders, excluded));
 
+        _library.ApplyScannedGames(games);
         _allGames.Clear();
         _allGames.AddRange(games);
-        RefreshVisibleGames();
         LoadingState.IsVisible = false;
-        LoadGameDetailsInBackground(games);
         UpdateDiscordPresence();
         StatusBarRight.Text = folders.Length == 0
             ? Localization.Instance.Get("Status.AddFolderPrompt")
             : Localization.Instance.Format("Status.LibraryScanned", games.Count, folders.Length);
     }
 
-    /// <summary>
-    /// Enriches games off the UI thread — decodes cover art and totals each
-    /// game's install folder size — posting results back as they become
-    /// ready. A newer scan invalidates older loads.
-    /// </summary>
-    private void LoadGameDetailsInBackground(IReadOnlyList<GameEntry> games)
-    {
-        var generation = ++_detailLoadGeneration;
-        _ = Task.Run(() =>
-        {
-            // Covers first: they are cheap and the most visible, so the grid
-            // fills with art before the (potentially slow) size pass runs.
-            foreach (var game in games)
-            {
-                if (generation != _detailLoadGeneration)
-                {
-                    return;
-                }
-
-                if (game.CoverPath is null)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    using var stream = File.OpenRead(game.CoverPath);
-                    var bitmap = Bitmap.DecodeToWidth(stream, 312);
-                    Dispatcher.UIThread.Post(() =>
-                    {
-                        if (generation == _detailLoadGeneration)
-                        {
-                            game.Cover = bitmap;
-                        }
-                    });
-                }
-                catch (Exception)
-                {
-                    // A missing or undecodable image keeps the placeholder.
-                }
-            }
-
-            foreach (var game in games)
-            {
-                if (generation != _detailLoadGeneration)
-                {
-                    return;
-                }
-
-                var size = ComputeInstallSize(game.Path);
-                if (size > 0)
-                {
-                    Dispatcher.UIThread.Post(() =>
-                    {
-                        if (generation == _detailLoadGeneration)
-                        {
-                            game.SizeBytes = size;
-                        }
-                    });
-                }
-            }
-        });
-    }
-
-    /// <summary>
-    /// Totals the size of the game's install folder (the directory holding
-    /// the eboot), which is far more accurate than the eboot alone.
-    /// </summary>
-    private static long ComputeInstallSize(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        if (directory is null)
-        {
-            return 0;
-        }
-
-        long total = 0;
-        try
-        {
-            var enumeration = new EnumerationOptions
-            {
-                IgnoreInaccessible = true,
-                RecurseSubdirectories = true,
-            };
-            foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*", enumeration))
-            {
-                total += file.Length;
-            }
-        }
-        catch (Exception)
-        {
-            // Fall back to whatever was accumulated so far.
-        }
-
-        return total;
-    }
-
-    private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
-    {
-        var games = new List<GameEntry>();
-        var seen = new HashSet<string>(FilePathComparer);
-        var enumeration = new EnumerationOptions
-        {
-            IgnoreInaccessible = true,
-            RecurseSubdirectories = true,
-            MaxRecursionDepth = 8,
-        };
-
-        foreach (var folder in folders)
-        {
-            if (!Directory.Exists(folder))
-            {
-                continue;
-            }
-
-            try
-            {
-                foreach (var file in Directory.EnumerateFiles(folder, "eboot.bin", enumeration))
-                {
-                    var fullPath = Path.GetFullPath(file);
-                    if (!seen.Add(fullPath) || excludedPaths.Contains(fullPath))
-                    {
-                        continue;
-                    }
-
-                    long size = 0;
-                    try
-                    {
-                        size = new FileInfo(fullPath).Length;
-                    }
-                    catch (IOException)
-                    {
-                    }
-
-                    var (title, titleId, version) = TryReadParamJson(fullPath);
-                    games.Add(new GameEntry(
-                        title ?? GameNameFor(fullPath), titleId, version, fullPath, size,
-                        FindCoverFor(fullPath), FindBackgroundFor(fullPath)));
-                }
-            }
-            catch (Exception)
-            {
-                // Skip folders that fail to enumerate.
-            }
-        }
-
-        games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
-        return games;
-    }
-
-    /// <summary>
-    /// Reads the game title, title id and content version from
-    /// sce_sys/param.json next to the executable, when present.
-    /// </summary>
-    private static (string? Title, string? TitleId, string? Version) TryReadParamJson(string ebootPath)
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(ebootPath);
-            if (directory is null)
-            {
-                return (null, null, null);
-            }
-
-            var paramPath = Path.Combine(directory, "sce_sys", "param.json");
-            if (!File.Exists(paramPath))
-            {
-                return (null, null, null);
-            }
-
-            // ReadAllText handles a UTF-8 BOM, which JsonDocument rejects in
-            // raw bytes.
-            using var document = JsonDocument.Parse(File.ReadAllText(paramPath));
-            var root = document.RootElement;
-
-            string? titleId = null;
-            if (root.TryGetProperty("titleId", out var idElement) && idElement.ValueKind == JsonValueKind.String)
-            {
-                titleId = idElement.GetString();
-            }
-
-            // contentVersion carries the installed app version
-            // ("01.000.000"); masterVersion is the fallback on older dumps.
-            string? version = null;
-            if (root.TryGetProperty("contentVersion", out var versionElement) &&
-                versionElement.ValueKind == JsonValueKind.String)
-            {
-                version = versionElement.GetString();
-            }
-            else if (root.TryGetProperty("masterVersion", out var masterElement) &&
-                     masterElement.ValueKind == JsonValueKind.String)
-            {
-                version = masterElement.GetString();
-            }
-
-            string? title = null;
-            if (root.TryGetProperty("localizedParameters", out var localized) &&
-                localized.ValueKind == JsonValueKind.Object)
-            {
-                if (localized.TryGetProperty("defaultLanguage", out var language) &&
-                    language.ValueKind == JsonValueKind.String &&
-                    localized.TryGetProperty(language.GetString()!, out var defaultBlock) &&
-                    defaultBlock.ValueKind == JsonValueKind.Object &&
-                    defaultBlock.TryGetProperty("titleName", out var titleName) &&
-                    titleName.ValueKind == JsonValueKind.String)
-                {
-                    title = titleName.GetString();
-                }
-                else
-                {
-                    foreach (var property in localized.EnumerateObject())
-                    {
-                        if (property.Value.ValueKind == JsonValueKind.Object &&
-                            property.Value.TryGetProperty("titleName", out var anyTitleName) &&
-                            anyTitleName.ValueKind == JsonValueKind.String)
-                        {
-                            title = anyTitleName.GetString();
-                            break;
-                        }
-                    }
-                }
-            }
-
-            return (
-                string.IsNullOrWhiteSpace(title) ? null : title,
-                string.IsNullOrWhiteSpace(titleId) ? null : titleId,
-                string.IsNullOrWhiteSpace(version) ? null : version.Trim());
-        }
-        catch (Exception)
-        {
-            return (null, null, null);
-        }
-    }
-
-    /// <summary>
-    /// Finds the cover art shipped with the game: sce_sys/icon0.png next to
-    /// the executable (falling back to pic0.png).
-    /// </summary>
-    private static string? FindCoverFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        if (directory is null)
-        {
-            return null;
-        }
-
-        var sceSys = Path.Combine(directory, "sce_sys");
-        foreach (var candidate in new[] { "icon0.png", "pic0.png" })
-        {
-            var coverPath = Path.Combine(sceSys, candidate);
-            if (File.Exists(coverPath))
-            {
-                return coverPath;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Finds the key art shipped with the game (sce_sys/pic0.png, falling
-    /// back to pic1.png), used as the window backdrop when selected.
-    /// </summary>
-    private static string? FindBackgroundFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        if (directory is null)
-        {
-            return null;
-        }
-
-        var sceSys = Path.Combine(directory, "sce_sys");
-        foreach (var candidate in new[] { "pic0.png", "pic1.png" })
-        {
-            var backgroundPath = Path.Combine(sceSys, candidate);
-            if (File.Exists(backgroundPath))
-            {
-                return backgroundPath;
-            }
-        }
-
-        return null;
-    }
-
-    private static string GameNameFor(string ebootPath)
-    {
-        var directory = Path.GetDirectoryName(ebootPath);
-        var name = directory is not null ? Path.GetFileName(directory) : null;
-        return string.IsNullOrEmpty(name) ? Path.GetFileName(ebootPath) : name;
-    }
+    // Library scan and metadata parsing live in GameLibraryService now;
+    // the legacy static helpers (ScanFolders, TryReadParamJson, FindCoverFor,
+    // FindBackgroundFor, GameNameFor, ComputeInstallSize) were removed when
+    // the logic moved behind IGameLibraryService.
 
     // ---- Game context menu ----
 
@@ -1460,7 +1071,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        _ = new PerGameSettingsDialog(game.TitleId, game.Name, _settings).ShowDialog(this);
+        var vm = new ViewModels.PerGameSettingsViewModel(game.TitleId, game.Name, _settings);
+        _ = new PerGameSettingsDialog(vm).ShowDialog(this);
     }
 
     private void OpenSelectedGameFolder()
@@ -1522,29 +1134,22 @@ public partial class MainWindow : Window
             _settings.Save();
         }
 
+        // The view-model drops the game from its collection and re-applies the
+        // search filter; mirror the legacy _allGames list for the few paths
+        // (page count, launch lookup) still keyed off it.
+        _library.Remove(game);
         _allGames.RemoveAll(g => string.Equals(g.Path, game.Path, FilePathComparison));
         GameList.SelectedItem = null;
-        RefreshVisibleGames();
         StatusBarRight.Text = Localization.Instance.Format("Status.RemovedFromLibrary", game.Name);
     }
 
     private void RefreshVisibleGames()
     {
-        var query = SearchBox.Text?.Trim() ?? string.Empty;
-        var selectedPath = (GameList.SelectedItem as GameEntry)?.Path;
+        // Filtering lives in the view-model; here we only sync the UI state that
+        // is still driven imperatively from the window (selection, empty state).
+        _library.RefreshVisibleGames();
 
-        _visibleGames.Clear();
-        foreach (var game in _allGames)
-        {
-            if (query.Length == 0 ||
-                game.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                game.Path.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                (game.TitleId?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
-            {
-                _visibleGames.Add(game);
-            }
-        }
-
+        var selectedPath = _library.SelectedGame?.Path;
         if (selectedPath is not null &&
             _visibleGames.FirstOrDefault(g => g.Path.Equals(selectedPath, FilePathComparison))
                 is { } reselected)
@@ -1782,55 +1387,24 @@ public partial class MainWindow : Window
         var effective = EffectiveLaunchSettings.Resolve(_settings, PerGameSettings.Load(resolvedTitleId));
 
         _sndPreview.Stop();
-        _consoleLines.Clear();
-        _allConsoleLines.Clear();
+        _logService.Clear();
 
-        DropFileLog();
+        _logService.DropFileLog();
         if (effective.LogToFile)
         {
-            OpenFileLog(resolvedTitleId);
+            _logService.OpenFileLog(resolvedTitleId);
         }
 
-        // The isolated game child inherits these diagnostics. Keep them on the
-        // launcher process so every platform receives the same launch options.
-        foreach (var staleName in _appliedEnvironmentVariables)
-        {
-            if (!effective.EnvironmentToggles.Contains(staleName))
-            {
-                Environment.SetEnvironmentVariable(staleName, null);
-            }
-        }
-
-        _appliedEnvironmentVariables.Clear();
-        foreach (var name in effective.EnvironmentToggles)
-        {
-            Environment.SetEnvironmentVariable(name, "1");
-            _appliedEnvironmentVariables.Add(name);
-        }
-
-        Environment.SetEnvironmentVariable(
-            "SHARPEMU_RENDER_SCALE",
-            _settings.RenderResolutionScale.ToString(
-                "0.###",
-                System.Globalization.CultureInfo.InvariantCulture));
-
-        if (SharpEmuLog.TryParseLevel(effective.LogLevel, out var logLevel))
-        {
-            SharpEmuLog.MinimumLevel = logLevel;
-        }
-
-        var runtimeOptions = new SharpEmuRuntimeOptions
-        {
-            CpuEngine = CpuExecutionEngine.NativeOnly,
-            StrictDynlibResolution = effective.StrictDynlibResolution,
-            ImportTraceLimit = Math.Max(0, effective.ImportTraceLimit),
-        };
+        // Effective settings, env vars and runtime options now live in the
+        // emulator service; only the UI reaction remains here.
+        _emulatorService.PrepareLaunch(ebootPath, displayName, resolvedTitleId);
 
         _isRunning = true;
         _runningGameName = displayName;
         SessionGameTitle.Text = displayName;
         _runningGameTitleId = resolvedTitleId;
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        _session.OnLaunchPrepared(displayName, resolvedTitleId);
         StatusDot.Fill = SuccessLineBrush;
         StatusText.Text = Localization.Instance.Format("Launch.Running", displayName);
         StatusBarRight.Text = Localization.Instance.Format("Status.Running", displayName);
@@ -1838,12 +1412,6 @@ public partial class MainWindow : Window
         UpdateDiscordPresence();
 
         ShowGameView();
-        _pendingLaunch = new PendingLaunch(
-            Path.GetFullPath(ebootPath),
-            displayName,
-            _runningGameTitleId,
-            effective.LogLevel,
-            runtimeOptions);
 
         if (_gameSurfaceHost?.Surface is { } surface)
         {
@@ -1865,23 +1433,23 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_emulator is null)
+        // If a launch is still pending (surface not yet attached), cancel it
+        // instead of letting the delayed callback start a session the user
+        // already cancelled.
+        if (_emulatorService.CancelPendingLaunch())
         {
-            // The native host can be created a moment after Launch. Do not
-            // let that delayed callback start a session the user already
-            // cancelled.
-            _pendingLaunch = null;
             OnEmulatorExited(0);
             return;
         }
 
         _isStopping = true;
+        _session.OnStopRequested();
         StopButton.IsEnabled = false;
         SessionStopButton.IsEnabled = false;
         SessionHintText.Text = Localization.Instance.Get("Launch.Stopping");
         SessionF11Badge.IsVisible = false;
         ShowSessionLoading("Closing game", "Waiting for the emulation session to exit...");
-        _emulator.Stop();
+        _emulatorService.Stop();
         _runningGameName = null;
         _runningGameTitleId = null;
         StatusText.Text = Localization.Instance.Get("Launch.Stopping");
@@ -1895,41 +1463,13 @@ public partial class MainWindow : Window
     /// Builds "user/logs/&lt;titleId&gt;-&lt;timestamp&gt;.log" next to the emulator
     /// executable, following the same portable-data convention as savedata.
     /// </summary>
-    private string? BuildLogFilePath(string? titleId)
-    {
-        try
-        {
-            var exeDirectory = Path.GetDirectoryName(_emulatorExePath) ?? AppContext.BaseDirectory;
-            if (string.IsNullOrEmpty(exeDirectory))
-            {
-                return null;
-            }
-
-            var logsDirectory = Path.Combine(exeDirectory, "user", "logs");
-            Directory.CreateDirectory(logsDirectory);
-
-            var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;
-            foreach (var invalid in Path.GetInvalidFileNameChars())
-            {
-                id = id.Replace(invalid, '_');
-            }
-
-            return Path.Combine(logsDirectory, $"{id}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
-        }
-        catch (Exception)
-        {
-            return null; // unwritable location: launch continues without a log file
-        }
-    }
-
     private void OnEmulatorExited(int exitCode)
     {
-        FlushPendingConsoleLines();
+        _logService.Flush();
         _isRunning = false;
         _isStopping = false;
-        _emulator?.Dispose();
-        _emulator = null;
-        _pendingLaunch = null;
+        // The emulator service disposes its own process; the window only owns
+        // the native surface host and view state.
         DisposeGameSurfaceHost();
         HideGameView();
 
@@ -1966,65 +1506,12 @@ public partial class MainWindow : Window
 
     private void StartPendingSession(VulkanHostSurface surface)
     {
-        if (_pendingLaunch is not { } launch || _emulator is not null)
+        // Resolve the child-process descriptor here (the surface is a UI-bound
+        // native handle) and hand it to the service, which owns the process.
+        string? descriptor = null;
+        if (surface.TryGetChildProcessDescriptor(out var d))
         {
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(_emulatorExePath))
-        {
-            AppendConsoleLine(Localization.Instance.Get("Launch.ExeNotFound"), ErrorLineBrush);
-            OnEmulatorExited(3);
-            return;
-        }
-
-        var process = new EmulatorProcess();
-        process.OutputReceived += OnEmulatorOutput;
-        process.Exited += code => Dispatcher.UIThread.Post(() => OnEmulatorExited(code));
-
-        try
-        {
-            var arguments = BuildEmulatorArguments(launch, surface);
-            _emulator = process;
-            _pendingLaunch = null;
-            process.Start(
-                _emulatorExePath,
-                arguments,
-                Path.GetDirectoryName(_emulatorExePath));
-            AppendConsoleLine(
-                Localization.Instance.Format("Launch.Command", launch.EbootPath),
-                DimLineBrush);
-        }
-        catch (Exception exception)
-        {
-            _emulator = null;
-            process.Dispose();
-            AppendConsoleLine(
-                Localization.Instance.Format("Launch.StartFailed", exception.Message),
-                ErrorLineBrush);
-            OnEmulatorExited(3);
-        }
-    }
-
-    private List<string> BuildEmulatorArguments(PendingLaunch launch, VulkanHostSurface surface)
-    {
-        var arguments = new List<string>
-        {
-            "--cpu-engine=native",
-            $"--log-level={launch.LogLevel}",
-        };
-        if (launch.RuntimeOptions.StrictDynlibResolution)
-        {
-            arguments.Add("--strict");
-        }
-        if (launch.RuntimeOptions.ImportTraceLimit > 0)
-        {
-            arguments.Add($"--trace-imports={launch.RuntimeOptions.ImportTraceLimit}");
-        }
-
-        if (surface.TryGetChildProcessDescriptor(out var descriptor))
-        {
-            arguments.Add($"--host-surface={descriptor}");
+            descriptor = d;
         }
         else
         {
@@ -2033,13 +1520,12 @@ public partial class MainWindow : Window
                 WarningLineBrush);
         }
 
-        arguments.Add(launch.EbootPath);
-        return arguments;
+        _emulatorService.StartPendingSession(descriptor);
     }
 
     private void OnEmulatorOutput(string line, bool isError)
     {
-        _pendingLines.Enqueue((line, isError));
+        _logService.Enqueue(line, isError);
         if (!line.Contains("[VIDEOOUT][INFO] Hosted splash ready.", StringComparison.Ordinal) &&
             !line.Contains("[VIDEOOUT][INFO] Hosted first frame presented.", StringComparison.Ordinal))
         {
@@ -2300,58 +1786,6 @@ public partial class MainWindow : Window
         Console.Error.WriteLine("[GUI][INFO] Library restored while embedded session is closing.");
     }
 
-    private void OpenFileLog(string? titleId)
-    {
-        var filePath = ResolveLogFilePath(titleId);
-        if (string.IsNullOrWhiteSpace(filePath))
-        {
-            return;
-        }
-
-        try
-        {
-            var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            _fileLog = new StreamWriter(filePath, append: false) { AutoFlush = true };
-            AppendConsoleLine(Localization.Instance.Format("Launch.LogFile", filePath), DimLineBrush);
-        }
-        catch (Exception exception)
-        {
-            AppendConsoleLine($"[GUI][WARN] Could not open log file: {exception.Message}", WarningLineBrush);
-            DropFileLog();
-        }
-    }
-
-    private string? ResolveLogFilePath(string? titleId)
-    {
-        if (string.IsNullOrWhiteSpace(_settings.LogFilePath))
-        {
-            return BuildLogFilePath(titleId);
-        }
-
-        if (_settings.OverrideLogFile)
-        {
-            return _settings.LogFilePath;
-        }
-
-        var path = _settings.LogFilePath;
-        var id = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId;
-        foreach (var invalid in Path.GetInvalidFileNameChars())
-        {
-            id = id.Replace(invalid.ToString(), string.Empty, StringComparison.Ordinal);
-        }
-
-        var directory = Path.GetDirectoryName(path);
-        var filename = Path.GetFileNameWithoutExtension(path);
-        var extension = Path.GetExtension(path);
-        var timestampedName = $"{filename}-{id}-{DateTime.Now:yyyyMMdd-HHmmss}{extension}";
-        return string.IsNullOrEmpty(directory) ? timestampedName : Path.Combine(directory, timestampedName);
-    }
-
     private void UpdateRunButtons()
     {
         LaunchButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
@@ -2367,166 +1801,24 @@ public partial class MainWindow : Window
     }
 
     // ---- Console ----
-
-    private void FlushPendingConsoleLines()
-    {
-        if (_pendingLines.IsEmpty)
-        {
-            return;
-        }
-
-        var incoming = new List<LogLine>();
-        while (incoming.Count < MaxConsoleLinesPerFlush &&
-               _pendingLines.TryDequeue(out var pending))
-        {
-            WriteFileLog(pending.Line);
-            incoming.Add(new LogLine(pending.Line, BrushForLine(pending.Line)));
-        }
-
-        FlushFileLog();
-
-        _allConsoleLines.AddRange(incoming);
-
-        string query = ConsoleSearchBox.Text ?? string.Empty;
-
-        IEnumerable<LogLine> linesToAdd = incoming;
-        if (!string.IsNullOrWhiteSpace(query))
-        {
-            linesToAdd = incoming.Where(line =>
-                line.Text != null &&
-                line.Text.Contains(query, StringComparison.OrdinalIgnoreCase));
-        }
-        _consoleLines.AddRange(linesToAdd);
-
-        var overflow = _consoleLines.Count - MaxConsoleLines;
-        while (_allConsoleLines.Count > MaxConsoleLines)
-        {
-            var droppedLine = _allConsoleLines[0];
-            _allConsoleLines.RemoveAt(0);
-            if (_consoleLines.Count > 0 && _consoleLines[0] == droppedLine)
-            {
-                _consoleLines.RemoveAt(0);
-            }
-        }
-
-        _autoScrollTicks = 3;
-    }
+    // The buffer, file mirroring and brush mapping live in ILogService now;
+    // the methods below are thin pass-throughs for the few call sites that
+    // still route through the window (e.g. GUI-authored lines with a UI brush).
 
     private void AppendConsoleLine(string text, IBrush brush)
     {
-        WriteFileLog(text);
-        FlushFileLog();
-
-        var line = new LogLine(text, brush);
-        _allConsoleLines.Add(line);
-
-        string query = ConsoleSearchBox.Text ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(query) || (text != null && text.Contains(query, StringComparison.OrdinalIgnoreCase)))
-        {
-            _consoleLines.Add(line);
-        }
-
-        while (_allConsoleLines.Count > MaxConsoleLines)
-        {
-            var droppedLine = _allConsoleLines[0];
-            _allConsoleLines.RemoveAt(0);
-            if (_consoleLines.Count > 0 && _consoleLines[0] == droppedLine)
-            {
-                _consoleLines.RemoveAt(0);
-            }
-        }
-
+        _logService.Append(text, brush);
         _autoScrollTicks = 3;
         MaybeAutoScroll();
     }
 
     private void RefreshVisibleConsoleLines()
     {
-        string query = ConsoleSearchBox.Text ?? string.Empty;
-
-        _consoleLines.Clear();
-
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            _consoleLines.AddRange(_allConsoleLines);
-        }
-        else
-        {
-            var filtered = _allConsoleLines.Where(line =>
-                line.Text != null &&
-                line.Text.Contains(query, StringComparison.OrdinalIgnoreCase));
-
-            _consoleLines.AddRange(filtered);
-        }
+        _logService.SearchQuery = ConsoleSearchBox.Text ?? string.Empty;
+        _logService.RefreshVisible();
     }
 
-    // ---- Console-to-file mirroring ----
-
-    private void WriteFileLog(string text)
-    {
-        if (_fileLog is not { } writer)
-        {
-            return;
-        }
-
-        try
-        {
-            writer.Write('[');
-            writer.Write(DateTime.Now.ToString("HH:mm:ss.fff"));
-            writer.Write("] ");
-            writer.WriteLine(text);
-        }
-        catch (Exception)
-        {
-            DropFileLog(); // unwritable (disk full, etc.): stop mirroring
-        }
-    }
-
-    private void FlushFileLog()
-    {
-        try
-        {
-            _fileLog?.Flush();
-        }
-        catch (Exception)
-        {
-            DropFileLog();
-        }
-    }
-
-    private void DropFileLog()
-    {
-        var writer = _fileLog;
-        _fileLog = null;
-        try
-        {
-            writer?.Dispose();
-        }
-        catch (Exception)
-        {
-        }
-    }
-
-    /// <summary>
-    /// The pipe reader threads can deliver a final burst after the exit
-    /// event, so the file stays open for one more flush cycle.
-    /// </summary>
-    private void CloseFileLogSoon()
-    {
-        if (_fileLog is not { } writer)
-        {
-            return;
-        }
-
-        DispatcherTimer.RunOnce(() =>
-        {
-            if (ReferenceEquals(_fileLog, writer))
-            {
-                FlushPendingConsoleLines();
-                DropFileLog();
-            }
-        }, TimeSpan.FromMilliseconds(400));
-    }
+    private void CloseFileLogSoon() => _logService.CloseFileLogSoon();
 
     private void MaybeAutoScroll()
     {
@@ -2542,33 +1834,6 @@ public partial class MainWindow : Window
 
         _autoScrollTicks--;
         (ConsoleList.Scroll as ScrollViewer)?.ScrollToEnd();
-    }
-
-    private static IBrush BrushForLine(string line)
-    {
-        if (line.Contains("[ERROR]", StringComparison.Ordinal) ||
-            line.Contains("[CRITICAL]", StringComparison.Ordinal))
-        {
-            return ErrorLineBrush;
-        }
-
-        if (line.Contains("[WARNING]", StringComparison.Ordinal))
-        {
-            return WarningLineBrush;
-        }
-
-        if (line.Contains("[INFO]", StringComparison.Ordinal))
-        {
-            return InfoLineBrush;
-        }
-
-        if (line.Contains("[DEBUG]", StringComparison.Ordinal) ||
-            line.Contains("[TRACE]", StringComparison.Ordinal))
-        {
-            return DimLineBrush;
-        }
-
-        return DefaultLineBrush;
     }
 
     private async Task CopyConsoleAsync()
@@ -2593,9 +1858,11 @@ public partial class MainWindow : Window
         ConsoleSearchBox.Text = string.Empty;
         ConsoleToggle.IsChecked = false;
         ConsolePanel.IsVisible = false;
+        // The detached window shares the same log buffer as the inline panel,
+        // owned by ILogService; clearing it clears both views.
         _consoleWindow = new ConsoleWindow(
-            _consoleLines,
-            () => { _consoleLines.Clear(); _allConsoleLines.Clear(); },
+            _logService.VisibleLines,
+            () => _logService.Clear(),
             AutoScrollCheck.IsChecked == true);
         _consoleWindow.Closed += (_, _) =>
         {

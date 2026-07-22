@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 namespace SharpEmu.GUI;
@@ -12,7 +14,7 @@ namespace SharpEmu.GUI;
 /// executable overrides the embedded copy for that code, so a translation
 /// fix or a brand-new language never needs a rebuild.
 /// </summary>
-public sealed class Localization
+public sealed class Localization : INotifyPropertyChanged
 {
     public static Localization Instance { get; } = new();
 
@@ -23,7 +25,12 @@ public sealed class Localization
 
     private Dictionary<string, string> _strings = new();
     private Dictionary<string, string> _fallbackStrings = new();
+    private string _currentCode = "en";
 
+    // A monotonically increasing token bumped on every language change, so
+    // bindings subscribed via the indexer can refresh even when a key resolves
+    // to the same text in two languages.
+    private int _revision;
 
     private Localization()
     {
@@ -32,7 +39,31 @@ public sealed class Localization
     /// <summary>Directory holding optional *.json language overrides, next to the executable.</summary>
     public static string LanguagesDirectory => Path.Combine(AppContext.BaseDirectory, "Languages");
 
-    public string CurrentCode { get; private set; } = "en";
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>
+    /// Indexer exposing localized strings by key, for XAML bindings of the form
+    /// <c>Text="{Binding [Page.Library], Source={x:Static loc:Localization.Instance}}"</c>.
+    /// Raises <see cref="PropertyChanged"/> for <see cref="Item[]"/> on language
+    /// change so bound controls refresh.
+    /// </summary>
+    public string this[string key] => Get(key);
+
+    /// <summary>A revision counter that changes whenever the active language changes.</summary>
+    public int Revision => _revision;
+
+    public string CurrentCode
+    {
+        get => _currentCode;
+        private set
+        {
+            if (_currentCode != value)
+            {
+                _currentCode = value;
+                OnPropertyChanged();
+            }
+        }
+    }
 
     public string Get(string key)
     {
@@ -108,24 +139,36 @@ public sealed class Localization
                 _strings = new Dictionary<string, string>();
                 _fallbackStrings = new Dictionary<string, string>();
             }
-            CurrentCode = "en";
-            return;
-        }
-
-        // Load the requested language
-        if (TryLoadLooseFile(code, out var loaded) || TryLoadEmbedded(code, out loaded))
-        {
-            _strings = loaded;
         }
         else
         {
-            if (_fallbackStrings.Count > 0)
-                _strings = new Dictionary<string, string>(_fallbackStrings);
+            // Load the requested language
+            if (TryLoadLooseFile(code, out var loaded) || TryLoadEmbedded(code, out loaded))
+            {
+                _strings = loaded;
+            }
             else
-                _strings = new Dictionary<string, string>();
+            {
+                if (_fallbackStrings.Count > 0)
+                    _strings = new Dictionary<string, string>(_fallbackStrings);
+                else
+                    _strings = new Dictionary<string, string>();
+            }
         }
+
         CurrentCode = code;
+        // Bumping the revision and notifying Item[] lets any XAML binding of the
+        // form "{Binding [Key], Source=Localization.Instance}" refresh.
+        _revision++;
+        OnPropertyChanged(BindableIndexerName);
     }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+    /// <summary>The property name Avalonia reports for indexer bindings.</summary>
+    private const string BindableIndexerName = "Item[]";
+
 
     private static IEnumerable<string> EmbeddedLanguageCodes()
     {
