@@ -79,6 +79,22 @@ public sealed class Localization : INotifyPropertyChanged
     public string Format(string key, params object?[] args) => string.Format(Get(key), args);
 
     /// <summary>
+    /// Returns every known localized string for the active language, merged
+    /// with the English fallback so missing keys still resolve. Used by the
+    /// web launcher bridge to hand the whole dictionary to the Vue frontend.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> GetAllStrings()
+    {
+        var merged = new Dictionary<string, string>(_fallbackStrings, StringComparer.Ordinal);
+        foreach (var (key, value) in _strings)
+        {
+            merged[key] = value;
+        }
+
+        return merged;
+    }
+
+    /// <summary>
     /// Languages available either embedded in the binary or as a loose
     /// override file, sorted by code. A loose file's declared name wins when
     /// the same code exists in both places.

@@ -26,6 +26,14 @@
 
   "Library.Loading": "Loading library…",
 
+  "Library.Hero.JumpBackIn": "Jump back in",
+  "Library.Hero.Resume": "▶  Resume",
+  "Library.Hero.NoRecent": "Welcome to SharpEmu",
+  "Library.Hero.NoRecentHint": "Pick a game below to start playing.",
+
+  "Library.Row.Recent": "Recently played",
+  "Library.Row.AllGames": "All games",
+
   "Options.General": "General",
   "Options.Env.Tab": "Environment",
   "Options.Section.Environment": "ENVIRONMENT VARIABLES",
@@ -79,6 +87,10 @@
 
   "Options.Language.Label": "Emulator language",
   "Options.Language.Desc": "Language used throughout the launcher. Applies immediately.",
+
+  "Options.Graphics.Rendering": "RENDERING",
+  "Options.RenderResolution.Label": "Internal resolution",
+  "Options.RenderResolution.Desc": "Render offscreen targets below native resolution and upscale on present. Lower values trade image quality for GPU headroom; takes effect on next launch.",
 
   "Common.On": "On",
   "Common.Off": "Off",

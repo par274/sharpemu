@@ -18,9 +18,10 @@ public partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            // MainWindow resolves its shell view-model and services from the DI
-            // container built in GuiLauncher.
-            desktop.MainWindow = new MainWindow();
+            // The launcher UI renders in a WebView; WebLauncher hosts it plus the
+            // native game surface. The legacy Avalonia MainWindow remains as a
+            // fallback (swap back here if the web launcher misbehaves).
+            desktop.MainWindow = new WebLauncher();
         }
 
         base.OnFrameworkInitializationCompleted();

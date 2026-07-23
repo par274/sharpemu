@@ -30,6 +30,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Controls.WebView" />
     <PackageReference Include="Avalonia.Desktop" />
     <PackageReference Include="Avalonia.Fonts.Inter" />
     <PackageReference Include="Avalonia.Themes.Fluent" />
@@ -46,6 +47,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <AvaloniaResource Include="..\..\assets\images\update-icon.png" Link="Assets/update-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\commit-icon.png" Link="Assets/commit-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\pic0.png" Link="Assets/pic0.png" />
+  </ItemGroup>
+
+  <!-- The bundled single-file Vue launcher. Built by `npm run build` in WebUI/.
+       The dist/index.html is self-contained (inlined JS/CSS) so it loads via
+       NativeWebView.NavigateToString() without a static file server. -->
+  <ItemGroup>
+    <AvaloniaResource Include="WebUI\dist\index.html" Link="WebUI\index.html" />
   </ItemGroup>
 
   <ItemGroup>

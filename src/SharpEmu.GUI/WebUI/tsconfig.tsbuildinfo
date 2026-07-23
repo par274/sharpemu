@@ -1,0 +1,1 @@
+{"root":["./src/bridge.ts","./src/demo.ts","./src/env.d.ts","./src/main.ts","./src/store.ts","./src/types.ts","./src/app.vue","./src/components/gamecarousel.vue","./src/components/gametile.vue","./src/components/herobanner.vue","./src/components/settingrow.vue","./src/views/consoleview.vue","./src/views/libraryview.vue","./src/views/optionsview.vue"],"version":"5.7.3"}
