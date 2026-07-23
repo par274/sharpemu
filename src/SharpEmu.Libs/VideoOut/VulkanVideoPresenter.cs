@@ -45,7 +45,8 @@ internal sealed record VulkanTranslatedGuestDraw(
     uint InstanceCount,
     uint PrimitiveType,
     GuestIndexBuffer? IndexBuffer,
-    GuestRenderState RenderState);
+    GuestRenderState RenderState,
+    int BaseVertex = 0);
 
 internal sealed record VulkanOffscreenGuestDraw(
     VulkanTranslatedGuestDraw Draw,
@@ -469,7 +470,8 @@ internal static unsafe class VulkanVideoPresenter
         uint.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SKIP_TALL_COMPUTE_Z"), out var z)
             ? z
             : 0;
-    private const uint GuestPrimitiveRectList = 0x11;
+    private const uint GuestPrimitiveRectList = AgcPrimitiveHelpers.PrimitiveRectListLegacy;
+    private const uint GuestPrimitiveRectListNgg = AgcPrimitiveHelpers.PrimitiveRectList;
 
     private static readonly object _gate = new();
     private readonly record struct PendingGuestWork(
@@ -1029,7 +1031,8 @@ internal static unsafe class VulkanVideoPresenter
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
         GuestDepthTarget? depthTarget = null,
-        ulong shaderAddress = 0)
+        ulong shaderAddress = 0,
+        int baseVertex = 0)
     {
         SubmitOffscreenTranslatedDraw(
             pixelSpirv,
@@ -1045,7 +1048,8 @@ internal static unsafe class VulkanVideoPresenter
             vertexBuffers,
             renderState,
             depthTarget,
-            shaderAddress);
+            shaderAddress,
+            baseVertex);
     }
 
     // Manual scans (targets are <= 8) so the per-draw validation does not
@@ -1098,7 +1102,8 @@ internal static unsafe class VulkanVideoPresenter
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
         GuestDepthTarget? depthTarget = null,
-        ulong shaderAddress = 0)
+        ulong shaderAddress = 0,
+        int baseVertex = 0)
     {
         if (pixelSpirv.Length == 0 ||
             targets.Count == 0 ||
@@ -1165,7 +1170,8 @@ internal static unsafe class VulkanVideoPresenter
                         instanceCount,
                         primitiveType,
                         indexBuffer,
-                        effectiveRenderState),
+                        effectiveRenderState,
+                        baseVertex),
                     targets.ToArray(),
                     depthTarget,
                     PublishTarget: true,
@@ -1190,7 +1196,8 @@ internal static unsafe class VulkanVideoPresenter
         GuestIndexBuffer? indexBuffer = null,
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
-        ulong shaderAddress = 0)
+        ulong shaderAddress = 0,
+        int baseVertex = 0)
     {
         if (pixelSpirv.Length == 0 ||
             depthTarget.Address == 0 ||
@@ -1220,7 +1227,8 @@ internal static unsafe class VulkanVideoPresenter
                         instanceCount,
                         primitiveType,
                         indexBuffer,
-                        renderState ?? GuestRenderState.Default),
+                        renderState ?? GuestRenderState.Default,
+                        baseVertex),
                     [new GuestRenderTarget(
                         Address: 0,
                         depthTarget.Width,
@@ -3119,6 +3127,7 @@ internal static unsafe class VulkanVideoPresenter
             public bool Index32Bit;
             public uint VertexCount = 3;
             public uint InstanceCount = 1;
+            public int BaseVertex;
             public PrimitiveTopology Topology = PrimitiveTopology.TriangleList;
             public GuestBlendState[] Blends = [GuestBlendState.Default];
             public GuestBlendConstant BlendConstant;
@@ -6177,9 +6186,18 @@ internal static unsafe class VulkanVideoPresenter
                 GlobalMemoryBuffers =
                     new GlobalBufferResource[draw.GlobalMemoryBuffers.Count],
                 VertexBuffers = new VertexBufferResource[draw.VertexBuffers.Count],
-                VertexCount = GetDrawVertexCount(draw.PrimitiveType, draw.VertexCount, draw.IndexBuffer),
+                VertexCount = GetDrawVertexCount(
+                    draw.PrimitiveType,
+                    draw.VertexCount,
+                    draw.IndexBuffer,
+                    draw.VertexBuffers.Count > 0),
                 InstanceCount = Math.Max(draw.InstanceCount, 1),
-                Topology = GetPrimitiveTopology(draw.PrimitiveType),
+                BaseVertex = draw.BaseVertex,
+                Topology = GetPrimitiveTopology(
+                    draw.PrimitiveType,
+                    indexed: draw.IndexBuffer is not null,
+                    vertexCount: draw.VertexCount,
+                    hasVertexBuffers: draw.VertexBuffers.Count > 0),
                 Blends = draw.RenderState.Blends.ToArray(),
                 BlendConstant = draw.RenderState.BlendConstant,
                 Scissor = draw.RenderState.Scissor,
@@ -9650,7 +9668,11 @@ internal static unsafe class VulkanVideoPresenter
             _vk.FreeMemory(_device, allocation.Memory, null);
         }
 
-        private static PrimitiveTopology GetPrimitiveTopology(uint primitiveType) =>
+        private static PrimitiveTopology GetPrimitiveTopology(
+            uint primitiveType,
+            bool indexed,
+            uint vertexCount,
+            bool hasVertexBuffers) =>
             primitiveType switch
             {
                 1 => PrimitiveTopology.PointList,
@@ -9658,7 +9680,12 @@ internal static unsafe class VulkanVideoPresenter
                 3 => PrimitiveTopology.LineStrip,
                 5 => PrimitiveTopology.TriangleFan,
                 6 => PrimitiveTopology.TriangleStrip,
-                GuestPrimitiveRectList => PrimitiveTopology.TriangleStrip,
+                GuestPrimitiveRectListNgg or GuestPrimitiveRectList
+                    when AgcPrimitiveHelpers.ShouldDrawRectListAsTriangleStrip(
+                        primitiveType,
+                        indexed,
+                        vertexCount,
+                        hasVertexBuffers) => PrimitiveTopology.TriangleStrip,
                 _ => PrimitiveTopology.TriangleList,
             };
 
@@ -9774,15 +9801,13 @@ internal static unsafe class VulkanVideoPresenter
         private static uint GetDrawVertexCount(
             uint primitiveType,
             uint vertexCount,
-            GuestIndexBuffer? indexBuffer)
-        {
-            if (primitiveType == GuestPrimitiveRectList && indexBuffer is null)
-            {
-                return 4;
-            }
-
-            return vertexCount;
-        }
+            GuestIndexBuffer? indexBuffer,
+            bool hasVertexBuffers) =>
+            AgcPrimitiveHelpers.GetRectListDrawVertexCount(
+                primitiveType,
+                vertexCount,
+                indexed: indexBuffer is not null,
+                hasVertexBuffers);
 
         private static BlendFactor ToVkBlendFactor(uint factor) =>
             factor switch
@@ -15665,12 +15690,14 @@ internal static unsafe class VulkanVideoPresenter
                         resources.IndexBuffer,
                         0,
                         resources.Index32Bit ? IndexType.Uint32 : IndexType.Uint16);
+                    // vertexOffset = ResolveVertexOffset(GE_INDX_OFFSET).
+                    // GTA UI glyphs use relative indices + a nonzero base vertex.
                     _vk.CmdDrawIndexed(
                         _commandBuffer,
                         resources.VertexCount,
                         resources.InstanceCount,
                         0,
-                        0,
+                        resources.BaseVertex,
                         0);
                 }
                 else
@@ -15679,7 +15706,7 @@ internal static unsafe class VulkanVideoPresenter
                         _commandBuffer,
                         resources.VertexCount,
                         resources.InstanceCount,
-                        0,
+                        (uint)Math.Max(resources.BaseVertex, 0),
                         0);
                 }
 
