@@ -26,15 +26,8 @@
 
   "Library.Loading": "Loading library…",
 
-  "Library.Hero.JumpBackIn": "Jump back in",
-  "Library.Hero.Resume": "▶  Resume",
-  "Library.Hero.NoRecent": "Welcome to SharpEmu",
-  "Library.Hero.NoRecentHint": "Pick a game below to start playing.",
-
-  "Library.Row.Recent": "Recently played",
-  "Library.Row.AllGames": "All games",
-
   "Options.General": "General",
+  "Options.Graphics": "Graphics",
   "Options.Env.Tab": "Environment",
   "Options.Section.Environment": "ENVIRONMENT VARIABLES",
   "Options.Env.Desc": "Switches passed to the emulator as environment variables at launch.",

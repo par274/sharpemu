@@ -558,6 +558,7 @@ public partial class MainWindow : Window
         LoadingStateText.Text = loc.Get("Library.Loading");
 
         GeneralTabItem.Header = loc.Get("Options.General");
+        GraphicsTabItem.Header = loc.Get("Options.Graphics");
         EnvTabItem.Header = loc.Get("Options.Env.Tab");
         EnvSectionTitle.Text = loc.Get("Options.Section.Environment");
         EnvDesc.Text = loc.Get("Options.Env.Desc");
@@ -604,6 +605,10 @@ public partial class MainWindow : Window
 
         LanguageRow.Label = loc.Get("Options.Language.Label");
         LanguageRow.Description = loc.Get("Options.Language.Desc");
+
+        RenderingSectionTitle.Text = loc.Get("Options.Graphics.Rendering");
+        RenderResolutionRow.Label = loc.Get("Options.RenderResolution.Label");
+        RenderResolutionRow.Description = loc.Get("Options.RenderResolution.Desc");
 
         TitleMusicRow.Label = loc.Get("Options.TitleMusic.Label");
         TitleMusicRow.Description = loc.Get("Options.TitleMusic.Desc");
