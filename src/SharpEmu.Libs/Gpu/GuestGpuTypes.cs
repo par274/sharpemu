@@ -12,7 +12,8 @@ namespace SharpEmu.Libs.Gpu;
 // translation for its API.
 
 /// <summary>A guest texture referenced by a draw or dispatch. Format/NumberType/
-/// TileMode/DstSelect are raw guest descriptor codes.</summary>
+/// TileMode/DstSelect/Type are raw guest descriptor codes. Depth is the
+/// normalized volume depth (one for non-3D resources).</summary>
 internal sealed record GuestDrawTexture(
     ulong Address,
     uint Width,
@@ -41,6 +42,8 @@ internal sealed record GuestDrawTexture(
     // empty in that case. Both are neutral (no host graphics-API values).
     byte[]? TiledSource = null,
     DetileParams? Detile = null);
+    uint Type = 9,
+    uint Depth = 1);
 
 /// <summary>Raw guest sampler descriptor dwords, copied verbatim from guest memory.</summary>
 internal readonly record struct GuestSampler(
@@ -63,7 +66,9 @@ internal readonly record struct TextureContentIdentity(
     uint Pitch,
     GuestSampler Sampler,
     bool Arrayed = false,
-    uint ArrayLayers = 1);
+    uint ArrayLayers = 1,
+    uint Type = 9,
+    uint Depth = 1);
 
 internal sealed record GuestMemoryBuffer(
     ulong BaseAddress,

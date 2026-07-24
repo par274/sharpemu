@@ -8356,16 +8356,33 @@ public static partial class AgcExports
             return tailLinear;
         }
 
+        var volumeDepth = checked((int)GetTextureVolumeDepth(
+            descriptor.Type,
+            descriptor.Depth));
+        if (logicalByteCount % volumeDepth != 0 ||
+            source.Length % volumeDepth != 0)
+        {
+            return null;
+        }
+
+        var logicalSliceByteCount = logicalByteCount / volumeDepth;
+        var physicalSliceByteCount = source.Length / volumeDepth;
         var linear = new byte[logicalByteCount];
-        return GnmTiling.TryDetile(
-            source,
-            linear,
-            descriptor.TileMode,
-            elementsWide,
-            elementsHigh,
-            bytesPerElement)
-            ? linear
-            : null;
+        for (var slice = 0; slice < volumeDepth; slice++)
+        {
+            if (!GnmTiling.TryDetile(
+                    source.AsSpan(slice * physicalSliceByteCount, physicalSliceByteCount),
+                    linear.AsSpan(slice * logicalSliceByteCount, logicalSliceByteCount),
+                    descriptor.TileMode,
+                    elementsWide,
+                    elementsHigh,
+                    bytesPerElement))
+            {
+                return null;
+            }
+        }
+
+        return linear;
     }
 
     private static void TraceTextureFallback(TextureDescriptor descriptor, string reason)
@@ -8397,6 +8414,9 @@ public static partial class AgcExports
         out GuestDrawTexture texture)
     {
         texture = default!;
+        var textureDepth = GetTextureVolumeDepth(
+            descriptor.Type,
+            descriptor.Depth);
         if ((descriptor.Type != Gen5TextureType1D &&
              descriptor.Type != Gen5TextureType2D &&
              descriptor.Type != Gen5TextureType3D &&
@@ -8409,7 +8429,13 @@ public static partial class AgcExports
             descriptor.Height > 8192)
         {
             TraceTextureFallback(descriptor, "invalid-descriptor");
-            texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType, isArrayed);
+            texture = CreateFallbackGuestDrawTexture(
+                isStorage,
+                descriptor.Format,
+                descriptor.NumberType,
+                isArrayed,
+                descriptor.Type,
+                textureDepth);
             return true;
         }
 
@@ -8433,10 +8459,15 @@ public static partial class AgcExports
                 descriptor.Height,
                 descriptor.Format)
             : descriptor.Width;
-        var sourceByteCount = GetTextureByteCount(
+        var sourceSliceByteCount = GetTextureByteCount(
             descriptor.Format,
             sourceWidth,
             descriptor.Height);
+        var sourceByteCount = GetTextureByteCount(
+            descriptor.Format,
+            sourceWidth,
+            descriptor.Height,
+            textureDepth);
         if (sourceByteCount == 0 ||
             sourceByteCount > MaxPresentedTextureBytes ||
             sourceByteCount > int.MaxValue)
@@ -8444,11 +8475,17 @@ public static partial class AgcExports
             TraceTextureFallback(
                 descriptor,
                 $"invalid-byte-count:{sourceByteCount}");
-            texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType, isArrayed);
+            texture = CreateFallbackGuestDrawTexture(
+                isStorage,
+                descriptor.Format,
+                descriptor.NumberType,
+                isArrayed,
+                descriptor.Type,
+                textureDepth);
             return true;
         }
 
-        var physicalSourceByteCount = sourceByteCount;
+        var physicalSourceByteCount = sourceSliceByteCount;
         var elementsWide = 0;
         var elementsHigh = 0;
         var bytesPerElement = 0;
@@ -8468,13 +8505,6 @@ public static partial class AgcExports
                 out var tiledByteCount))
         {
             physicalSourceByteCount = tiledByteCount;
-        }
-
-        if (physicalSourceByteCount > MaxPresentedTextureBytes ||
-            physicalSourceByteCount > int.MaxValue)
-        {
-            texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType, isArrayed);
-            return true;
         }
 
         var resourceMipLevels = descriptor.HasExtendedDescriptor
@@ -8499,6 +8529,20 @@ public static partial class AgcExports
                 out var placedChainSliceBytes))
         {
             chainSliceBytes = placedChainSliceBytes;
+        }
+
+        physicalSourceByteCount = checked(physicalSourceByteCount * textureDepth);
+        if (physicalSourceByteCount > MaxPresentedTextureBytes ||
+            physicalSourceByteCount > int.MaxValue)
+        {
+            texture = CreateFallbackGuestDrawTexture(
+                isStorage,
+                descriptor.Format,
+                descriptor.NumberType,
+                isArrayed,
+                descriptor.Type,
+                textureDepth);
+            return true;
         }
 
         var wantsArrayUpload = isArrayed &&
@@ -8539,7 +8583,9 @@ public static partial class AgcExports
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
                 Sampler: ToGuestSampler(samplerDescriptor),
-                ArrayedView: isArrayed);
+                ArrayedView: isArrayed,
+                Type: descriptor.Type,
+                Depth: textureDepth);
             return true;
         }
 
@@ -8615,7 +8661,9 @@ public static partial class AgcExports
                 Pitch: sourceWidth,
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
-                Sampler: ToGuestSampler(samplerDescriptor));
+                Sampler: ToGuestSampler(samplerDescriptor),
+                Type: descriptor.Type,
+                Depth: textureDepth);
             return true;
         }
 
@@ -8656,7 +8704,9 @@ public static partial class AgcExports
                     sourceWidth,
                     sampler,
                     isArrayed,
-                    arrayUploadLayers)))
+                    arrayUploadLayers,
+                    descriptor.Type,
+                    textureDepth)))
         {
             texture = new GuestDrawTexture(
                 descriptor.Address,
@@ -8676,14 +8726,16 @@ public static partial class AgcExports
                 DstSelect: descriptor.DstSelect,
                 Sampler: sampler,
                 ArrayedView: isArrayed,
-                ArrayLayers: arrayUploadLayers);
+                ArrayLayers: arrayUploadLayers,
+                Type: descriptor.Type,
+                Depth: textureDepth);
             return true;
         }
 
         if (wantsArrayUpload)
         {
             var arrayLayers = arrayUploadLayers;
-            var layerBytes = checked((int)sourceByteCount);
+            var layerBytes = checked((int)sourceSliceByteCount);
             var totalBytes = (long)layerBytes * arrayLayers;
 
             // GPU detile for arrayed exact-XOR/4bpp textures: pack the tiled array
@@ -8750,7 +8802,7 @@ public static partial class AgcExports
                 var uploadedLayers = 0u;
                 for (var layer = 0u; layer < arrayLayers; layer++)
                 {
-                    var sliceSource = new byte[(int)physicalSourceByteCount];
+                    var sliceSource = new byte[(int)chainSliceBytes];
                     if (!ctx.Memory.TryRead(
                             descriptor.Address + layer * chainSliceBytes + baseMipByteOffset,
                             sliceSource))
@@ -8791,7 +8843,9 @@ public static partial class AgcExports
                         DstSelect: descriptor.DstSelect,
                         Sampler: sampler,
                         ArrayedView: true,
-                        ArrayLayers: arrayLayers);
+                        ArrayLayers: arrayLayers,
+                        Type: descriptor.Type,
+                        Depth: textureDepth);
                     return true;
                 }
             }
@@ -8805,7 +8859,13 @@ public static partial class AgcExports
             TraceTextureFallback(
                 descriptor,
                 $"guest-read-failed:{sourceByteCount}");
-            texture = CreateFallbackGuestDrawTexture(isStorage, descriptor.Format, descriptor.NumberType, isArrayed);
+            texture = CreateFallbackGuestDrawTexture(
+                isStorage,
+                descriptor.Format,
+                descriptor.NumberType,
+                isArrayed,
+                descriptor.Type,
+                textureDepth);
             return true;
         }
 
@@ -8919,7 +8979,9 @@ public static partial class AgcExports
             DstSelect: descriptor.DstSelect,
             Sampler: ToGuestSampler(samplerDescriptor),
             WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
-            ArrayedView: isArrayed);
+            ArrayedView: isArrayed,
+            Type: descriptor.Type,
+            Depth: textureDepth);
         return true;
     }
 
@@ -9199,7 +9261,9 @@ public static partial class AgcExports
         bool isStorage,
         uint format,
         uint numberType,
-        bool isArrayed = false)
+        bool isArrayed = false,
+        uint type = Gen5TextureType2D,
+        uint depth = 1)
     {
         var fallbackFormat = format == 0 ? 10u : format;
         var fallbackNumberType = numberType;
@@ -9214,7 +9278,9 @@ public static partial class AgcExports
             IsStorage: isStorage,
             MipLevels: 1,
             MipLevel: 0,
-            ArrayedView: isArrayed);
+            ArrayedView: isArrayed,
+            Type: type,
+            Depth: GetTextureVolumeDepth(type, depth));
     }
 
     private static GuestSampler ToGuestSampler(IReadOnlyList<uint> descriptor) =>
@@ -10400,7 +10466,8 @@ public static partial class AgcExports
         var totalBytes = GetTextureByteCount(
             texture.Format,
             texture.Width,
-            texture.Height);
+            texture.Height,
+            GetTextureVolumeDepth(texture.Type, texture.Depth));
         if (totalBytes == 0)
         {
             return "probe=unsupported";
@@ -10483,19 +10550,36 @@ public static partial class AgcExports
             _ => 0UL,
         };
 
-    private static ulong GetTextureByteCount(uint format, uint width, uint height)
+    internal static ulong GetTextureByteCount(
+        uint format,
+        uint width,
+        uint height,
+        uint depth = 1)
     {
         var bytesPerTexel = GetTextureBytesPerTexel(format);
         if (bytesPerTexel != 0)
         {
-            return checked((ulong)width * height * bytesPerTexel);
+            return checked(
+                (ulong)width *
+                height *
+                Math.Max(depth, 1u) *
+                bytesPerTexel);
         }
 
         var blockBytes = (ulong)GetBlockCompressedBlockBytes(format);
         return blockBytes == 0
             ? 0
-            : checked(((ulong)width + 3) / 4 * (((ulong)height + 3) / 4) * blockBytes);
+            : checked(
+                ((ulong)width + 3) / 4 *
+                (((ulong)height + 3) / 4) *
+                Math.Max(depth, 1u) *
+                blockBytes);
     }
+
+    internal static uint GetTextureVolumeDepth(uint type, uint depth) =>
+        type == Gen5TextureType3D
+            ? Math.Max(depth, 1u)
+            : 1u;
 
     private static uint GetLinearTexturePitch(uint pitch, uint height, uint format)
     {
