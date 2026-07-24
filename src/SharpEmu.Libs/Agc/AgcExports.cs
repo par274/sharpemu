@@ -330,6 +330,11 @@ public static partial class AgcExports
     private static long _labelProducerSequence;
     private static readonly object _labelProducerGate = new();
     private static readonly List<LabelProducerTrace> _labelProducers = [];
+    private const int LabelProducerSoftBound = 4096;
+    // Raised when a compaction pass frees nothing because every record is still
+    // active, so registration does not rescan the whole list on every add while
+    // a queue is suspended. Reset once compaction can make progress again.
+    private static int _labelProducerCompactionBound = LabelProducerSoftBound;
     private static readonly HashSet<(object Memory, ulong Address)>
         _tracedProducerlessWaits = new();
     private static long _shaderTranslationMissTraceCount;
@@ -4398,9 +4403,21 @@ public static partial class AgcExports
         };
         lock (_labelProducerGate)
         {
-            if (_labelProducers.Count >= 4096)
+            if (_labelProducers.Count >= _labelProducerCompactionBound)
             {
-                _labelProducers.RemoveRange(0, 1024);
+                // Active producer records are synchronization state, not a
+                // diagnostic cache. Removing one can hide an earlier
+                // same-submission label write and make a valid in-stream fence
+                // suspend forever. Compact only completed history; if all
+                // records are active, correctness takes precedence over the
+                // soft diagnostic bound.
+                var removed = CompactCompletedEntries(
+                    _labelProducers,
+                    static candidate => candidate.Completed,
+                    targetCount: LabelProducerSoftBound * 3 / 4);
+                _labelProducerCompactionBound = removed == 0
+                    ? _labelProducers.Count * 2
+                    : LabelProducerSoftBound;
             }
 
             _labelProducers.Add(producer);
@@ -4419,6 +4436,36 @@ public static partial class AgcExports
         }
 
         return producer;
+    }
+
+    internal static int CompactCompletedEntries<T>(
+        List<T> entries,
+        Func<T, bool> isCompleted,
+        int targetCount)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentNullException.ThrowIfNull(isCompleted);
+        targetCount = Math.Max(0, targetCount);
+
+        // Single order-preserving pass. Removing one-by-one would shift the
+        // tail on every eviction, which is quadratic on a list this size and
+        // runs while the label gate is held.
+        var removable = entries.Count - targetCount;
+        var removed = 0;
+        var write = 0;
+        for (var read = 0; read < entries.Count; read++)
+        {
+            if (removed < removable && isCompleted(entries[read]))
+            {
+                removed++;
+                continue;
+            }
+
+            entries[write++] = entries[read];
+        }
+
+        entries.RemoveRange(write, entries.Count - write);
+        return removed;
     }
 
     private static void CompleteLabelProducer(LabelProducerTrace? producer)
