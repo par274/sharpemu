@@ -18,7 +18,6 @@ namespace SharpEmu.Libs.VideoOut;
 /// </summary>
 internal static unsafe class VulkanDetileSelfTest
 {
-    private const uint SwizzleMode = 27; // 64 KiB RB+ R_X, exact-XOR
     private const int BytesPerElement = 4;
     private const uint Width = 256;
     private const uint Height = 256;
@@ -45,6 +44,10 @@ internal static unsafe class VulkanDetileSelfTest
         }
     }
 
+    // Mode 27 is exact-XOR; mode 8 (64 KiB Z) is block-table — one of each family
+    // so the self-test exercises both kernel branches on real hardware.
+    private static readonly uint[] SwizzleModes = [27, 8];
+
     private static void Run(
         Vk vk,
         Device device,
@@ -52,21 +55,17 @@ internal static unsafe class VulkanDetileSelfTest
         PhysicalDevice physicalDevice,
         uint queueFamilyIndex)
     {
-        var parameters = GnmTiling.GetDetileParams(SwizzleMode, BytesPerElement, (int)Width, (int)Height);
-        if (!parameters.IsSupported || !VulkanDetilePass.Supports(parameters))
-        {
-            Console.Error.WriteLine("[DETILE-SELFTEST] FAIL: params not supported by the GPU pass.");
-            return;
-        }
-
         using var pass = new VulkanDetilePass(vk, device, queue, physicalDevice, queueFamilyIndex);
         var commandPool = CreateCommandPool(vk, device, queueFamilyIndex);
         try
         {
-            // A plain 2D texture (1 layer) and an array texture (2 layers) — the
-            // arrayed case exercises the kernel's dispatch-Z slice addressing.
-            RunCase(vk, device, physicalDevice, queue, commandPool, pass, parameters, layers: 1);
-            RunCase(vk, device, physicalDevice, queue, commandPool, pass, parameters, layers: 2);
+            foreach (var swizzleMode in SwizzleModes)
+            {
+                // A plain 2D texture (1 layer) and an array texture (2 layers) — the
+                // arrayed case exercises the kernel's dispatch-Z slice addressing.
+                RunCase(vk, device, physicalDevice, queue, commandPool, pass, swizzleMode, layers: 1);
+                RunCase(vk, device, physicalDevice, queue, commandPool, pass, swizzleMode, layers: 2);
+            }
         }
         finally
         {
@@ -84,9 +83,17 @@ internal static unsafe class VulkanDetileSelfTest
         Queue queue,
         CommandPool commandPool,
         VulkanDetilePass pass,
-        DetileParams parameters,
+        uint swizzleMode,
         uint layers)
     {
+        var parameters = GnmTiling.GetDetileParams(swizzleMode, BytesPerElement, (int)Width, (int)Height);
+        if (!parameters.IsSupported || !VulkanDetilePass.Supports(parameters))
+        {
+            Console.Error.WriteLine(
+                $"[DETILE-SELFTEST] FAIL: mode {swizzleMode} not supported by the GPU pass.");
+            return;
+        }
+
         // Whole-block tiled source with a per-layer-distinct deterministic pattern
         // (so a slice mix-up is caught), the array slices packed contiguously.
         var blocksHigh = ((int)Height + parameters.BlockHeight - 1) / parameters.BlockHeight;
@@ -104,7 +111,7 @@ internal static unsafe class VulkanDetileSelfTest
             if (!GnmTiling.TryDetile(
                     tiled.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
                     expected.AsSpan(layer * sliceLinearBytes, sliceLinearBytes),
-                    SwizzleMode, (int)Width, (int)Height, BytesPerElement))
+                    swizzleMode, (int)Width, (int)Height, BytesPerElement))
             {
                 Console.Error.WriteLine("[DETILE-SELFTEST] FAIL: CPU TryDetile declined.");
                 return;
@@ -115,13 +122,15 @@ internal static unsafe class VulkanDetileSelfTest
 
         // Phase 1: the one-shot DetileIntoImage (submit + wait in place).
         VerifyPhase(
-            vk, device, physicalDevice, queue, commandPool, expected, layers, $"DetileIntoImage x{layers}",
+            vk, device, physicalDevice, queue, commandPool, expected, layers, swizzleMode,
+            $"DetileIntoImage mode{swizzleMode} x{layers}",
             image => pass.DetileIntoImage(image, ImageLayout.Undefined, Width, Height, layers, tiledBytes, parameters));
 
         // Phase 2: RecordDetile — the exact code path the render loop uses
         // (record into a command buffer, submit, retire the transients).
         VerifyPhase(
-            vk, device, physicalDevice, queue, commandPool, expected, layers, $"RecordDetile x{layers}",
+            vk, device, physicalDevice, queue, commandPool, expected, layers, swizzleMode,
+            $"RecordDetile mode{swizzleMode} x{layers}",
             image => RecordDetileAndSubmit(vk, device, queue, commandPool, pass, image, layers, tiledBytes, parameters));
     }
 
@@ -133,6 +142,7 @@ internal static unsafe class VulkanDetileSelfTest
         CommandPool commandPool,
         byte[] expected,
         uint layers,
+        uint swizzleMode,
         string label,
         Func<Image, bool> detile)
     {
@@ -167,7 +177,7 @@ internal static unsafe class VulkanDetileSelfTest
             vk.UnmapMemory(device, readbackMemory);
 
             Console.Error.WriteLine(firstMismatch < 0
-                ? $"[DETILE-SELFTEST] {label} PASS: {Width}x{Height}x{layers} mode {SwizzleMode} matches CPU detile ({expected.Length} bytes)."
+                ? $"[DETILE-SELFTEST] {label} PASS: {Width}x{Height}x{layers} mode {swizzleMode} matches CPU detile ({expected.Length} bytes)."
                 : $"[DETILE-SELFTEST] {label} FAIL: first mismatch at byte {firstMismatch} (texel {firstMismatch / BytesPerElement}).");
         }
         finally

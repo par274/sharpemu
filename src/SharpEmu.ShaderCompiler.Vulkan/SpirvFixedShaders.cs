@@ -262,16 +262,18 @@ public static class SpirvFixedShaders
     }
 
     /// <summary>
-    /// Compute kernel that deswizzles RDNA2 exact-XOR tiled surfaces (swizzle
-    /// modes 5/9/24/27) at 4 bytes/element into a linear output buffer — one GPU
-    /// thread per texel, one dispatch-Z layer per array slice. Mirrors
-    /// <c>GnmTiling.GetDetileParams</c>' ExactXor addressing so it is bit-identical
-    /// to the CPU fallback:
+    /// Compute kernel that deswizzles RDNA2 tiled surfaces at 4 bytes/element into
+    /// a linear output buffer — one GPU thread per texel, one dispatch-Z layer per
+    /// array slice. Mirrors <c>GnmTiling.GetDetileParams</c> so it is bit-identical
+    /// to the CPU fallback for both supported equation families:
     /// <code>
     ///   z = layer;
+    ///   inBlock = equation == BlockTable            // modes 1/4/8
+    ///             ? blockTable[(y % blockHeight) * blockWidth + (x % blockWidth)]
+    ///             : xTerm[x &amp; xMask] ^ yTerm[y &amp; yMask];   // ExactXor 5/9/24/27
     ///   src = z * srcSliceElements
     ///         + (y / blockHeight * blocksPerRow + x / blockWidth) * blockElements
-    ///         + (xTerm[x &amp; xMask] ^ yTerm[y &amp; yMask]);
+    ///         + inBlock;
     ///   out[z * width * height + y * width + x] = tiled[src];
     /// </code>
     /// Each array slice is an independently tiled 2D surface; the caller packs the
@@ -280,16 +282,18 @@ public static class SpirvFixedShaders
     /// buffer-&gt;image copy. For a non-arrayed texture the caller dispatches a
     /// single Z layer with <c>srcSliceElements</c> unused (z == 0).
     ///
-    /// The X/Y term tables are ELEMENT offsets (the caller pre-shifts the
-    /// byte-unit GetDetileParams terms right by log2(bytesPerElement); for 4bpp
-    /// that shift is exact because the equation's low two byte-offset bits are 0).
-    /// The presenter copies the linear output buffer into the sampled image,
-    /// reusing the existing buffer-&gt;image upload.
+    /// The term tables hold ELEMENT offsets. For ExactXor the caller pre-shifts the
+    /// byte-unit GetDetileParams terms right by log2(bytesPerElement) (exact at 4bpp
+    /// since the equation's low two byte-offset bits are 0); for BlockTable the
+    /// GetDetileParams block table is already in element units. Binding 1 carries
+    /// xTerm (ExactXor) OR blockTable (BlockTable) — the two equations index
+    /// different-sized buffers, so the kernel branches and evaluates exactly one.
     ///
-    /// Descriptor set 0: binding 0 = tiled uint[], 1 = xTerm uint[],
-    /// 2 = yTerm uint[], 3 = out uint[]. Push constants (9 x uint, offset i*4):
+    /// Descriptor set 0: binding 0 = tiled uint[], 1 = xTerm/blockTable uint[],
+    /// 2 = yTerm uint[], 3 = out uint[]. Push constants (10 x uint, offset i*4):
     /// width, height, blockWidth, blockHeight, blockElements, blocksPerRow,
-    /// xMask, yMask, srcSliceElements. Local size 8x8x1; dispatch Z = arrayLayers.
+    /// xMask, yMask, srcSliceElements, equation (0 = ExactXor, 1 = BlockTable).
+    /// Local size 8x8x1; dispatch Z = arrayLayers.
     /// </summary>
     public static byte[] CreateDetileCompute()
     {
@@ -324,11 +328,12 @@ public static class SpirvFixedShaders
         var yTermVar = MakeBuffer(2, "yTerm");
         var outVar = MakeBuffer(3, "outLinear");
 
-        // Push constants: struct { uint p0..p8; }, each member at offset i*4.
+        // Push constants: struct { uint p0..p9; }, each member at offset i*4.
         var pushStruct = module.TypeStruct(
-            uintType, uintType, uintType, uintType, uintType, uintType, uintType, uintType, uintType);
+            uintType, uintType, uintType, uintType, uintType,
+            uintType, uintType, uintType, uintType, uintType);
         module.AddDecoration(pushStruct, SpirvDecoration.Block);
-        for (uint member = 0; member < 9; member++)
+        for (uint member = 0; member < 10; member++)
         {
             module.AddMemberDecoration(pushStruct, member, SpirvDecoration.Offset, member * 4);
         }
@@ -343,8 +348,8 @@ public static class SpirvFixedShaders
         module.AddName(gidVar, "gid");
         module.AddDecoration(gidVar, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.GlobalInvocationId);
 
-        var uintConst = new uint[9];
-        for (uint value = 0; value < 9; value++)
+        var uintConst = new uint[10];
+        for (uint value = 0; value < 10; value++)
         {
             uintConst[value] = module.Constant(uintType, value);
         }
@@ -375,6 +380,7 @@ public static class SpirvFixedShaders
         var xMask = PushField(6);
         var yMask = PushField(7);
         var srcSliceElements = PushField(8);
+        var equation = PushField(9);
 
         var xInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, x, width);
         var yInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, y, height);
@@ -393,14 +399,43 @@ public static class SpirvFixedShaders
         var xDiv = module.AddInstruction(SpirvOp.UDiv, uintType, x, blockWidth);
         var blockIdx = module.AddInstruction(SpirvOp.IAdd, uintType, blockRow, xDiv);
 
-        // off = xTerm[x & xMask] ^ yTerm[y & yMask]  (element offsets)
+        // off (element offset within the block) = equation == BlockTable
+        //   ? blockTable[(y % blockHeight) * blockWidth + (x % blockWidth)]
+        //   : xTerm[x & xMask] ^ yTerm[y & yMask]
+        // Binding 1 (xTermVar) doubles as the block table; the two equations index
+        // different-sized buffers, so exactly one branch executes (no OOB read).
+        var isBlockTable = module.AddInstruction(SpirvOp.INotEqual, boolType, equation, uintConst[0]);
+        var xorLabel = module.AllocateId();
+        var tableLabel = module.AllocateId();
+        var offMergeLabel = module.AllocateId();
+        module.AddStatement(SpirvOp.SelectionMerge, offMergeLabel, 0);
+        module.AddStatement(SpirvOp.BranchConditional, isBlockTable, tableLabel, xorLabel);
+
+        // ExactXor: xTerm[x & xMask] ^ yTerm[y & yMask]
+        module.AddLabel(xorLabel);
         var xIdx = module.AddInstruction(SpirvOp.BitwiseAnd, uintType, x, xMask);
         var xPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, xTermVar, uintConst[0], xIdx);
         var xTerm = module.AddInstruction(SpirvOp.Load, uintType, xPtr);
         var yIdx = module.AddInstruction(SpirvOp.BitwiseAnd, uintType, y, yMask);
         var yPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, yTermVar, uintConst[0], yIdx);
         var yTerm = module.AddInstruction(SpirvOp.Load, uintType, yPtr);
-        var off = module.AddInstruction(SpirvOp.BitwiseXor, uintType, xTerm, yTerm);
+        var offXor = module.AddInstruction(SpirvOp.BitwiseXor, uintType, xTerm, yTerm);
+        module.AddStatement(SpirvOp.Branch, offMergeLabel);
+
+        // BlockTable: blockTable[inY * blockWidth + inX], inX/inY = position in block
+        module.AddLabel(tableLabel);
+        var blockXBase = module.AddInstruction(SpirvOp.IMul, uintType, xDiv, blockWidth);
+        var inX = module.AddInstruction(SpirvOp.ISub, uintType, x, blockXBase);
+        var blockYBase = module.AddInstruction(SpirvOp.IMul, uintType, yDiv, blockHeight);
+        var inY = module.AddInstruction(SpirvOp.ISub, uintType, y, blockYBase);
+        var rowInBlock = module.AddInstruction(SpirvOp.IMul, uintType, inY, blockWidth);
+        var tableIdx = module.AddInstruction(SpirvOp.IAdd, uintType, rowInBlock, inX);
+        var tablePtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, xTermVar, uintConst[0], tableIdx);
+        var offTable = module.AddInstruction(SpirvOp.Load, uintType, tablePtr);
+        module.AddStatement(SpirvOp.Branch, offMergeLabel);
+
+        module.AddLabel(offMergeLabel);
+        var off = module.AddInstruction(SpirvOp.Phi, uintType, offXor, xorLabel, offTable, tableLabel);
 
         // src = z * srcSliceElements + blockIdx * blockElements + off
         var srcSliceBase = module.AddInstruction(SpirvOp.IMul, uintType, z, srcSliceElements);

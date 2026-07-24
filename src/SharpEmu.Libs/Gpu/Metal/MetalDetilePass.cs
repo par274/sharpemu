@@ -40,7 +40,9 @@ internal sealed unsafe class MetalDetilePass : IDisposable
     }
 
     public static bool Supports(in DetileParams parameters) =>
-        parameters.Equation == DetileEquation.ExactXor && parameters.BytesPerElement == 4;
+        (parameters.Equation == DetileEquation.ExactXor ||
+         parameters.Equation == DetileEquation.BlockTable) &&
+        parameters.BytesPerElement == 4;
 
     /// <summary>
     /// Records the deswizzle of <paramref name="tiled"/> into
@@ -73,9 +75,31 @@ internal sealed unsafe class MetalDetilePass : IDisposable
         // element stride is the whole buffer split evenly by layer.
         var srcSliceElements = (uint)(tiled.Length / sizeof(uint) / layers);
 
-        var shift = BitOperations.TrailingZeroCount((uint)parameters.BytesPerElement);
-        var xTerm = ToElementTerms(parameters.XByteTerm, shift);
-        var yTerm = ToElementTerms(parameters.YByteTerm, shift);
+        // Binding 1 carries the within-block offset table. ExactXor: element-shifted
+        // X/Y byte terms. BlockTable: GetDetileParams' block table (already element
+        // offsets) in binding 1, a placeholder in binding 2. The two equations index
+        // different-sized buffers, so the kernel branches and reads only one.
+        uint[] xTerm;
+        uint[] yTerm;
+        uint equationValue;
+        if (parameters.Equation == DetileEquation.BlockTable)
+        {
+            xTerm = new uint[parameters.BlockTable.Length];
+            for (var index = 0; index < xTerm.Length; index++)
+            {
+                xTerm[index] = (uint)parameters.BlockTable[index];
+            }
+
+            yTerm = [0];
+            equationValue = 1;
+        }
+        else
+        {
+            var shift = BitOperations.TrailingZeroCount((uint)parameters.BytesPerElement);
+            xTerm = ToElementTerms(parameters.XByteTerm, shift);
+            yTerm = ToElementTerms(parameters.YByteTerm, shift);
+            equationValue = 0;
+        }
 
         var newBufferWithBytes = MetalNative.Selector("newBufferWithBytes:length:options:");
         var newBufferWithLength = MetalNative.Selector("newBufferWithLength:options:");
@@ -115,6 +139,7 @@ internal sealed unsafe class MetalDetilePass : IDisposable
             (uint)parameters.XMask,
             (uint)parameters.YMask,
             srcSliceElements,
+            equationValue,
         ];
         nint paramsBuffer;
         fixed (uint* pushPointer = push)

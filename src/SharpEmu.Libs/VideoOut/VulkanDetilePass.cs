@@ -29,7 +29,7 @@ namespace SharpEmu.Libs.VideoOut;
 internal sealed unsafe class VulkanDetilePass : IDisposable
 {
     private const uint LocalSize = 8;
-    private const uint PushConstantBytes = 9 * sizeof(uint);
+    private const uint PushConstantBytes = 10 * sizeof(uint);
 
     private readonly Vk _vk;
     private readonly Device _device;
@@ -59,9 +59,11 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         _queueFamilyIndex = queueFamilyIndex;
     }
 
-    /// <summary>The kernel handles only the exact-XOR modes at 4 bytes/element.</summary>
+    /// <summary>The kernel handles the exact-XOR and block-table modes at 4 bytes/element.</summary>
     public static bool Supports(in DetileParams parameters) =>
-        parameters.Equation == DetileEquation.ExactXor && parameters.BytesPerElement == 4;
+        (parameters.Equation == DetileEquation.ExactXor ||
+         parameters.Equation == DetileEquation.BlockTable) &&
+        parameters.BytesPerElement == 4;
 
     /// <summary>Transient per-detile resources the caller must retire once the
     /// command buffer they were recorded into has completed.</summary>
@@ -83,6 +85,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         public DescriptorSet Set;
         public ulong OutputBytes;
         public uint SrcSliceElements;
+        public uint EquationValue;
     }
 
     /// <summary>
@@ -203,12 +206,32 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
     private void PrepareResources(ReadOnlySpan<byte> tiled, in DetileParams parameters, uint layers, ref DetileResources resources)
     {
-        // GetDetileParams' term tables are byte offsets; the kernel indexes a
-        // uint[], so it wants element offsets. For a power-of-two element size the
-        // low log2(bpp) bits of every term are 0, so the shift is exact.
-        var shift = BitOperations.TrailingZeroCount((uint)parameters.BytesPerElement);
-        var xTerm = ToElementTerms(parameters.XByteTerm, shift);
-        var yTerm = ToElementTerms(parameters.YByteTerm, shift);
+        // Binding 1 carries the within-block offset table, binding 2 the Y terms.
+        // ExactXor: xTerm/yTerm are byte offsets; the kernel indexes a uint[], so it
+        // wants element offsets — for a power-of-two element size the low
+        // log2(bpp) bits of every term are 0, so the right shift is exact.
+        // BlockTable: GetDetileParams' block table is already element offsets; it
+        // goes in binding 1 and binding 2 is an unused placeholder.
+        uint[] xTerm;
+        uint[] yTerm;
+        if (parameters.Equation == DetileEquation.BlockTable)
+        {
+            xTerm = new uint[parameters.BlockTable.Length];
+            for (var index = 0; index < xTerm.Length; index++)
+            {
+                xTerm[index] = (uint)parameters.BlockTable[index];
+            }
+
+            yTerm = [0];
+            resources.EquationValue = 1;
+        }
+        else
+        {
+            var shift = BitOperations.TrailingZeroCount((uint)parameters.BytesPerElement);
+            xTerm = ToElementTerms(parameters.XByteTerm, shift);
+            yTerm = ToElementTerms(parameters.YByteTerm, shift);
+            resources.EquationValue = 0;
+        }
 
         // The array slices are packed contiguously in the tiled buffer, so each
         // slice's element stride is the whole tiled buffer split evenly by layer.
@@ -263,6 +286,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             (uint)parameters.XMask,
             (uint)parameters.YMask,
             resources.SrcSliceElements,
+            resources.EquationValue,
         ];
         fixed (uint* pushPointer = push)
         {

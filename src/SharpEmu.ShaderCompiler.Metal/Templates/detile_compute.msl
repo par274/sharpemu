@@ -2,20 +2,23 @@
 
 using namespace metal;
 
-// GPU deswizzle for RDNA2 exact-XOR tiled surfaces (swizzle modes 5/9/24/27) at
-// 4 bytes/element — the MSL twin of SpirvFixedShaders.CreateDetileCompute and a
-// direct mirror of GnmTiling.GetDetileParams' ExactXor addressing. Handles both
+// GPU deswizzle for RDNA2 tiled surfaces at 4 bytes/element — the MSL twin of
+// SpirvFixedShaders.CreateDetileCompute and a direct mirror of
+// GnmTiling.GetDetileParams. Handles both supported equation families and both
 // plain 2D textures and array textures (one grid-Z layer per slice; the caller
 // packs the tiled slices contiguously with stride srcSliceElements):
 //   z = layer;
+//   inBlock = equation == 1  // BlockTable, modes 1/4/8
+//             ? blockTable[(y % blockHeight) * blockWidth + (x % blockWidth)]
+//             : xTerm[x & xMask] ^ yTerm[y & yMask];   // ExactXor 5/9/24/27
 //   src = z * srcSliceElements
 //         + (y / blockHeight * blocksPerRow + x / blockWidth) * blockElements
-//         + (xTerm[x & xMask] ^ yTerm[y & yMask]);
+//         + inBlock;
 //   out[z * width * height + y * width + x] = tiled[src];
-// The x/y term tables are ELEMENT offsets (the host pre-shifts the byte-unit
-// GetDetileParams terms right by log2(bytesPerElement); for 4bpp that shift is
-// exact). One thread per texel; the caller copies the layer-major linear output
-// buffer into the sampled texture.
+// Term tables hold ELEMENT offsets. buffer(1) carries xTerm (ExactXor) OR the
+// block table (BlockTable); the two equations index different-sized buffers, so
+// exactly one branch runs. One thread per texel; the caller copies the
+// layer-major linear output buffer into the sampled texture.
 struct DetileParams
 {
     uint width;
@@ -27,15 +30,16 @@ struct DetileParams
     uint xMask;
     uint yMask;
     uint srcSliceElements;
+    uint equation;
 };
 
 kernel void detile_cs(
-    device const uint* tiled      [[buffer(0)]],
-    device const uint* xTerm      [[buffer(1)]],
-    device const uint* yTerm      [[buffer(2)]],
-    device uint* outLinear        [[buffer(3)]],
-    constant DetileParams& params [[buffer(4)]],
-    uint3 gid                     [[thread_position_in_grid]])
+    device const uint* tiled        [[buffer(0)]],
+    device const uint* xTermOrTable [[buffer(1)]],
+    device const uint* yTerm        [[buffer(2)]],
+    device uint* outLinear          [[buffer(3)]],
+    constant DetileParams& params   [[buffer(4)]],
+    uint3 gid                       [[thread_position_in_grid]])
 {
     if (gid.x >= params.width || gid.y >= params.height)
     {
@@ -43,7 +47,18 @@ kernel void detile_cs(
     }
 
     uint blockIndex = (gid.y / params.blockHeight) * params.blocksPerRow + (gid.x / params.blockWidth);
-    uint off = xTerm[gid.x & params.xMask] ^ yTerm[gid.y & params.yMask];
+    uint off;
+    if (params.equation != 0u)
+    {
+        uint inX = gid.x - (gid.x / params.blockWidth) * params.blockWidth;
+        uint inY = gid.y - (gid.y / params.blockHeight) * params.blockHeight;
+        off = xTermOrTable[inY * params.blockWidth + inX];
+    }
+    else
+    {
+        off = xTermOrTable[gid.x & params.xMask] ^ yTerm[gid.y & params.yMask];
+    }
+
     uint src = gid.z * params.srcSliceElements + blockIndex * params.blockElements + off;
     outLinear[gid.z * params.width * params.height + gid.y * params.width + gid.x] = tiled[src];
 }
