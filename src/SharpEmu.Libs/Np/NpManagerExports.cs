@@ -86,6 +86,31 @@ public static class NpManagerExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    /// <summary>
+    /// Registers a Premium entitlement callback for an offline profile. No
+    /// entitlement transitions occur without PSN connectivity, so the callback
+    /// is accepted but never invoked.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "+yqjab2fUJA",
+        ExportName = "sceNpRegisterPremiumEventCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpRegisterPremiumEventCallback(CpuContext ctx)
+    {
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "-Rjp3-YViXc",
+        ExportName = "sceNpUnregisterPremiumEventCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpUnregisterPremiumEventCallback(CpuContext ctx)
+    {
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
     [SysAbiExport(
         Nid = "qQJfO8HAiaY",
         ExportName = "sceNpRegisterStateCallbackA",
