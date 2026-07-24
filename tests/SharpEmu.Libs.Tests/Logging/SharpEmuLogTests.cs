@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Globalization;
 using SharpEmu.Logging;
 using Xunit;
 
@@ -8,6 +9,39 @@ namespace SharpEmu.Libs.Tests.Logging;
 
 public sealed class SharpEmuLogTests
 {
+    [Fact]
+    public void FileLogSinkFormatsTimestampsWithInvariantCulture()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"sharpemu-{Guid.NewGuid():N}.log");
+        var originalCulture = CultureInfo.CurrentCulture;
+
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("ar-SA");
+            using (var sink = new FileLogSink(path, append: false))
+            {
+                var entry = new LogEntry(
+                    new DateTimeOffset(2026, 7, 25, 14, 5, 6, 789, TimeSpan.Zero),
+                    LogLevel.Info,
+                    "Test",
+                    "message",
+                    "Test.cs",
+                    1,
+                    nameof(FileLogSinkFormatsTimestampsWithInvariantCulture));
+
+                sink.Write(in entry);
+            }
+
+            var line = File.ReadAllText(path);
+            Assert.StartsWith("[2026-07-25 14:05:06.789]", line, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData("Trace", LogLevel.Trace)]
     [InlineData("debug", LogLevel.Debug)]

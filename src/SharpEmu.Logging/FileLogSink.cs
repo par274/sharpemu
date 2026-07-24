@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Globalization;
 using System.IO;
 using System.Text;
 
@@ -60,7 +61,7 @@ public sealed class FileLogSink : ISharpEmuLogSink, IDisposable
             if (IncludeTimestamp)
             {
                 _writer.Write('[');
-                _writer.Write(entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff"));
+                _writer.Write(entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture));
                 _writer.Write(']');
             }
 
