@@ -8676,6 +8676,64 @@ public static partial class AgcExports
             var arrayLayers = arrayUploadLayers;
             var layerBytes = checked((int)sourceByteCount);
             var totalBytes = (long)layerBytes * arrayLayers;
+
+            // GPU detile for arrayed exact-XOR/4bpp textures: pack the tiled array
+            // slices contiguously and hand them to the GPU pass (one dispatch-Z
+            // layer per slice), mirroring the single-layer gate above. The backend
+            // deswizzles every layer on the GPU; only unsupported cases fall to the
+            // CPU per-layer detile below. Font/text atlases uploaded as 2D arrays
+            // take this path.
+            if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail && bytesPerElement == 4 &&
+                (long)physicalSourceByteCount * arrayLayers <= int.MaxValue)
+            {
+                var gpuArrayParams = GnmTiling.GetDetileParams(
+                    descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh);
+                if (gpuArrayParams.Equation == DetileEquation.ExactXor &&
+                    (long)elementsWide * elementsHigh * bytesPerElement <= (long)physicalSourceByteCount)
+                {
+                    var sliceBytes = checked((int)physicalSourceByteCount);
+                    var tiledLayers = new byte[(long)sliceBytes * arrayLayers];
+                    var readAllLayers = true;
+                    for (var layer = 0u; layer < arrayLayers; layer++)
+                    {
+                        if (!ctx.Memory.TryRead(
+                                descriptor.Address + layer * chainSliceBytes + baseMipByteOffset,
+                                tiledLayers.AsSpan(checked((int)(layer * (uint)sliceBytes)), sliceBytes)))
+                        {
+                            readAllLayers = false;
+                            break;
+                        }
+                    }
+
+                    if (readAllLayers)
+                    {
+                        texture = new GuestDrawTexture(
+                            descriptor.Address,
+                            descriptor.Width,
+                            descriptor.Height,
+                            descriptor.Format,
+                            descriptor.NumberType,
+                            [],
+                            IsFallback: false,
+                            IsStorage: false,
+                            MipLevels: descriptor.MipLevels,
+                            MipLevel: mipLevel,
+                            BaseMipLevel: descriptor.ViewBaseLevel,
+                            ResourceMipLevels: descriptor.ResourceMipLevels,
+                            Pitch: sourceWidth,
+                            TileMode: descriptor.TileMode,
+                            DstSelect: descriptor.DstSelect,
+                            Sampler: sampler,
+                            WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
+                            ArrayedView: true,
+                            ArrayLayers: arrayLayers,
+                            TiledSource: tiledLayers,
+                            Detile: gpuArrayParams);
+                        return true;
+                    }
+                }
+            }
+
             if (totalBytes <= int.MaxValue)
             {
                 var layered = new byte[totalBytes];
@@ -8787,7 +8845,15 @@ public static partial class AgcExports
         // GPU detile: for the exact-XOR 4-bytes/element base-mip case the backend
         // can deswizzle on the GPU, so ship the raw tiled bytes + params rather
         // than paying the CPU detile. Everything else keeps the CPU path below.
-        if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail && bytesPerElement == 4)
+        //
+        // Arrayed textures are excluded: the GPU detile pass only deswizzles a
+        // single 2D layer, and the presenters gate their GPU path on
+        // layers == 1 && !ArrayedView. Packaging an arrayed surface here (empty
+        // RGBA + TiledSource) would be rejected by that gate and render blank
+        // (e.g. font/text atlases uploaded as 2D arrays). Keep them on the CPU
+        // detile path below, which handles the full layer layout.
+        if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail && bytesPerElement == 4 &&
+            !isArrayed)
         {
             var gpuDetileParams = GnmTiling.GetDetileParams(
                 descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh);

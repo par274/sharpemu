@@ -29,7 +29,7 @@ namespace SharpEmu.Libs.VideoOut;
 internal sealed unsafe class VulkanDetilePass : IDisposable
 {
     private const uint LocalSize = 8;
-    private const uint PushConstantBytes = 8 * sizeof(uint);
+    private const uint PushConstantBytes = 9 * sizeof(uint);
 
     private readonly Vk _vk;
     private readonly Device _device;
@@ -82,15 +82,19 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         public DescriptorPool Pool;
         public DescriptorSet Set;
         public ulong OutputBytes;
+        public uint SrcSliceElements;
     }
 
     /// <summary>
     /// Records the deswizzle of <paramref name="tiled"/> into <paramref name="image"/>
-    /// (RGBA8, <paramref name="width"/> x <paramref name="height"/>, currently in
+    /// (RGBA8, <paramref name="width"/> x <paramref name="height"/> x
+    /// <paramref name="layers"/> array slices, currently in
     /// <paramref name="currentLayout"/>) onto <paramref name="commandBuffer"/>,
-    /// leaving the image <see cref="ImageLayout.ShaderReadOnlyOptimal"/>. Does not
-    /// submit; the caller retires <paramref name="transients"/> with the command
-    /// buffer's fence. Returns false (with empty transients) when unsupported.
+    /// leaving the image <see cref="ImageLayout.ShaderReadOnlyOptimal"/>. The tiled
+    /// buffer holds the array slices packed contiguously (each an independently
+    /// tiled 2D surface). Does not submit; the caller retires
+    /// <paramref name="transients"/> with the command buffer's fence. Returns false
+    /// (with empty transients) when unsupported.
     /// </summary>
     public bool RecordDetile(
         CommandBuffer commandBuffer,
@@ -98,12 +102,14 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         ImageLayout currentLayout,
         uint width,
         uint height,
+        uint layers,
         ReadOnlySpan<byte> tiled,
         in DetileParams parameters,
         out Transients transients)
     {
         transients = new Transients([], default);
-        if (_disposed || !Supports(parameters) || width == 0 || height == 0 || tiled.IsEmpty)
+        if (_disposed || !Supports(parameters) || width == 0 || height == 0 || layers == 0 ||
+            tiled.IsEmpty || tiled.Length % (int)(layers * sizeof(uint)) != 0)
         {
             return false;
         }
@@ -113,8 +119,8 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         var resources = default(DetileResources);
         try
         {
-            PrepareResources(tiled, parameters, ref resources);
-            RecordCommands(commandBuffer, in resources, image, currentLayout, width, height, in parameters);
+            PrepareResources(tiled, parameters, layers, ref resources);
+            RecordCommands(commandBuffer, in resources, image, currentLayout, width, height, layers, in parameters);
         }
         catch
         {
@@ -144,10 +150,12 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         ImageLayout currentLayout,
         uint width,
         uint height,
+        uint layers,
         ReadOnlySpan<byte> tiled,
         in DetileParams parameters)
     {
-        if (_disposed || !Supports(parameters) || width == 0 || height == 0 || tiled.IsEmpty)
+        if (_disposed || !Supports(parameters) || width == 0 || height == 0 || layers == 0 ||
+            tiled.IsEmpty || tiled.Length % (int)(layers * sizeof(uint)) != 0)
         {
             return false;
         }
@@ -159,11 +167,11 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         Fence fence = default;
         try
         {
-            PrepareResources(tiled, parameters, ref resources);
+            PrepareResources(tiled, parameters, layers, ref resources);
 
             commandBuffer = AllocateCommandBuffer();
             BeginCommandBuffer(commandBuffer);
-            RecordCommands(commandBuffer, in resources, image, currentLayout, width, height, in parameters);
+            RecordCommands(commandBuffer, in resources, image, currentLayout, width, height, layers, in parameters);
             Check(_vk.EndCommandBuffer(commandBuffer), "vkEndCommandBuffer(detile)");
 
             fence = CreateFence();
@@ -193,7 +201,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         }
     }
 
-    private void PrepareResources(ReadOnlySpan<byte> tiled, in DetileParams parameters, ref DetileResources resources)
+    private void PrepareResources(ReadOnlySpan<byte> tiled, in DetileParams parameters, uint layers, ref DetileResources resources)
     {
         // GetDetileParams' term tables are byte offsets; the kernel indexes a
         // uint[], so it wants element offsets. For a power-of-two element size the
@@ -202,7 +210,11 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         var xTerm = ToElementTerms(parameters.XByteTerm, shift);
         var yTerm = ToElementTerms(parameters.YByteTerm, shift);
 
-        resources.OutputBytes = (ulong)parameters.ElementsWide * (ulong)parameters.ElementsHigh * sizeof(uint);
+        // The array slices are packed contiguously in the tiled buffer, so each
+        // slice's element stride is the whole tiled buffer split evenly by layer.
+        resources.SrcSliceElements = (uint)(tiled.Length / sizeof(uint) / layers);
+        resources.OutputBytes =
+            (ulong)parameters.ElementsWide * (ulong)parameters.ElementsHigh * sizeof(uint) * layers;
 
         resources.Tiled = CreateHostBuffer((ulong)tiled.Length, BufferUsageFlags.StorageBufferBit, out resources.TiledMemory);
         UploadBytes(resources.TiledMemory, tiled);
@@ -232,6 +244,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         ImageLayout currentLayout,
         uint width,
         uint height,
+        uint layers,
         in DetileParams parameters)
     {
         var descriptorSet = resources.Set;
@@ -249,6 +262,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             (uint)parameters.BlocksPerRow,
             (uint)parameters.XMask,
             (uint)parameters.YMask,
+            resources.SrcSliceElements,
         ];
         fixed (uint* pushPointer = push)
         {
@@ -256,11 +270,12 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
                 commandBuffer, _pipelineLayout, ShaderStageFlags.ComputeBit, 0, PushConstantBytes, pushPointer);
         }
 
+        // One dispatch-Z layer per array slice.
         _vk.CmdDispatch(
             commandBuffer,
             (width + LocalSize - 1) / LocalSize,
             (height + LocalSize - 1) / LocalSize,
-            1);
+            layers);
 
         // Compute store -> transfer read on the linear output buffer.
         var outputBarrier = new BufferMemoryBarrier
@@ -295,14 +310,17 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             initialized ? AccessFlags.ShaderReadBit : 0,
             AccessFlags.TransferWriteBit,
             initialized ? PipelineStageFlags.FragmentShaderBit : PipelineStageFlags.TopOfPipeBit,
-            PipelineStageFlags.TransferBit);
+            PipelineStageFlags.TransferBit,
+            layers);
 
+        // The output buffer is layer-major (slice stride = width*height texels), so
+        // a single copy with tightly-packed rows fills every array layer.
         var copyRegion = new BufferImageCopy
         {
             BufferOffset = 0,
             BufferRowLength = 0,
             BufferImageHeight = 0,
-            ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+            ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, layers),
             ImageOffset = default,
             ImageExtent = new Extent3D(width, height, 1),
         };
@@ -317,7 +335,8 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             AccessFlags.TransferWriteBit,
             AccessFlags.ShaderReadBit,
             PipelineStageFlags.TransferBit,
-            PipelineStageFlags.FragmentShaderBit);
+            PipelineStageFlags.FragmentShaderBit,
+            layers);
     }
 
     private void DestroyResources(in DetileResources resources)
@@ -599,7 +618,8 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         AccessFlags srcAccess,
         AccessFlags dstAccess,
         PipelineStageFlags srcStage,
-        PipelineStageFlags dstStage)
+        PipelineStageFlags dstStage,
+        uint layers)
     {
         var barrier = new ImageMemoryBarrier
         {
@@ -611,7 +631,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
             DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
             Image = image,
-            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, layers),
         };
         _vk.CmdPipelineBarrier(commandBuffer, srcStage, dstStage, 0, 0, null, 0, null, 1, &barrier);
     }

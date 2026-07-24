@@ -59,36 +59,14 @@ internal static unsafe class VulkanDetileSelfTest
             return;
         }
 
-        // Whole-block tiled source with a deterministic pattern; the same layout
-        // the unit test uses. TryDetile gives the reference linear result.
-        var blocksHigh = ((int)Height + parameters.BlockHeight - 1) / parameters.BlockHeight;
-        var tiled = new byte[(long)parameters.BlocksPerRow * blocksHigh * parameters.BlockBytes];
-        for (var index = 0; index < tiled.Length; index++)
-        {
-            tiled[index] = (byte)((index * 31 + 7) & 0xFF);
-        }
-
-        var expected = new byte[Width * Height * BytesPerElement];
-        if (!GnmTiling.TryDetile(tiled, expected, SwizzleMode, (int)Width, (int)Height, BytesPerElement))
-        {
-            Console.Error.WriteLine("[DETILE-SELFTEST] FAIL: CPU TryDetile declined.");
-            return;
-        }
-
         using var pass = new VulkanDetilePass(vk, device, queue, physicalDevice, queueFamilyIndex);
         var commandPool = CreateCommandPool(vk, device, queueFamilyIndex);
         try
         {
-            // Phase 1: the one-shot DetileIntoImage (submit + wait in place).
-            VerifyPhase(
-                vk, device, physicalDevice, queue, commandPool, expected, "DetileIntoImage",
-                image => pass.DetileIntoImage(image, ImageLayout.Undefined, Width, Height, tiled, parameters));
-
-            // Phase 2: RecordDetile — the exact code path the render loop uses
-            // (record into a command buffer, submit, retire the transients).
-            VerifyPhase(
-                vk, device, physicalDevice, queue, commandPool, expected, "RecordDetile",
-                image => RecordDetileAndSubmit(vk, device, queue, commandPool, pass, image, tiled, parameters));
+            // A plain 2D texture (1 layer) and an array texture (2 layers) — the
+            // arrayed case exercises the kernel's dispatch-Z slice addressing.
+            RunCase(vk, device, physicalDevice, queue, commandPool, pass, parameters, layers: 1);
+            RunCase(vk, device, physicalDevice, queue, commandPool, pass, parameters, layers: 2);
         }
         finally
         {
@@ -99,6 +77,54 @@ internal static unsafe class VulkanDetileSelfTest
         }
     }
 
+    private static void RunCase(
+        Vk vk,
+        Device device,
+        PhysicalDevice physicalDevice,
+        Queue queue,
+        CommandPool commandPool,
+        VulkanDetilePass pass,
+        DetileParams parameters,
+        uint layers)
+    {
+        // Whole-block tiled source with a per-layer-distinct deterministic pattern
+        // (so a slice mix-up is caught), the array slices packed contiguously.
+        var blocksHigh = ((int)Height + parameters.BlockHeight - 1) / parameters.BlockHeight;
+        var sliceTiledBytes = (int)((long)parameters.BlocksPerRow * blocksHigh * parameters.BlockBytes);
+        var sliceLinearBytes = (int)(Width * Height * BytesPerElement);
+        var tiled = new byte[sliceTiledBytes * layers];
+        var expected = new byte[sliceLinearBytes * layers];
+        for (var layer = 0; layer < layers; layer++)
+        {
+            for (var index = 0; index < sliceTiledBytes; index++)
+            {
+                tiled[layer * sliceTiledBytes + index] = (byte)((index * 31 + 7 + layer * 101) & 0xFF);
+            }
+
+            if (!GnmTiling.TryDetile(
+                    tiled.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                    expected.AsSpan(layer * sliceLinearBytes, sliceLinearBytes),
+                    SwizzleMode, (int)Width, (int)Height, BytesPerElement))
+            {
+                Console.Error.WriteLine("[DETILE-SELFTEST] FAIL: CPU TryDetile declined.");
+                return;
+            }
+        }
+
+        var tiledBytes = tiled;
+
+        // Phase 1: the one-shot DetileIntoImage (submit + wait in place).
+        VerifyPhase(
+            vk, device, physicalDevice, queue, commandPool, expected, layers, $"DetileIntoImage x{layers}",
+            image => pass.DetileIntoImage(image, ImageLayout.Undefined, Width, Height, layers, tiledBytes, parameters));
+
+        // Phase 2: RecordDetile — the exact code path the render loop uses
+        // (record into a command buffer, submit, retire the transients).
+        VerifyPhase(
+            vk, device, physicalDevice, queue, commandPool, expected, layers, $"RecordDetile x{layers}",
+            image => RecordDetileAndSubmit(vk, device, queue, commandPool, pass, image, layers, tiledBytes, parameters));
+    }
+
     private static void VerifyPhase(
         Vk vk,
         Device device,
@@ -106,10 +132,11 @@ internal static unsafe class VulkanDetileSelfTest
         Queue queue,
         CommandPool commandPool,
         byte[] expected,
+        uint layers,
         string label,
         Func<Image, bool> detile)
     {
-        var image = CreateImage(vk, device, physicalDevice, out var imageMemory);
+        var image = CreateImage(vk, device, physicalDevice, layers, out var imageMemory);
         var readback = CreateHostBuffer(
             vk, device, physicalDevice, (ulong)expected.Length, BufferUsageFlags.TransferDstBit, out var readbackMemory);
         try
@@ -120,7 +147,7 @@ internal static unsafe class VulkanDetileSelfTest
                 return;
             }
 
-            CopyImageToBuffer(vk, device, queue, commandPool, image, readback);
+            CopyImageToBuffer(vk, device, queue, commandPool, image, readback, layers);
 
             void* mapped;
             Check(
@@ -140,7 +167,7 @@ internal static unsafe class VulkanDetileSelfTest
             vk.UnmapMemory(device, readbackMemory);
 
             Console.Error.WriteLine(firstMismatch < 0
-                ? $"[DETILE-SELFTEST] {label} PASS: {Width}x{Height} mode {SwizzleMode} matches CPU detile ({expected.Length} bytes)."
+                ? $"[DETILE-SELFTEST] {label} PASS: {Width}x{Height}x{layers} mode {SwizzleMode} matches CPU detile ({expected.Length} bytes)."
                 : $"[DETILE-SELFTEST] {label} FAIL: first mismatch at byte {firstMismatch} (texel {firstMismatch / BytesPerElement}).");
         }
         finally
@@ -177,6 +204,7 @@ internal static unsafe class VulkanDetileSelfTest
         CommandPool commandPool,
         VulkanDetilePass pass,
         Image image,
+        uint layers,
         ReadOnlySpan<byte> tiled,
         in DetileParams parameters)
     {
@@ -189,7 +217,7 @@ internal static unsafe class VulkanDetileSelfTest
         Check(vk.BeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer(selftest record)");
 
         if (!pass.RecordDetile(
-                commandBuffer, image, ImageLayout.Undefined, Width, Height, tiled, parameters, out var transients))
+                commandBuffer, image, ImageLayout.Undefined, Width, Height, layers, tiled, parameters, out var transients))
         {
             _ = vk.EndCommandBuffer(commandBuffer);
             vk.FreeCommandBuffers(device, commandPool, 1, &commandBuffer);
@@ -241,6 +269,7 @@ internal static unsafe class VulkanDetileSelfTest
         Vk vk,
         Device device,
         PhysicalDevice physicalDevice,
+        uint layers,
         out DeviceMemory memory)
     {
         var imageInfo = new ImageCreateInfo
@@ -250,7 +279,7 @@ internal static unsafe class VulkanDetileSelfTest
             Format = Format.R8G8B8A8Unorm,
             Extent = new Extent3D(Width, Height, 1),
             MipLevels = 1,
-            ArrayLayers = 1,
+            ArrayLayers = layers,
             Samples = SampleCountFlags.Count1Bit,
             Tiling = ImageTiling.Optimal,
             Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.TransferSrcBit,
@@ -281,7 +310,8 @@ internal static unsafe class VulkanDetileSelfTest
         Queue queue,
         CommandPool commandPool,
         Image image,
-        VkBuffer destination)
+        VkBuffer destination,
+        uint layers)
     {
         var commandBuffer = AllocateCommandBuffer(vk, device, commandPool);
         var beginInfo = new CommandBufferBeginInfo
@@ -302,7 +332,7 @@ internal static unsafe class VulkanDetileSelfTest
             SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
             DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
             Image = image,
-            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1),
+            SubresourceRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, layers),
         };
         vk.CmdPipelineBarrier(
             commandBuffer,
@@ -316,12 +346,14 @@ internal static unsafe class VulkanDetileSelfTest
             1,
             &toTransferSrc);
 
+        // Layer-major readback: one copy pulls every array slice back into the
+        // buffer contiguously, matching the packed `expected` layout.
         var region = new BufferImageCopy
         {
             BufferOffset = 0,
             BufferRowLength = 0,
             BufferImageHeight = 0,
-            ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+            ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, layers),
             ImageOffset = default,
             ImageExtent = new Extent3D(Width, Height, 1),
         };

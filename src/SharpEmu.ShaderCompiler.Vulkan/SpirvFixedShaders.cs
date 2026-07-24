@@ -262,15 +262,24 @@ public static class SpirvFixedShaders
     }
 
     /// <summary>
-    /// Compute kernel that deswizzles one RDNA2 exact-XOR tiled surface (swizzle
+    /// Compute kernel that deswizzles RDNA2 exact-XOR tiled surfaces (swizzle
     /// modes 5/9/24/27) at 4 bytes/element into a linear output buffer — one GPU
-    /// thread per texel. Mirrors <c>GnmTiling.GetDetileParams</c>' ExactXor
-    /// addressing so it is bit-identical to the CPU fallback:
+    /// thread per texel, one dispatch-Z layer per array slice. Mirrors
+    /// <c>GnmTiling.GetDetileParams</c>' ExactXor addressing so it is bit-identical
+    /// to the CPU fallback:
     /// <code>
-    ///   src = (y / blockHeight * blocksPerRow + x / blockWidth) * blockElements
+    ///   z = layer;
+    ///   src = z * srcSliceElements
+    ///         + (y / blockHeight * blocksPerRow + x / blockWidth) * blockElements
     ///         + (xTerm[x &amp; xMask] ^ yTerm[y &amp; yMask]);
-    ///   out[y * width + x] = tiled[src];
+    ///   out[z * width * height + y * width + x] = tiled[src];
     /// </code>
+    /// Each array slice is an independently tiled 2D surface; the caller packs the
+    /// slices contiguously in the tiled buffer (stride <c>srcSliceElements</c>) and
+    /// the output ends up layer-major, matching a single multi-layer
+    /// buffer-&gt;image copy. For a non-arrayed texture the caller dispatches a
+    /// single Z layer with <c>srcSliceElements</c> unused (z == 0).
+    ///
     /// The X/Y term tables are ELEMENT offsets (the caller pre-shifts the
     /// byte-unit GetDetileParams terms right by log2(bytesPerElement); for 4bpp
     /// that shift is exact because the equation's low two byte-offset bits are 0).
@@ -278,9 +287,9 @@ public static class SpirvFixedShaders
     /// reusing the existing buffer-&gt;image upload.
     ///
     /// Descriptor set 0: binding 0 = tiled uint[], 1 = xTerm uint[],
-    /// 2 = yTerm uint[], 3 = out uint[]. Push constants (8 x uint, offset i*4):
+    /// 2 = yTerm uint[], 3 = out uint[]. Push constants (9 x uint, offset i*4):
     /// width, height, blockWidth, blockHeight, blockElements, blocksPerRow,
-    /// xMask, yMask. Local size 8x8x1.
+    /// xMask, yMask, srcSliceElements. Local size 8x8x1; dispatch Z = arrayLayers.
     /// </summary>
     public static byte[] CreateDetileCompute()
     {
@@ -315,11 +324,11 @@ public static class SpirvFixedShaders
         var yTermVar = MakeBuffer(2, "yTerm");
         var outVar = MakeBuffer(3, "outLinear");
 
-        // Push constants: struct { uint p0..p7; }, each member at offset i*4.
+        // Push constants: struct { uint p0..p8; }, each member at offset i*4.
         var pushStruct = module.TypeStruct(
-            uintType, uintType, uintType, uintType, uintType, uintType, uintType, uintType);
+            uintType, uintType, uintType, uintType, uintType, uintType, uintType, uintType, uintType);
         module.AddDecoration(pushStruct, SpirvDecoration.Block);
-        for (uint member = 0; member < 8; member++)
+        for (uint member = 0; member < 9; member++)
         {
             module.AddMemberDecoration(pushStruct, member, SpirvDecoration.Offset, member * 4);
         }
@@ -334,8 +343,8 @@ public static class SpirvFixedShaders
         module.AddName(gidVar, "gid");
         module.AddDecoration(gidVar, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.GlobalInvocationId);
 
-        var uintConst = new uint[8];
-        for (uint value = 0; value < 8; value++)
+        var uintConst = new uint[9];
+        for (uint value = 0; value < 9; value++)
         {
             uintConst[value] = module.Constant(uintType, value);
         }
@@ -348,6 +357,7 @@ public static class SpirvFixedShaders
         var gid = module.AddInstruction(SpirvOp.Load, uvec3Type, gidVar);
         var x = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 0);
         var y = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 1);
+        var z = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 2);
 
         uint PushField(uint index)
         {
@@ -364,6 +374,7 @@ public static class SpirvFixedShaders
         var blocksPerRow = PushField(5);
         var xMask = PushField(6);
         var yMask = PushField(7);
+        var srcSliceElements = PushField(8);
 
         var xInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, x, width);
         var yInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, y, height);
@@ -391,15 +402,20 @@ public static class SpirvFixedShaders
         var yTerm = module.AddInstruction(SpirvOp.Load, uintType, yPtr);
         var off = module.AddInstruction(SpirvOp.BitwiseXor, uintType, xTerm, yTerm);
 
-        // src = blockIdx * blockElements + off
+        // src = z * srcSliceElements + blockIdx * blockElements + off
+        var srcSliceBase = module.AddInstruction(SpirvOp.IMul, uintType, z, srcSliceElements);
         var blockBase = module.AddInstruction(SpirvOp.IMul, uintType, blockIdx, blockElements);
-        var src = module.AddInstruction(SpirvOp.IAdd, uintType, blockBase, off);
+        var srcInSlice = module.AddInstruction(SpirvOp.IAdd, uintType, blockBase, off);
+        var src = module.AddInstruction(SpirvOp.IAdd, uintType, srcSliceBase, srcInSlice);
         var srcPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, tiledVar, uintConst[0], src);
         var texel = module.AddInstruction(SpirvOp.Load, uintType, srcPtr);
 
-        // out[y * width + x] = texel
+        // out[z * width * height + y * width + x] = texel
+        var sliceElements = module.AddInstruction(SpirvOp.IMul, uintType, width, height);
+        var dstSliceBase = module.AddInstruction(SpirvOp.IMul, uintType, z, sliceElements);
         var rowBase = module.AddInstruction(SpirvOp.IMul, uintType, y, width);
-        var dstIdx = module.AddInstruction(SpirvOp.IAdd, uintType, rowBase, x);
+        var dstInSlice = module.AddInstruction(SpirvOp.IAdd, uintType, rowBase, x);
+        var dstIdx = module.AddInstruction(SpirvOp.IAdd, uintType, dstSliceBase, dstInSlice);
         var dstPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, outVar, uintConst[0], dstIdx);
         module.AddStatement(SpirvOp.Store, dstPtr, texel);
 

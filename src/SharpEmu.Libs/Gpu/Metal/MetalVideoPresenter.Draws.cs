@@ -1595,9 +1595,29 @@ internal static partial class MetalVideoPresenter
             texture.TiledSource is { } tiledSource &&
             texture.Detile is { } detileParameters)
         {
-            var linear = new byte[
-                detileParameters.ElementsWide * detileParameters.ElementsHigh * detileParameters.BytesPerElement];
-            if (GnmTiling.DetileWithParams(detileParameters, tiledSource, linear))
+            // The tiled source packs the array slices contiguously (one per layer);
+            // detile each into its layer-major linear region so the reconstructed
+            // pixels match what the CPU array-upload path produced pre-GPU-detile.
+            // A plain 2D texture is just one layer.
+            var layers = Math.Max((int)texture.ArrayLayers, 1);
+            var sliceLinearBytes =
+                detileParameters.ElementsWide * detileParameters.ElementsHigh * detileParameters.BytesPerElement;
+            var sliceTiledBytes = tiledSource.Length / layers;
+            var linear = new byte[sliceLinearBytes * layers];
+            var detiledAll = true;
+            for (var layer = 0; layer < layers; layer++)
+            {
+                if (!GnmTiling.DetileWithParams(
+                        detileParameters,
+                        tiledSource.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                        linear.AsSpan(layer * sliceLinearBytes, sliceLinearBytes)))
+                {
+                    detiledAll = false;
+                    break;
+                }
+            }
+
+            if (detiledAll)
             {
                 texture = texture with { RgbaPixels = linear };
             }

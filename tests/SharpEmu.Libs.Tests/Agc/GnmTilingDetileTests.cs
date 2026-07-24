@@ -148,6 +148,56 @@ public sealed class GnmTilingDetileTests
         Assert.Equal(expected, actual);
     }
 
+    // Array textures are packed as contiguous tiled slices and detiled one slice
+    // per layer (dispatch-Z on the GPU; a per-layer loop in the CPU fallbacks)
+    // into a layer-major linear buffer. This pins that packing: each slice must
+    // deswizzle into its own region and match a per-slice TryDetile, and a
+    // per-layer-distinct pattern catches any slice cross-talk.
+    [Theory]
+    [InlineData(27u, 4, 256, 256, 3)]
+    [InlineData(9u, 4, 128, 96, 2)]
+    [InlineData(24u, 4, 64, 128, 4)]
+    public void DetileWithParams_MultiLayer_MatchesPerSliceTryDetile(uint mode, int bpp, int w, int h, int layers)
+    {
+        var p = GnmTiling.GetDetileParams(mode, bpp, w, h);
+        Assert.True(p.IsSupported);
+
+        var blocksHigh = (h + p.BlockHeight - 1) / p.BlockHeight;
+        var sliceTiledBytes = (int)((long)p.BlocksPerRow * blocksHigh * p.BlockBytes);
+        var sliceLinearBytes = w * h * bpp;
+
+        var tiled = new byte[sliceTiledBytes * layers];
+        for (var layer = 0; layer < layers; layer++)
+        {
+            for (var i = 0; i < sliceTiledBytes; i++)
+            {
+                tiled[layer * sliceTiledBytes + i] = (byte)((i * 31 + 7 + layer * 101) & 0xFF);
+            }
+        }
+
+        // Expected: each slice detiled independently via the shipped CPU detile.
+        var expected = new byte[sliceLinearBytes * layers];
+        for (var layer = 0; layer < layers; layer++)
+        {
+            Assert.True(GnmTiling.TryDetile(
+                tiled.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                expected.AsSpan(layer * sliceLinearBytes, sliceLinearBytes),
+                mode, w, h, bpp));
+        }
+
+        // Actual: the layer-major loop the Vulkan/Metal CPU fallbacks run.
+        var actual = new byte[sliceLinearBytes * layers];
+        for (var layer = 0; layer < layers; layer++)
+        {
+            Assert.True(GnmTiling.DetileWithParams(
+                p,
+                tiled.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                actual.AsSpan(layer * sliceLinearBytes, sliceLinearBytes)));
+        }
+
+        Assert.Equal(expected, actual);
+    }
+
     // Reference detile driven entirely by DetileParams — the single shared
     // addressing formula the Vulkan/Metal compute kernel will run per texel.
     private static byte[] DetileViaParams(byte[] tiled, DetileParams p, int w, int h, int bpp)

@@ -8196,16 +8196,20 @@ internal static unsafe class VulkanVideoPresenter
                     $"layers={layers} dst=0x{texture.DstSelect:X3} " +
                     $"bytes={texture.RgbaPixels.Length} expected={expectedSize}");
             }
+            // The GPU detile pass deswizzles both plain 2D textures and array
+            // textures (one dispatch-Z layer per slice): the tiled source packs
+            // the slices contiguously, so require its length to cover every
+            // layer's linear extent (tiled slices are >= the linear size).
             DetileParams? gpuDetileParams = null;
             byte[]? gpuTiledSource = null;
             if (_gpuDetileEnabled &&
-                layers == 1 &&
-                !texture.ArrayedView &&
                 texture.Detile is { } detileCandidate &&
                 texture.TiledSource is { Length: > 0 } tiledCandidate &&
                 VulkanDetilePass.Supports(detileCandidate) &&
                 (uint)detileCandidate.ElementsWide == width &&
-                (uint)detileCandidate.ElementsHigh == height)
+                (uint)detileCandidate.ElementsHigh == height &&
+                (long)tiledCandidate.Length >= (long)width * height * sizeof(uint) * layers &&
+                tiledCandidate.Length % (int)layers == 0)
             {
                 gpuDetileParams = detileCandidate;
                 gpuTiledSource = tiledCandidate;
@@ -8221,8 +8225,35 @@ internal static unsafe class VulkanVideoPresenter
             }
             else
             {
-                var pixels = texture.RgbaPixels.Length == (int)(expectedSize * layers)
-                    ? texture.RgbaPixels
+                // Safety net: the AGC gate can package a texture as a GPU-detile
+                // candidate (empty RgbaPixels + TiledSource) that this path did
+                // not accept for the GPU compute pass (see the gpuTiledSource
+                // guard above). Detile the raw tiled bytes on the CPU here rather
+                // than letting empty RgbaPixels fall through to a blank fallback
+                // image — otherwise such textures render empty (missing text).
+                var cpuDetiled = texture.RgbaPixels;
+                if (cpuDetiled.Length == 0 &&
+                    layers == 1 &&
+                    texture.TiledSource is { Length: > 0 } fallbackTiled &&
+                    texture.Detile is { } fallbackParams &&
+                    expectedSize > 0 &&
+                    expectedSize <= int.MaxValue)
+                {
+                    var linear = new byte[expectedSize];
+                    if (GnmTiling.TryDetile(
+                            fallbackTiled,
+                            linear,
+                            texture.TileMode,
+                            (int)width,
+                            (int)height,
+                            fallbackParams.BytesPerElement))
+                    {
+                        cpuDetiled = linear;
+                    }
+                }
+
+                var pixels = cpuDetiled.Length == (int)(expectedSize * layers)
+                    ? cpuDetiled
                     : CreateFallbackTexturePixels(texture.Format, rowLength, height, expectedSize);
                 if (!ReferenceEquals(pixels, texture.RgbaPixels))
                 {
@@ -8320,6 +8351,7 @@ internal static unsafe class VulkanVideoPresenter
                             ImageLayout.Undefined,
                             width,
                             height,
+                            layers,
                             detileSource,
                             detileParameters,
                             out var detileTransients))
@@ -8339,14 +8371,30 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (!gpuDetiled)
                 {
-                    var linear = new byte[expectedSize];
-                    if (GnmTiling.TryDetile(
-                            detileSource,
-                            linear,
-                            texture.TileMode,
-                            (int)width,
-                            (int)height,
-                            detileParameters.BytesPerElement))
+                    // CPU fallback: the tiled source packs the array slices
+                    // contiguously, so detile each slice into its layer-major
+                    // linear region (single layer degrades to one iteration).
+                    var totalLinear = checked((int)(expectedSize * layers));
+                    var linear = new byte[totalLinear];
+                    var sliceTiledBytes = detileSource.Length / (int)layers;
+                    var sliceLinearBytes = (int)expectedSize;
+                    var detiledAll = true;
+                    for (var layer = 0; layer < layers; layer++)
+                    {
+                        if (!GnmTiling.TryDetile(
+                                detileSource.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                                linear.AsSpan(layer * sliceLinearBytes, sliceLinearBytes),
+                                texture.TileMode,
+                                (int)width,
+                                (int)height,
+                                detileParameters.BytesPerElement))
+                        {
+                            detiledAll = false;
+                            break;
+                        }
+                    }
+
+                    if (detiledAll)
                     {
                         (stagingBuffer, stagingMemory) = CreateTextureStagingBuffer(
                             linear, $"{TextureDebugName(texture, vkFormat)} staging(cpu-fallback)");

@@ -27,7 +27,7 @@ namespace SharpEmu.Libs.Gpu.Metal;
 internal sealed unsafe class MetalDetilePass : IDisposable
 {
     private const uint LocalSize = 8;
-    private const int PushConstantUints = 8;
+    private const int PushConstantUints = 9;
 
     private readonly nint _device;
     private nint _pipelineState;
@@ -55,17 +55,23 @@ internal sealed unsafe class MetalDetilePass : IDisposable
         nint texture,
         uint width,
         uint height,
+        uint layers,
         ReadOnlySpan<byte> tiled,
         in DetileParams parameters,
         out nint[] transientBuffers)
     {
         transientBuffers = [];
         if (_disposed || commandBuffer == 0 || texture == 0 ||
-            !Supports(parameters) || width == 0 || height == 0 || tiled.IsEmpty ||
+            !Supports(parameters) || width == 0 || height == 0 || layers == 0 || tiled.IsEmpty ||
+            tiled.Length % (int)(layers * sizeof(uint)) != 0 ||
             !EnsurePipeline())
         {
             return false;
         }
+
+        // Array slices are packed contiguously in the tiled buffer; each slice's
+        // element stride is the whole buffer split evenly by layer.
+        var srcSliceElements = (uint)(tiled.Length / sizeof(uint) / layers);
 
         var shift = BitOperations.TrailingZeroCount((uint)parameters.BytesPerElement);
         var xTerm = ToElementTerms(parameters.XByteTerm, shift);
@@ -95,7 +101,7 @@ internal sealed unsafe class MetalDetilePass : IDisposable
                 _device, newBufferWithBytes, (nint)yPointer, (nuint)yTerm.Length * sizeof(uint), 0);
         }
 
-        var outputBytes = (nuint)width * height * sizeof(uint);
+        var outputBytes = (nuint)width * height * sizeof(uint) * layers;
         var outputBuffer = MetalNative.SendNewBuffer(_device, newBufferWithLength, outputBytes, 0);
 
         Span<uint> push =
@@ -108,6 +114,7 @@ internal sealed unsafe class MetalDetilePass : IDisposable
             (uint)parameters.BlocksPerRow,
             (uint)parameters.XMask,
             (uint)parameters.YMask,
+            srcSliceElements,
         ];
         nint paramsBuffer;
         fixed (uint* pushPointer = push)
@@ -132,11 +139,12 @@ internal sealed unsafe class MetalDetilePass : IDisposable
         MetalNative.SendSetBuffer(encoder, setBuffer, outputBuffer, 0, 3);
         MetalNative.SendSetBuffer(encoder, setBuffer, paramsBuffer, 0, 4);
 
+        // One grid-Z layer per array slice.
         var threadgroups = new MtlSize
         {
             Width = (nuint)((width + LocalSize - 1) / LocalSize),
             Height = (nuint)((height + LocalSize - 1) / LocalSize),
-            Depth = 1,
+            Depth = layers,
         };
         var threadsPerThreadgroup = new MtlSize { Width = LocalSize, Height = LocalSize, Depth = 1 };
         MetalNative.SendDispatch(
@@ -146,23 +154,30 @@ internal sealed unsafe class MetalDetilePass : IDisposable
             threadsPerThreadgroup);
         MetalNative.SendVoid(encoder, MetalNative.Selector("endEncoding"));
 
-        // Blit the linear output buffer into the sampled texture. Metal tracks
-        // the compute-write -> blit-read hazard automatically.
+        // Blit the layer-major linear output buffer into the sampled texture,
+        // one slice per array layer (Metal copyFromBuffer targets a single slice).
+        // Metal tracks the compute-write -> blit-read hazard automatically.
         var blit = MetalNative.Send(commandBuffer, MetalNative.Selector("blitCommandEncoder"));
-        MetalNative.SendCopyBufferToTexture(
-            blit,
-            MetalNative.Selector(
-                "copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:" +
-                "toTexture:destinationSlice:destinationLevel:destinationOrigin:"),
-            outputBuffer,
-            0,
-            (nuint)width * sizeof(uint),
-            outputBytes,
-            new MtlSize { Width = width, Height = height, Depth = 1 },
-            texture,
-            0,
-            0,
-            new MtlOrigin { X = 0, Y = 0, Z = 0 });
+        var copySelector = MetalNative.Selector(
+            "copyFromBuffer:sourceOffset:sourceBytesPerRow:sourceBytesPerImage:sourceSize:" +
+            "toTexture:destinationSlice:destinationLevel:destinationOrigin:");
+        var sliceBytes = (nuint)width * height * sizeof(uint);
+        for (uint layer = 0; layer < layers; layer++)
+        {
+            MetalNative.SendCopyBufferToTexture(
+                blit,
+                copySelector,
+                outputBuffer,
+                (nuint)layer * sliceBytes,
+                (nuint)width * sizeof(uint),
+                sliceBytes,
+                new MtlSize { Width = width, Height = height, Depth = 1 },
+                texture,
+                layer,
+                0,
+                new MtlOrigin { X = 0, Y = 0, Z = 0 });
+        }
+
         MetalNative.SendVoid(blit, MetalNative.Selector("endEncoding"));
 
         transientBuffers = [tiledBuffer, xBuffer, yBuffer, outputBuffer, paramsBuffer];
