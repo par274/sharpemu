@@ -47,7 +47,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <AvaloniaResource Include="..\..\assets\images\update-icon.png" Link="Assets/update-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\commit-icon.png" Link="Assets/commit-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\pic0.png" Link="Assets/pic0.png" />
+    <AvaloniaResource Include="Assets\Fonts\GoogleSans-*.ttf" />
     <AvaloniaResource Include="Assets\Fonts\MaterialSymbolsRounded-400.ttf" />
+    <None Include="..\..\LICENSES\OFL-1.1.txt"
+          Link="licenses\OFL-1.1.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          TargetPath="licenses\OFL-1.1.txt" />
   </ItemGroup>
 
   <ItemGroup>

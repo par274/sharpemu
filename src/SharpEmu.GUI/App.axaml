@@ -31,6 +31,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SolidColorBrush x:Key="InfoBrush" Color="#64A7FF" />
     <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
     <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
+    <FontFamily x:Key="GoogleSans">avares://SharpEmu.GUI/Assets/Fonts#Google Sans</FontFamily>
     <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
 
     <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
@@ -72,7 +73,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <FluentTheme />
 
     <Style Selector="Window">
-      <Setter Property="FontFamily" Value="Google Sans, Segoe UI Variable, Segoe UI, sans-serif" />
+      <Setter Property="FontFamily" Value="{StaticResource GoogleSans}" />
       <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
       <Setter Property="Background" Value="{StaticResource BgBrush}" />
     </Style>
