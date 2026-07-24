@@ -29,7 +29,7 @@ namespace SharpEmu.Libs.VideoOut;
 internal sealed unsafe class VulkanDetilePass : IDisposable
 {
     private const uint LocalSize = 8;
-    private const uint PushConstantBytes = 10 * sizeof(uint);
+    private const uint PushConstantBytes = 11 * sizeof(uint);
 
     private readonly Vk _vk;
     private readonly Device _device;
@@ -59,11 +59,15 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         _queueFamilyIndex = queueFamilyIndex;
     }
 
-    /// <summary>The kernel handles the exact-XOR and block-table modes at 4 bytes/element.</summary>
+    /// <summary>
+    /// The kernel handles the exact-XOR and block-table modes at 4/8/16
+    /// bytes-per-element (one, two, or four 32-bit words per element). 1/2 bpp are
+    /// sub-word and stay on the CPU.
+    /// </summary>
     public static bool Supports(in DetileParams parameters) =>
         (parameters.Equation == DetileEquation.ExactXor ||
          parameters.Equation == DetileEquation.BlockTable) &&
-        parameters.BytesPerElement == 4;
+        parameters.BytesPerElement is 4 or 8 or 16;
 
     /// <summary>Transient per-detile resources the caller must retire once the
     /// command buffer they were recorded into has completed.</summary>
@@ -86,33 +90,36 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         public ulong OutputBytes;
         public uint SrcSliceElements;
         public uint EquationValue;
+        public uint UintsPerElement;
     }
 
     /// <summary>
     /// Records the deswizzle of <paramref name="tiled"/> into <paramref name="image"/>
-    /// (RGBA8, <paramref name="width"/> x <paramref name="height"/> x
+    /// (<paramref name="texelWidth"/> x <paramref name="texelHeight"/> texels x
     /// <paramref name="layers"/> array slices, currently in
     /// <paramref name="currentLayout"/>) onto <paramref name="commandBuffer"/>,
-    /// leaving the image <see cref="ImageLayout.ShaderReadOnlyOptimal"/>. The tiled
-    /// buffer holds the array slices packed contiguously (each an independently
-    /// tiled 2D surface). Does not submit; the caller retires
-    /// <paramref name="transients"/> with the command buffer's fence. Returns false
-    /// (with empty transients) when unsupported.
+    /// leaving the image <see cref="ImageLayout.ShaderReadOnlyOptimal"/>. The kernel
+    /// iterates the element grid from <paramref name="parameters"/> (for
+    /// block-compressed formats a 4x4 block is one element, so the element grid is
+    /// smaller than the texel grid). The tiled buffer holds the array slices packed
+    /// contiguously (each an independently tiled 2D surface). Does not submit; the
+    /// caller retires <paramref name="transients"/> with the command buffer's fence.
+    /// Returns false (with empty transients) when unsupported.
     /// </summary>
     public bool RecordDetile(
         CommandBuffer commandBuffer,
         Image image,
         ImageLayout currentLayout,
-        uint width,
-        uint height,
+        uint texelWidth,
+        uint texelHeight,
         uint layers,
         ReadOnlySpan<byte> tiled,
         in DetileParams parameters,
         out Transients transients)
     {
         transients = new Transients([], default);
-        if (_disposed || !Supports(parameters) || width == 0 || height == 0 || layers == 0 ||
-            tiled.IsEmpty || tiled.Length % (int)(layers * sizeof(uint)) != 0)
+        if (_disposed || !Supports(parameters) || texelWidth == 0 || texelHeight == 0 || layers == 0 ||
+            tiled.IsEmpty || tiled.Length % (int)(layers * (uint)parameters.BytesPerElement) != 0)
         {
             return false;
         }
@@ -123,7 +130,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         try
         {
             PrepareResources(tiled, parameters, layers, ref resources);
-            RecordCommands(commandBuffer, in resources, image, currentLayout, width, height, layers, in parameters);
+            RecordCommands(commandBuffer, in resources, image, currentLayout, texelWidth, texelHeight, layers, in parameters);
         }
         catch
         {
@@ -151,14 +158,14 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
     public bool DetileIntoImage(
         Image image,
         ImageLayout currentLayout,
-        uint width,
-        uint height,
+        uint texelWidth,
+        uint texelHeight,
         uint layers,
         ReadOnlySpan<byte> tiled,
         in DetileParams parameters)
     {
-        if (_disposed || !Supports(parameters) || width == 0 || height == 0 || layers == 0 ||
-            tiled.IsEmpty || tiled.Length % (int)(layers * sizeof(uint)) != 0)
+        if (_disposed || !Supports(parameters) || texelWidth == 0 || texelHeight == 0 || layers == 0 ||
+            tiled.IsEmpty || tiled.Length % (int)(layers * (uint)parameters.BytesPerElement) != 0)
         {
             return false;
         }
@@ -174,7 +181,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
             commandBuffer = AllocateCommandBuffer();
             BeginCommandBuffer(commandBuffer);
-            RecordCommands(commandBuffer, in resources, image, currentLayout, width, height, layers, in parameters);
+            RecordCommands(commandBuffer, in resources, image, currentLayout, texelWidth, texelHeight, layers, in parameters);
             Check(_vk.EndCommandBuffer(commandBuffer), "vkEndCommandBuffer(detile)");
 
             fence = CreateFence();
@@ -235,9 +242,12 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
         // The array slices are packed contiguously in the tiled buffer, so each
         // slice's element stride is the whole tiled buffer split evenly by layer.
-        resources.SrcSliceElements = (uint)(tiled.Length / sizeof(uint) / layers);
+        // Element sizes are in bytes-per-element; the kernel moves bpp/4 words each.
+        var bytesPerElement = (uint)parameters.BytesPerElement;
+        resources.UintsPerElement = bytesPerElement / sizeof(uint);
+        resources.SrcSliceElements = (uint)((ulong)tiled.Length / bytesPerElement / layers);
         resources.OutputBytes =
-            (ulong)parameters.ElementsWide * (ulong)parameters.ElementsHigh * sizeof(uint) * layers;
+            (ulong)parameters.ElementsWide * (ulong)parameters.ElementsHigh * bytesPerElement * layers;
 
         resources.Tiled = CreateHostBuffer((ulong)tiled.Length, BufferUsageFlags.StorageBufferBit, out resources.TiledMemory);
         UploadBytes(resources.TiledMemory, tiled);
@@ -265,11 +275,16 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         in DetileResources resources,
         Image image,
         ImageLayout currentLayout,
-        uint width,
-        uint height,
+        uint texelWidth,
+        uint texelHeight,
         uint layers,
         in DetileParams parameters)
     {
+        // The kernel iterates the element grid (smaller than the texel grid for
+        // block-compressed formats); the image copy below uses the texel grid.
+        var elementsWide = (uint)parameters.ElementsWide;
+        var elementsHigh = (uint)parameters.ElementsHigh;
+
         var descriptorSet = resources.Set;
         _vk.CmdBindPipeline(commandBuffer, PipelineBindPoint.Compute, _pipeline);
         _vk.CmdBindDescriptorSets(
@@ -277,8 +292,8 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
         Span<uint> push =
         [
-            width,
-            height,
+            elementsWide,
+            elementsHigh,
             (uint)parameters.BlockWidth,
             (uint)parameters.BlockHeight,
             (uint)parameters.BlockElements,
@@ -287,6 +302,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             (uint)parameters.YMask,
             resources.SrcSliceElements,
             resources.EquationValue,
+            resources.UintsPerElement,
         ];
         fixed (uint* pushPointer = push)
         {
@@ -294,11 +310,12 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
                 commandBuffer, _pipelineLayout, ShaderStageFlags.ComputeBit, 0, PushConstantBytes, pushPointer);
         }
 
-        // One dispatch-Z layer per array slice.
+        // X is widened by uintsPerElement (each thread copies one word); one
+        // dispatch-Z layer per array slice.
         _vk.CmdDispatch(
             commandBuffer,
-            (width + LocalSize - 1) / LocalSize,
-            (height + LocalSize - 1) / LocalSize,
+            (elementsWide * resources.UintsPerElement + LocalSize - 1) / LocalSize,
+            (elementsHigh + LocalSize - 1) / LocalSize,
             layers);
 
         // Compute store -> transfer read on the linear output buffer.
@@ -337,8 +354,9 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             PipelineStageFlags.TransferBit,
             layers);
 
-        // The output buffer is layer-major (slice stride = width*height texels), so
-        // a single copy with tightly-packed rows fills every array layer.
+        // The output buffer is layer-major, tightly packed (BufferRowLength 0 =>
+        // one element-row per texel-row, which for compressed formats is the block
+        // row), so a single copy fills every array layer. Extent is in texels.
         var copyRegion = new BufferImageCopy
         {
             BufferOffset = 0,
@@ -346,7 +364,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             BufferImageHeight = 0,
             ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, layers),
             ImageOffset = default,
-            ImageExtent = new Extent3D(width, height, 1),
+            ImageExtent = new Extent3D(texelWidth, texelHeight, 1),
         };
         _vk.CmdCopyBufferToImage(
             commandBuffer, resources.Output, image, ImageLayout.TransferDstOptimal, 1, &copyRegion);

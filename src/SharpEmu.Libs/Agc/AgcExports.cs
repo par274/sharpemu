@@ -8254,10 +8254,14 @@ public static partial class AgcExports
     /// enabled and the format is understood; returns null to keep the raw
     /// bytes (linear surfaces, unknown modes, or non-power-of-two elements).
     /// </summary>
-    // The GPU detile kernel implements these two equation families (both at 4bpp);
-    // keep this in lockstep with VulkanDetilePass.Supports / MetalDetilePass.Supports.
+    // The GPU detile kernel implements these two equation families at 4/8/16 bpp
+    // (one/two/four 32-bit words per element; 1/2 bpp are sub-word and stay on the
+    // CPU). Keep in lockstep with VulkanDetilePass.Supports / MetalDetilePass.Supports.
     private static bool IsGpuDetileEquation(DetileEquation equation) =>
         equation == DetileEquation.ExactXor || equation == DetileEquation.BlockTable;
+
+    private static bool IsGpuDetileBytesPerElement(int bytesPerElement) =>
+        bytesPerElement is 4 or 8 or 16;
 
     private static bool TryGetTextureElementLayout(
         TextureDescriptor descriptor,
@@ -8688,7 +8692,8 @@ public static partial class AgcExports
             // deswizzles every layer on the GPU; only unsupported cases fall to the
             // CPU per-layer detile below. Font/text atlases uploaded as 2D arrays
             // take this path.
-            if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail && bytesPerElement == 4 &&
+            if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
+                IsGpuDetileBytesPerElement(bytesPerElement) &&
                 (long)physicalSourceByteCount * arrayLayers <= int.MaxValue)
             {
                 var gpuArrayParams = GnmTiling.GetDetileParams(
@@ -8842,20 +8847,20 @@ public static partial class AgcExports
                         $"[GPU-DETILE] gate mode={descriptor.TileMode} fmt={descriptor.Format} " +
                         $"bpp={bytesPerElement} hasLayout={hasElementLayout} mipTail={baseMipInTail} " +
                         $"storage={isStorage} arrayed={isArrayed} eq={eq} -> " +
-                        $"{(hasElementLayout && !baseMipInTail && bytesPerElement == 4 && IsGpuDetileEquation(eq) ? "GPU" : "CPU")}");
+                        $"{(hasElementLayout && !baseMipInTail && IsGpuDetileBytesPerElement(bytesPerElement) && IsGpuDetileEquation(eq) ? "GPU" : "CPU")}");
                 }
             }
         }
 
-        // GPU detile: for the 4-bytes/element base-mip case the backend can
-        // deswizzle on the GPU (exact-XOR and block-table equations), so ship the
-        // raw tiled bytes + params rather than paying the CPU detile. Everything
-        // else keeps the CPU path below.
+        // GPU detile: for the 4/8/16-bytes/element base-mip case the backend can
+        // deswizzle on the GPU (exact-XOR and block-table equations, including
+        // block-compressed formats), so ship the raw tiled bytes + params rather
+        // than paying the CPU detile. Everything else keeps the CPU path below.
         //
         // Arrayed textures are handled by the arrayed branch above (they package
         // every layer's tiled slice); this branch is the single-layer case.
-        if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail && bytesPerElement == 4 &&
-            !isArrayed)
+        if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
+            IsGpuDetileBytesPerElement(bytesPerElement) && !isArrayed)
         {
             var gpuDetileParams = GnmTiling.GetDetileParams(
                 descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh);

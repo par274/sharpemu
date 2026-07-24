@@ -8196,20 +8196,24 @@ internal static unsafe class VulkanVideoPresenter
                     $"layers={layers} dst=0x{texture.DstSelect:X3} " +
                     $"bytes={texture.RgbaPixels.Length} expected={expectedSize}");
             }
-            // The GPU detile pass deswizzles both plain 2D textures and array
-            // textures (one dispatch-Z layer per slice): the tiled source packs
-            // the slices contiguously, so require its length to cover every
-            // layer's linear extent (tiled slices are >= the linear size).
+            // The GPU detile pass deswizzles plain 2D and array textures (one
+            // dispatch-Z layer per slice) at 4/8/16 bpp, including block-compressed
+            // formats (element grid = ceil(texels/4), smaller than the texel grid).
+            // Validate against the element grid + bpp from the resolved params, and
+            // require the tiled source to cover every layer's linear extent (tiled
+            // slices are >= the linear size due to whole-block padding).
             DetileParams? gpuDetileParams = null;
             byte[]? gpuTiledSource = null;
             if (_gpuDetileEnabled &&
                 texture.Detile is { } detileCandidate &&
                 texture.TiledSource is { Length: > 0 } tiledCandidate &&
                 VulkanDetilePass.Supports(detileCandidate) &&
-                (uint)detileCandidate.ElementsWide == width &&
-                (uint)detileCandidate.ElementsHigh == height &&
-                (long)tiledCandidate.Length >= (long)width * height * sizeof(uint) * layers &&
-                tiledCandidate.Length % (int)layers == 0)
+                detileCandidate.ElementsWide > 0 &&
+                detileCandidate.ElementsHigh > 0 &&
+                (long)tiledCandidate.Length >=
+                    (long)detileCandidate.ElementsWide * detileCandidate.ElementsHigh *
+                    detileCandidate.BytesPerElement * layers &&
+                tiledCandidate.Length % (int)(layers * (uint)detileCandidate.BytesPerElement) == 0)
             {
                 gpuDetileParams = detileCandidate;
                 gpuTiledSource = tiledCandidate;
@@ -8244,8 +8248,8 @@ internal static unsafe class VulkanVideoPresenter
                             fallbackTiled,
                             linear,
                             texture.TileMode,
-                            (int)width,
-                            (int)height,
+                            fallbackParams.ElementsWide,
+                            fallbackParams.ElementsHigh,
                             fallbackParams.BytesPerElement))
                     {
                         cpuDetiled = linear;
@@ -8381,12 +8385,13 @@ internal static unsafe class VulkanVideoPresenter
                     var detiledAll = true;
                     for (var layer = 0; layer < layers; layer++)
                     {
+                        // TryDetile iterates the element grid (for BC, ceil(texels/4)).
                         if (!GnmTiling.TryDetile(
                                 detileSource.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
                                 linear.AsSpan(layer * sliceLinearBytes, sliceLinearBytes),
                                 texture.TileMode,
-                                (int)width,
-                                (int)height,
+                                detileParameters.ElementsWide,
+                                detileParameters.ElementsHigh,
                                 detileParameters.BytesPerElement))
                         {
                             detiledAll = false;

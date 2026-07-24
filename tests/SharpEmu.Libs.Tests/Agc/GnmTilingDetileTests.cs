@@ -128,6 +128,10 @@ public sealed class GnmTilingDetileTests
     [InlineData(5u, 4, 200, 120)]
     [InlineData(8u, 4, 128, 128)]
     [InlineData(1u, 4, 64, 64)]
+    [InlineData(27u, 8, 256, 256)]  // 8bpp (GPU: 2 words/element)
+    [InlineData(27u, 16, 128, 128)] // 16bpp (GPU: 4 words/element)
+    [InlineData(9u, 8, 128, 96)]
+    [InlineData(8u, 16, 64, 64)]    // block-table, 16bpp
     public void DetileWithParams_MatchesTryDetile(uint mode, int bpp, int w, int h)
     {
         var p = GnmTiling.GetDetileParams(mode, bpp, w, h);

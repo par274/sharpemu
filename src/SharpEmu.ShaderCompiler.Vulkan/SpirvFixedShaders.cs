@@ -289,11 +289,18 @@ public static class SpirvFixedShaders
     /// xTerm (ExactXor) OR blockTable (BlockTable) — the two equations index
     /// different-sized buffers, so the kernel branches and evaluates exactly one.
     ///
+    /// width/height are ELEMENT dims (for block-compressed formats a 4x4 block is
+    /// one element). Each element spans uintsPerElement = bpp/4 words (4bpp -> 1,
+    /// 8bpp -> 2, 16bpp -> 4); the X dispatch is widened by that factor so each
+    /// thread copies one word (elemX = gidX / upe, word = gidX % upe). 1/2 bpp are
+    /// sub-word and stay on the CPU.
+    ///
     /// Descriptor set 0: binding 0 = tiled uint[], 1 = xTerm/blockTable uint[],
-    /// 2 = yTerm uint[], 3 = out uint[]. Push constants (10 x uint, offset i*4):
+    /// 2 = yTerm uint[], 3 = out uint[]. Push constants (11 x uint, offset i*4):
     /// width, height, blockWidth, blockHeight, blockElements, blocksPerRow,
-    /// xMask, yMask, srcSliceElements, equation (0 = ExactXor, 1 = BlockTable).
-    /// Local size 8x8x1; dispatch Z = arrayLayers.
+    /// xMask, yMask, srcSliceElements, equation (0 = ExactXor, 1 = BlockTable),
+    /// uintsPerElement. Local size 8x8x1; dispatch X = ceil(width*upe/8),
+    /// Y = ceil(height/8), Z = arrayLayers.
     /// </summary>
     public static byte[] CreateDetileCompute()
     {
@@ -328,12 +335,12 @@ public static class SpirvFixedShaders
         var yTermVar = MakeBuffer(2, "yTerm");
         var outVar = MakeBuffer(3, "outLinear");
 
-        // Push constants: struct { uint p0..p9; }, each member at offset i*4.
+        // Push constants: struct { uint p0..p10; }, each member at offset i*4.
         var pushStruct = module.TypeStruct(
-            uintType, uintType, uintType, uintType, uintType,
+            uintType, uintType, uintType, uintType, uintType, uintType,
             uintType, uintType, uintType, uintType, uintType);
         module.AddDecoration(pushStruct, SpirvDecoration.Block);
-        for (uint member = 0; member < 10; member++)
+        for (uint member = 0; member < 11; member++)
         {
             module.AddMemberDecoration(pushStruct, member, SpirvDecoration.Offset, member * 4);
         }
@@ -348,8 +355,8 @@ public static class SpirvFixedShaders
         module.AddName(gidVar, "gid");
         module.AddDecoration(gidVar, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.GlobalInvocationId);
 
-        var uintConst = new uint[10];
-        for (uint value = 0; value < 10; value++)
+        var uintConst = new uint[11];
+        for (uint value = 0; value < 11; value++)
         {
             uintConst[value] = module.Constant(uintType, value);
         }
@@ -360,7 +367,7 @@ public static class SpirvFixedShaders
         module.AddLabel();
 
         var gid = module.AddInstruction(SpirvOp.Load, uvec3Type, gidVar);
-        var x = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 0);
+        var gidX = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 0);
         var y = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 1);
         var z = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 2);
 
@@ -371,6 +378,10 @@ public static class SpirvFixedShaders
             return module.AddInstruction(SpirvOp.Load, uintType, pointer);
         }
 
+        // width/height are ELEMENT dims (for BC, a 4x4 block is one element). Each
+        // element spans uintsPerElement 32-bit words (bpp/4: 4bpp->1, 8bpp->2,
+        // 16bpp->4). The X dispatch is widened by uintsPerElement so each thread
+        // copies exactly one word: elemX = gidX / upe, wordIndex = gidX % upe.
         var width = PushField(0);
         var height = PushField(1);
         var blockWidth = PushField(2);
@@ -381,8 +392,13 @@ public static class SpirvFixedShaders
         var yMask = PushField(7);
         var srcSliceElements = PushField(8);
         var equation = PushField(9);
+        var uintsPerElement = PushField(10);
 
-        var xInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, x, width);
+        var elemX = module.AddInstruction(SpirvOp.UDiv, uintType, gidX, uintsPerElement);
+        var elemXTimesUpe = module.AddInstruction(SpirvOp.IMul, uintType, elemX, uintsPerElement);
+        var wordIndex = module.AddInstruction(SpirvOp.ISub, uintType, gidX, elemXTimesUpe);
+
+        var xInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, elemX, width);
         var yInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, y, height);
         var inRange = module.AddInstruction(SpirvOp.LogicalAnd, boolType, xInRange, yInRange);
 
@@ -393,15 +409,15 @@ public static class SpirvFixedShaders
 
         module.AddLabel(bodyLabel);
 
-        // blockIdx = (y / blockHeight) * blocksPerRow + (x / blockWidth)
+        // blockIdx = (y / blockHeight) * blocksPerRow + (elemX / blockWidth)
         var yDiv = module.AddInstruction(SpirvOp.UDiv, uintType, y, blockHeight);
         var blockRow = module.AddInstruction(SpirvOp.IMul, uintType, yDiv, blocksPerRow);
-        var xDiv = module.AddInstruction(SpirvOp.UDiv, uintType, x, blockWidth);
+        var xDiv = module.AddInstruction(SpirvOp.UDiv, uintType, elemX, blockWidth);
         var blockIdx = module.AddInstruction(SpirvOp.IAdd, uintType, blockRow, xDiv);
 
         // off (element offset within the block) = equation == BlockTable
-        //   ? blockTable[(y % blockHeight) * blockWidth + (x % blockWidth)]
-        //   : xTerm[x & xMask] ^ yTerm[y & yMask]
+        //   ? blockTable[(y % blockHeight) * blockWidth + (elemX % blockWidth)]
+        //   : xTerm[elemX & xMask] ^ yTerm[y & yMask]
         // Binding 1 (xTermVar) doubles as the block table; the two equations index
         // different-sized buffers, so exactly one branch executes (no OOB read).
         var isBlockTable = module.AddInstruction(SpirvOp.INotEqual, boolType, equation, uintConst[0]);
@@ -411,9 +427,9 @@ public static class SpirvFixedShaders
         module.AddStatement(SpirvOp.SelectionMerge, offMergeLabel, 0);
         module.AddStatement(SpirvOp.BranchConditional, isBlockTable, tableLabel, xorLabel);
 
-        // ExactXor: xTerm[x & xMask] ^ yTerm[y & yMask]
+        // ExactXor: xTerm[elemX & xMask] ^ yTerm[y & yMask]
         module.AddLabel(xorLabel);
-        var xIdx = module.AddInstruction(SpirvOp.BitwiseAnd, uintType, x, xMask);
+        var xIdx = module.AddInstruction(SpirvOp.BitwiseAnd, uintType, elemX, xMask);
         var xPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, xTermVar, uintConst[0], xIdx);
         var xTerm = module.AddInstruction(SpirvOp.Load, uintType, xPtr);
         var yIdx = module.AddInstruction(SpirvOp.BitwiseAnd, uintType, y, yMask);
@@ -425,7 +441,7 @@ public static class SpirvFixedShaders
         // BlockTable: blockTable[inY * blockWidth + inX], inX/inY = position in block
         module.AddLabel(tableLabel);
         var blockXBase = module.AddInstruction(SpirvOp.IMul, uintType, xDiv, blockWidth);
-        var inX = module.AddInstruction(SpirvOp.ISub, uintType, x, blockXBase);
+        var inX = module.AddInstruction(SpirvOp.ISub, uintType, elemX, blockXBase);
         var blockYBase = module.AddInstruction(SpirvOp.IMul, uintType, yDiv, blockHeight);
         var inY = module.AddInstruction(SpirvOp.ISub, uintType, y, blockYBase);
         var rowInBlock = module.AddInstruction(SpirvOp.IMul, uintType, inY, blockWidth);
@@ -437,22 +453,28 @@ public static class SpirvFixedShaders
         module.AddLabel(offMergeLabel);
         var off = module.AddInstruction(SpirvOp.Phi, uintType, offXor, xorLabel, offTable, tableLabel);
 
-        // src = z * srcSliceElements + blockIdx * blockElements + off
+        // srcElem = z * srcSliceElements + blockIdx * blockElements + off  (in elements)
+        // srcWord = srcElem * uintsPerElement + wordIndex
         var srcSliceBase = module.AddInstruction(SpirvOp.IMul, uintType, z, srcSliceElements);
         var blockBase = module.AddInstruction(SpirvOp.IMul, uintType, blockIdx, blockElements);
         var srcInSlice = module.AddInstruction(SpirvOp.IAdd, uintType, blockBase, off);
-        var src = module.AddInstruction(SpirvOp.IAdd, uintType, srcSliceBase, srcInSlice);
+        var srcElem = module.AddInstruction(SpirvOp.IAdd, uintType, srcSliceBase, srcInSlice);
+        var srcElemWords = module.AddInstruction(SpirvOp.IMul, uintType, srcElem, uintsPerElement);
+        var src = module.AddInstruction(SpirvOp.IAdd, uintType, srcElemWords, wordIndex);
         var srcPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, tiledVar, uintConst[0], src);
-        var texel = module.AddInstruction(SpirvOp.Load, uintType, srcPtr);
+        var word = module.AddInstruction(SpirvOp.Load, uintType, srcPtr);
 
-        // out[z * width * height + y * width + x] = texel
+        // dstElem = z * width * height + y * width + elemX  (in elements)
+        // dstWord = dstElem * uintsPerElement + wordIndex
         var sliceElements = module.AddInstruction(SpirvOp.IMul, uintType, width, height);
         var dstSliceBase = module.AddInstruction(SpirvOp.IMul, uintType, z, sliceElements);
         var rowBase = module.AddInstruction(SpirvOp.IMul, uintType, y, width);
-        var dstInSlice = module.AddInstruction(SpirvOp.IAdd, uintType, rowBase, x);
-        var dstIdx = module.AddInstruction(SpirvOp.IAdd, uintType, dstSliceBase, dstInSlice);
+        var dstRow = module.AddInstruction(SpirvOp.IAdd, uintType, rowBase, elemX);
+        var dstElem = module.AddInstruction(SpirvOp.IAdd, uintType, dstSliceBase, dstRow);
+        var dstElemWords = module.AddInstruction(SpirvOp.IMul, uintType, dstElem, uintsPerElement);
+        var dstIdx = module.AddInstruction(SpirvOp.IAdd, uintType, dstElemWords, wordIndex);
         var dstPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, outVar, uintConst[0], dstIdx);
-        module.AddStatement(SpirvOp.Store, dstPtr, texel);
+        module.AddStatement(SpirvOp.Store, dstPtr, word);
 
         module.AddStatement(SpirvOp.Branch, mergeLabel);
         module.AddLabel(mergeLabel);

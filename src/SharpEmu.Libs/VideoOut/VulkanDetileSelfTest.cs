@@ -18,9 +18,20 @@ namespace SharpEmu.Libs.VideoOut;
 /// </summary>
 internal static unsafe class VulkanDetileSelfTest
 {
-    private const int BytesPerElement = 4;
     private const uint Width = 256;
     private const uint Height = 256;
+
+    // (swizzleMode, bytesPerElement, image format). Mode 27 is exact-XOR, mode 8
+    // (64 KiB Z) is block-table — both branches. bpp 4/8/16 exercises the
+    // one/two/four-words-per-element copy. These formats are non-block-compressed
+    // (element grid == texel grid), so Width/Height are both element and texel dims.
+    private static readonly (uint Mode, int Bpp, Format Format)[] Cases =
+    [
+        (27, 4, Format.R8G8B8A8Unorm),
+        (8, 4, Format.R8G8B8A8Unorm),
+        (27, 8, Format.R32G32Uint),
+        (27, 16, Format.R32G32B32A32Uint),
+    ];
 
     public static void RunIfRequested(
         Vk vk,
@@ -44,10 +55,6 @@ internal static unsafe class VulkanDetileSelfTest
         }
     }
 
-    // Mode 27 is exact-XOR; mode 8 (64 KiB Z) is block-table — one of each family
-    // so the self-test exercises both kernel branches on real hardware.
-    private static readonly uint[] SwizzleModes = [27, 8];
-
     private static void Run(
         Vk vk,
         Device device,
@@ -59,12 +66,12 @@ internal static unsafe class VulkanDetileSelfTest
         var commandPool = CreateCommandPool(vk, device, queueFamilyIndex);
         try
         {
-            foreach (var swizzleMode in SwizzleModes)
+            foreach (var (mode, bpp, format) in Cases)
             {
                 // A plain 2D texture (1 layer) and an array texture (2 layers) — the
                 // arrayed case exercises the kernel's dispatch-Z slice addressing.
-                RunCase(vk, device, physicalDevice, queue, commandPool, pass, swizzleMode, layers: 1);
-                RunCase(vk, device, physicalDevice, queue, commandPool, pass, swizzleMode, layers: 2);
+                RunCase(vk, device, physicalDevice, queue, commandPool, pass, mode, bpp, format, layers: 1);
+                RunCase(vk, device, physicalDevice, queue, commandPool, pass, mode, bpp, format, layers: 2);
             }
         }
         finally
@@ -84,13 +91,15 @@ internal static unsafe class VulkanDetileSelfTest
         CommandPool commandPool,
         VulkanDetilePass pass,
         uint swizzleMode,
+        int bytesPerElement,
+        Format format,
         uint layers)
     {
-        var parameters = GnmTiling.GetDetileParams(swizzleMode, BytesPerElement, (int)Width, (int)Height);
+        var parameters = GnmTiling.GetDetileParams(swizzleMode, bytesPerElement, (int)Width, (int)Height);
         if (!parameters.IsSupported || !VulkanDetilePass.Supports(parameters))
         {
             Console.Error.WriteLine(
-                $"[DETILE-SELFTEST] FAIL: mode {swizzleMode} not supported by the GPU pass.");
+                $"[DETILE-SELFTEST] FAIL: mode {swizzleMode} bpp {bytesPerElement} not supported by the GPU pass.");
             return;
         }
 
@@ -98,7 +107,7 @@ internal static unsafe class VulkanDetileSelfTest
         // (so a slice mix-up is caught), the array slices packed contiguously.
         var blocksHigh = ((int)Height + parameters.BlockHeight - 1) / parameters.BlockHeight;
         var sliceTiledBytes = (int)((long)parameters.BlocksPerRow * blocksHigh * parameters.BlockBytes);
-        var sliceLinearBytes = (int)(Width * Height * BytesPerElement);
+        var sliceLinearBytes = (int)(Width * Height * bytesPerElement);
         var tiled = new byte[sliceTiledBytes * layers];
         var expected = new byte[sliceLinearBytes * layers];
         for (var layer = 0; layer < layers; layer++)
@@ -111,7 +120,7 @@ internal static unsafe class VulkanDetileSelfTest
             if (!GnmTiling.TryDetile(
                     tiled.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
                     expected.AsSpan(layer * sliceLinearBytes, sliceLinearBytes),
-                    swizzleMode, (int)Width, (int)Height, BytesPerElement))
+                    swizzleMode, (int)Width, (int)Height, bytesPerElement))
             {
                 Console.Error.WriteLine("[DETILE-SELFTEST] FAIL: CPU TryDetile declined.");
                 return;
@@ -119,18 +128,17 @@ internal static unsafe class VulkanDetileSelfTest
         }
 
         var tiledBytes = tiled;
+        var label = $"mode{swizzleMode} {bytesPerElement}bpp x{layers}";
 
         // Phase 1: the one-shot DetileIntoImage (submit + wait in place).
         VerifyPhase(
-            vk, device, physicalDevice, queue, commandPool, expected, layers, swizzleMode,
-            $"DetileIntoImage mode{swizzleMode} x{layers}",
+            vk, device, physicalDevice, queue, commandPool, expected, layers, format, $"DetileIntoImage {label}",
             image => pass.DetileIntoImage(image, ImageLayout.Undefined, Width, Height, layers, tiledBytes, parameters));
 
         // Phase 2: RecordDetile — the exact code path the render loop uses
         // (record into a command buffer, submit, retire the transients).
         VerifyPhase(
-            vk, device, physicalDevice, queue, commandPool, expected, layers, swizzleMode,
-            $"RecordDetile mode{swizzleMode} x{layers}",
+            vk, device, physicalDevice, queue, commandPool, expected, layers, format, $"RecordDetile {label}",
             image => RecordDetileAndSubmit(vk, device, queue, commandPool, pass, image, layers, tiledBytes, parameters));
     }
 
@@ -142,11 +150,11 @@ internal static unsafe class VulkanDetileSelfTest
         CommandPool commandPool,
         byte[] expected,
         uint layers,
-        uint swizzleMode,
+        Format format,
         string label,
         Func<Image, bool> detile)
     {
-        var image = CreateImage(vk, device, physicalDevice, layers, out var imageMemory);
+        var image = CreateImage(vk, device, physicalDevice, format, layers, out var imageMemory);
         var readback = CreateHostBuffer(
             vk, device, physicalDevice, (ulong)expected.Length, BufferUsageFlags.TransferDstBit, out var readbackMemory);
         try
@@ -177,8 +185,8 @@ internal static unsafe class VulkanDetileSelfTest
             vk.UnmapMemory(device, readbackMemory);
 
             Console.Error.WriteLine(firstMismatch < 0
-                ? $"[DETILE-SELFTEST] {label} PASS: {Width}x{Height}x{layers} mode {swizzleMode} matches CPU detile ({expected.Length} bytes)."
-                : $"[DETILE-SELFTEST] {label} FAIL: first mismatch at byte {firstMismatch} (texel {firstMismatch / BytesPerElement}).");
+                ? $"[DETILE-SELFTEST] {label} PASS: {Width}x{Height}x{layers} matches CPU detile ({expected.Length} bytes)."
+                : $"[DETILE-SELFTEST] {label} FAIL: first mismatch at byte {firstMismatch}.");
         }
         finally
         {
@@ -279,6 +287,7 @@ internal static unsafe class VulkanDetileSelfTest
         Vk vk,
         Device device,
         PhysicalDevice physicalDevice,
+        Format format,
         uint layers,
         out DeviceMemory memory)
     {
@@ -286,7 +295,7 @@ internal static unsafe class VulkanDetileSelfTest
         {
             SType = StructureType.ImageCreateInfo,
             ImageType = ImageType.Type2D,
-            Format = Format.R8G8B8A8Unorm,
+            Format = format,
             Extent = new Extent3D(Width, Height, 1),
             MipLevels = 1,
             ArrayLayers = layers,
