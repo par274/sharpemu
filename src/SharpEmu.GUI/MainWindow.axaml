@@ -8,6 +8,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         xmlns:local="clr-namespace:SharpEmu.GUI"
         xmlns:loc="clr-namespace:SharpEmu.GUI"
         xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
+        xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
         x:Class="SharpEmu.GUI.MainWindow"
         Title="SharpEmu"
         Width="1440"
@@ -1040,10 +1041,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <StackPanel Orientation="Horizontal"
                     Spacing="11"
                     VerticalAlignment="Center">
-          <Image Source="avares://SharpEmu.GUI/Assets/logo.png"
-                 Width="46"
-                 Height="46"
-                 Stretch="Uniform" />
+          <svg:Svg Path="avares://SharpEmu.GUI/Assets/logo.svg"
+                   Width="46"
+                   Height="46"
+                   Stretch="Uniform" />
           <TextBlock x:Name="VersionText"
                      Text="v0.0.1"
                      FontSize="10"
