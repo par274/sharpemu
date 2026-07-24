@@ -60,6 +60,40 @@ public sealed class AudioOutExportsTests : IDisposable
     }
 
     [Fact]
+    public void Outputs_SubmitsEveryPortInTheBatch()
+    {
+        var firstHandle = OpenPort(bufferLength: 2);
+        var secondHandle = OpenPort(bufferLength: 2);
+        byte[] firstSource = [1, 0, 2, 0, 3, 0, 4, 0];
+        byte[] secondSource = [5, 0, 6, 0, 7, 0, 8, 0];
+        Assert.True(_memory.TryWrite(FirstSourceAddress, firstSource));
+        Assert.True(_memory.TryWrite(SecondSourceAddress, secondSource));
+
+        // Reverse handle order to exercise canonical lock ordering without
+        // changing which guest buffer belongs to each port.
+        WriteDescriptor(0, secondHandle, FirstSourceAddress);
+        WriteDescriptor(1, firstHandle, SecondSourceAddress);
+
+        var result = Submit(outputCount: 2);
+
+        Assert.Equal(2, result);
+        Assert.Equal(secondSource, Assert.Single(_streams[0].Submissions));
+        Assert.Equal(firstSource, Assert.Single(_streams[1].Submissions));
+    }
+
+    [Fact]
+    public void Outputs_AcceptsNullBufferAsSynchronizationOnly()
+    {
+        var handle = OpenPort(bufferLength: 2);
+        WriteDescriptor(0, handle, sourceAddress: 0);
+
+        var result = Submit(outputCount: 1);
+
+        Assert.Equal(2, result);
+        Assert.Empty(_streams[0].Submissions);
+    }
+
+    [Fact]
     public void Outputs_FaultInLaterBufferDoesNotPartiallySubmit()
     {
         var firstHandle = OpenPort(bufferLength: 2);
