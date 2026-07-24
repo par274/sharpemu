@@ -83,4 +83,152 @@ public sealed class GnmTilingDetileTests
             Assert.Equal((ushort)i, value);
         }
     }
+
+    // GetDetileParams must reproduce TryDetile bit-for-bit: the CPU fallback and
+    // the GPU compute kernel both consume these params, so a detile driven purely
+    // by DetileParams (the shared addressing formula the kernel runs) must equal
+    // the shipped CPU detile for every supported mode/bpp.
+    [Theory]
+    [InlineData(27u, 2, 384, 200)] // 64 KiB RB+ R_X (exact-XOR)
+    [InlineData(27u, 4, 256, 256)] // 64 KiB RB+ R_X (exact-XOR)
+    [InlineData(9u, 4, 300, 300)]  // 64 KiB standard (exact-XOR)
+    [InlineData(24u, 4, 128, 256)] // 64 KiB RB+ Z_X (exact-XOR)
+    [InlineData(5u, 4, 200, 120)]  // 4 KiB standard (exact-XOR)
+    [InlineData(8u, 4, 128, 128)]  // 64 KiB Z (block-table path)
+    [InlineData(1u, 4, 64, 64)]    // 256 B standard (block-table path)
+    public void GetDetileParams_ReproducesTryDetile(uint mode, int bpp, int w, int h)
+    {
+        var p = GnmTiling.GetDetileParams(mode, bpp, w, h);
+        Assert.True(p.IsSupported);
+
+        // Whole-block tiled buffer (block addressing overshoots the linear extent),
+        // filled with a deterministic non-trivial pattern.
+        var blocksHigh = (h + p.BlockHeight - 1) / p.BlockHeight;
+        var tiled = new byte[(long)p.BlocksPerRow * blocksHigh * p.BlockBytes];
+        for (var i = 0; i < tiled.Length; i++)
+        {
+            tiled[i] = (byte)((i * 31 + 7) & 0xFF);
+        }
+
+        var expected = new byte[w * h * bpp];
+        Assert.True(GnmTiling.TryDetile(tiled, expected, mode, w, h, bpp));
+
+        var actual = DetileViaParams(tiled, p, w, h, bpp);
+        Assert.Equal(expected, actual);
+    }
+
+    // The production GnmTiling.DetileWithParams (the active CPU fallback used by
+    // the Metal path under default-on GPU detile) must equal TryDetile for every
+    // supported mode/bpp — same DetileParams addressing, no re-derived swizzle.
+    [Theory]
+    [InlineData(27u, 2, 384, 200)]
+    [InlineData(27u, 4, 256, 256)]
+    [InlineData(9u, 4, 300, 300)]
+    [InlineData(24u, 4, 128, 256)]
+    [InlineData(5u, 4, 200, 120)]
+    [InlineData(8u, 4, 128, 128)]
+    [InlineData(1u, 4, 64, 64)]
+    [InlineData(27u, 8, 256, 256)]  // 8bpp (GPU: 2 words/element)
+    [InlineData(27u, 16, 128, 128)] // 16bpp (GPU: 4 words/element)
+    [InlineData(9u, 8, 128, 96)]
+    [InlineData(8u, 16, 64, 64)]    // block-table, 16bpp
+    public void DetileWithParams_MatchesTryDetile(uint mode, int bpp, int w, int h)
+    {
+        var p = GnmTiling.GetDetileParams(mode, bpp, w, h);
+        Assert.True(p.IsSupported);
+
+        var blocksHigh = (h + p.BlockHeight - 1) / p.BlockHeight;
+        var tiled = new byte[(long)p.BlocksPerRow * blocksHigh * p.BlockBytes];
+        for (var i = 0; i < tiled.Length; i++)
+        {
+            tiled[i] = (byte)((i * 31 + 7) & 0xFF);
+        }
+
+        var expected = new byte[w * h * bpp];
+        Assert.True(GnmTiling.TryDetile(tiled, expected, mode, w, h, bpp));
+
+        var actual = new byte[w * h * bpp];
+        Assert.True(GnmTiling.DetileWithParams(p, tiled, actual));
+        Assert.Equal(expected, actual);
+    }
+
+    // Array textures are packed as contiguous tiled slices and detiled one slice
+    // per layer (dispatch-Z on the GPU; a per-layer loop in the CPU fallbacks)
+    // into a layer-major linear buffer. This pins that packing: each slice must
+    // deswizzle into its own region and match a per-slice TryDetile, and a
+    // per-layer-distinct pattern catches any slice cross-talk.
+    [Theory]
+    [InlineData(27u, 4, 256, 256, 3)]
+    [InlineData(9u, 4, 128, 96, 2)]
+    [InlineData(24u, 4, 64, 128, 4)]
+    public void DetileWithParams_MultiLayer_MatchesPerSliceTryDetile(uint mode, int bpp, int w, int h, int layers)
+    {
+        var p = GnmTiling.GetDetileParams(mode, bpp, w, h);
+        Assert.True(p.IsSupported);
+
+        var blocksHigh = (h + p.BlockHeight - 1) / p.BlockHeight;
+        var sliceTiledBytes = (int)((long)p.BlocksPerRow * blocksHigh * p.BlockBytes);
+        var sliceLinearBytes = w * h * bpp;
+
+        var tiled = new byte[sliceTiledBytes * layers];
+        for (var layer = 0; layer < layers; layer++)
+        {
+            for (var i = 0; i < sliceTiledBytes; i++)
+            {
+                tiled[layer * sliceTiledBytes + i] = (byte)((i * 31 + 7 + layer * 101) & 0xFF);
+            }
+        }
+
+        // Expected: each slice detiled independently via the shipped CPU detile.
+        var expected = new byte[sliceLinearBytes * layers];
+        for (var layer = 0; layer < layers; layer++)
+        {
+            Assert.True(GnmTiling.TryDetile(
+                tiled.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                expected.AsSpan(layer * sliceLinearBytes, sliceLinearBytes),
+                mode, w, h, bpp));
+        }
+
+        // Actual: the layer-major loop the Vulkan/Metal CPU fallbacks run.
+        var actual = new byte[sliceLinearBytes * layers];
+        for (var layer = 0; layer < layers; layer++)
+        {
+            Assert.True(GnmTiling.DetileWithParams(
+                p,
+                tiled.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                actual.AsSpan(layer * sliceLinearBytes, sliceLinearBytes)));
+        }
+
+        Assert.Equal(expected, actual);
+    }
+
+    // Reference detile driven entirely by DetileParams — the single shared
+    // addressing formula the Vulkan/Metal compute kernel will run per texel.
+    private static byte[] DetileViaParams(byte[] tiled, DetileParams p, int w, int h, int bpp)
+    {
+        var linear = new byte[w * h * bpp];
+        for (var y = 0; y < h; y++)
+        {
+            for (var x = 0; x < w; x++)
+            {
+                var blockX = x / p.BlockWidth;
+                var blockY = y / p.BlockHeight;
+                var inX = x % p.BlockWidth;
+                var inY = y % p.BlockHeight;
+                var inBlockByte = p.Equation == DetileEquation.ExactXor
+                    ? p.XByteTerm[x & p.XMask] ^ p.YByteTerm[y & p.YMask]
+                    : p.BlockTable[inY * p.BlockWidth + inX] * p.BytesPerElement;
+                var srcByte = ((long)blockY * p.BlocksPerRow + blockX) * p.BlockBytes + inBlockByte;
+                var dstByte = ((long)y * w + x) * bpp;
+                if (srcByte < 0 || srcByte + bpp > tiled.Length)
+                {
+                    continue;
+                }
+
+                Array.Copy(tiled, srcByte, linear, dstByte, bpp);
+            }
+        }
+
+        return linear;
+    }
 }

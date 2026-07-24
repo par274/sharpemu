@@ -2860,6 +2860,14 @@ internal static unsafe class VulkanVideoPresenter
         private long _lastPipelineCacheSaveTick;
         private Queue _queue;
         private uint _queueFamilyIndex;
+        // GPU deswizzle (default on; SHARPEMU_GPU_DETILE=0 forces the CPU path).
+        // Lazily built on the first tiled texture; disposed with the presenter.
+        private static readonly bool _gpuDetileEnabled = !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_GPU_DETILE"), "0", StringComparison.Ordinal);
+        private static readonly bool _gpuDetileLog = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_GPU_DETILE"), "1", StringComparison.Ordinal);
+        private VulkanDetilePass? _detilePass;
+        private long _gpuDetileCount;
         private SwapchainKHR _swapchain;
         private Image[] _swapchainImages = [];
         private ImageView[] _swapchainImageViews = [];
@@ -2906,6 +2914,9 @@ internal static unsafe class VulkanVideoPresenter
         private readonly Stack<Fence> _recycledGuestFences = new();
         private readonly Stack<CommandBuffer> _recycledGuestCommandBuffers = new();
         private readonly List<(VkBuffer Buffer, DeviceMemory Memory)> _batchRetireBuffers = new();
+        // Descriptor pools from GPU-detile passes recorded into the batch; retired
+        // with the batch's fence, alongside _batchRetireBuffers.
+        private readonly List<DescriptorPool> _batchRetireDescriptorPools = new();
         private const int MaxRecycledGuestFences = 32;
         private const int MaxRecycledGuestCommandBuffers = 32;
         private VkBuffer _stagingBuffer;
@@ -3277,6 +3288,7 @@ internal static unsafe class VulkanVideoPresenter
             IReadOnlyList<TranslatedDrawResources> Resources,
             IReadOnlyList<GuestImageResource> TraceImages,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)> RetireBuffers,
+            IReadOnlyList<DescriptorPool> RetirePools,
             ulong Timeline,
             string DebugName,
             VulkanGuestQueueIdentity Queue,
@@ -4241,6 +4253,7 @@ internal static unsafe class VulkanVideoPresenter
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
             LoadDebugUtilsCommands();
+            VulkanDetileSelfTest.RunIfRequested(_vk, _device, _queue, _physicalDevice, _queueFamilyIndex);
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))
             {
                 throw new InvalidOperationException("VK_KHR_swapchain is unavailable.");
@@ -4949,7 +4962,10 @@ internal static unsafe class VulkanVideoPresenter
                     _batchCommandBuffer,
                     _batchResources.ToArray(),
                     _batchTraceImages.ToArray(),
-                    _batchRetireBuffers.Count > 0 ? _batchRetireBuffers.ToArray() : []);
+                    _batchRetireBuffers.Count > 0 ? _batchRetireBuffers.ToArray() : [],
+                    retirePools: _batchRetireDescriptorPools.Count > 0
+                        ? _batchRetireDescriptorPools.ToArray()
+                        : []);
             }
             catch
             {
@@ -4967,6 +4983,11 @@ internal static unsafe class VulkanVideoPresenter
                     _vk.FreeMemory(_device, memory, null);
                 }
 
+                foreach (var pool in _batchRetireDescriptorPools)
+                {
+                    _vk.DestroyDescriptorPool(_device, pool, null);
+                }
+
                 ReleaseGuestCommandBuffer(_batchCommandBuffer);
                 throw;
             }
@@ -4975,6 +4996,7 @@ internal static unsafe class VulkanVideoPresenter
                 _batchResources.Clear();
                 _batchTraceImages.Clear();
                 _batchRetireBuffers.Clear();
+                _batchRetireDescriptorPools.Clear();
                 _batchCommandBuffer = default;
             }
         }
@@ -4984,7 +5006,8 @@ internal static unsafe class VulkanVideoPresenter
             IReadOnlyList<TranslatedDrawResources> resources,
             IReadOnlyList<GuestImageResource> traceImages,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)>? retireBuffers = null,
-            IReadOnlyList<TranslatedDrawResources>? referencedResources = null)
+            IReadOnlyList<TranslatedDrawResources>? referencedResources = null,
+            IReadOnlyList<DescriptorPool>? retirePools = null)
         {
             var fence = AcquireGuestFence();
             try
@@ -5042,6 +5065,7 @@ internal static unsafe class VulkanVideoPresenter
                     resources,
                     traceImages,
                     retireBuffers ?? [],
+                    retirePools ?? [],
                     _submitTimeline,
                     resources.Count > 0 ? resources[0].DebugName : "batch",
                     _activeGuestQueue,
@@ -5211,6 +5235,11 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     _vk.DestroyBuffer(_device, buffer, null);
                     _vk.FreeMemory(_device, memory, null);
+                }
+
+                foreach (var pool in submission.RetirePools)
+                {
+                    _vk.DestroyDescriptorPool(_device, pool, null);
                 }
 
                 ReleaseGuestCommandBuffer(submission.CommandBuffer);
@@ -7845,7 +7874,7 @@ internal static unsafe class VulkanVideoPresenter
                 MarkTextureContentCached(key);
                 SharpEmu.HLE.GuestImageWriteTracker.Track(
                     texture.Address,
-                    (ulong)texture.RgbaPixels.Length,
+                    (ulong)(texture.TiledSource?.Length ?? texture.RgbaPixels.Length),
                     CurrentGuestWorkSequenceForDiagnostics,
                     "vulkan.texture-cache");
             }
@@ -8226,6 +8255,10 @@ internal static unsafe class VulkanVideoPresenter
             return (uint)selectedMipLevel;
         }
 
+        private VulkanDetilePass EnsureDetilePass() =>
+            _detilePass ??= new VulkanDetilePass(
+                _vk, _device, _queue, _physicalDevice, _queueFamilyIndex);
+
         private TextureResource CreateTextureResource(GuestDrawTexture texture)
         {
             var width = Math.Max(texture.Width, 1);
@@ -8255,31 +8288,91 @@ internal static unsafe class VulkanVideoPresenter
                     $"dst=0x{texture.DstSelect:X3} " +
                     $"bytes={texture.RgbaPixels.Length} expected={expectedSize}");
             }
-            var pixels = texture.RgbaPixels.Length == (int)(expectedSize * layers)
-                ? texture.RgbaPixels
-                : CreateFallbackTexturePixels(texture.Format, rowLength, height, expectedSize);
-            if (!ReferenceEquals(pixels, texture.RgbaPixels))
+            // The GPU detile pass deswizzles plain 2D and array textures (one
+            // dispatch-Z layer per slice) at 4/8/16 bpp, including block-compressed
+            // formats (element grid = ceil(texels/4), smaller than the texel grid).
+            // Validate against the element grid + bpp from the resolved params, and
+            // require the tiled source to cover every layer's linear extent (tiled
+            // slices are >= the linear size due to whole-block padding).
+            DetileParams? gpuDetileParams = null;
+            byte[]? gpuTiledSource = null;
+            if (_gpuDetileEnabled &&
+                texture.Detile is { } detileCandidate &&
+                texture.TiledSource is { Length: > 0 } tiledCandidate &&
+                VulkanDetilePass.Supports(detileCandidate) &&
+                detileCandidate.ElementsWide > 0 &&
+                detileCandidate.ElementsHigh > 0 &&
+                (long)tiledCandidate.Length >=
+                    (long)detileCandidate.ElementsWide * detileCandidate.ElementsHigh *
+                    detileCandidate.BytesPerElement * layers &&
+                tiledCandidate.Length % (int)(layers * (uint)detileCandidate.BytesPerElement) == 0)
             {
-                layers = 1;
+                gpuDetileParams = detileCandidate;
+                gpuTiledSource = tiledCandidate;
             }
-            if (AddressListContains("SHARPEMU_FORCE_WHITE_TEXTURE_TARGETS", texture.Address))
-            {
-                pixels = pixels.ToArray();
-                pixels.AsSpan().Fill(0xFF);
-                Console.Error.WriteLine(
-                    $"[LOADER][TRACE] vk.texture_force_white addr=0x{texture.Address:X16} " +
-                    $"size={width}x{height} bytes={pixels.Length}");
-            }
-            DumpTextureUpload(texture, pixels, rowLength, width, height);
-            TraceTextureUploadContents(texture, pixels, rowLength, width, height, vkFormat);
-            var uploadPixels = texture.Format == 13
-                ? ExpandRgb32Pixels(pixels)
-                : pixels;
-            var contentFingerprint = ComputeTextureContentFingerprint(pixels);
 
-            var (stagingBuffer, stagingMemory) = CreateTextureStagingBuffer(
-                uploadPixels,
-                $"{TextureDebugName(texture, vkFormat)} staging");
+            VkBuffer stagingBuffer = default;
+            DeviceMemory stagingMemory = default;
+            ulong contentFingerprint;
+            if (gpuTiledSource is { } gpuSource)
+            {
+                // GPU detile: no CPU staging; the compute pass writes the image directly.
+                contentFingerprint = ComputeTextureContentFingerprint(gpuSource);
+            }
+            else
+            {
+                // Safety net: the AGC gate can package a texture as a GPU-detile
+                // candidate (empty RgbaPixels + TiledSource) that this path did
+                // not accept for the GPU compute pass (see the gpuTiledSource
+                // guard above). Detile the raw tiled bytes on the CPU here rather
+                // than letting empty RgbaPixels fall through to a blank fallback
+                // image — otherwise such textures render empty (missing text).
+                var cpuDetiled = texture.RgbaPixels;
+                if (cpuDetiled.Length == 0 &&
+                    layers == 1 &&
+                    texture.TiledSource is { Length: > 0 } fallbackTiled &&
+                    texture.Detile is { } fallbackParams &&
+                    expectedSize > 0 &&
+                    expectedSize <= int.MaxValue)
+                {
+                    var linear = new byte[expectedSize];
+                    if (GnmTiling.TryDetile(
+                            fallbackTiled,
+                            linear,
+                            texture.TileMode,
+                            fallbackParams.ElementsWide,
+                            fallbackParams.ElementsHigh,
+                            fallbackParams.BytesPerElement))
+                    {
+                        cpuDetiled = linear;
+                    }
+                }
+
+                var pixels = cpuDetiled.Length == (int)(expectedSize * layers)
+                    ? cpuDetiled
+                    : CreateFallbackTexturePixels(texture.Format, rowLength, height, expectedSize);
+                if (!ReferenceEquals(pixels, texture.RgbaPixels))
+                {
+                    layers = 1;
+                }
+                if (AddressListContains("SHARPEMU_FORCE_WHITE_TEXTURE_TARGETS", texture.Address))
+                {
+                    pixels = pixels.ToArray();
+                    pixels.AsSpan().Fill(0xFF);
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] vk.texture_force_white addr=0x{texture.Address:X16} " +
+                        $"size={width}x{height} bytes={pixels.Length}");
+                }
+                DumpTextureUpload(texture, pixels, rowLength, width, height);
+                TraceTextureUploadContents(texture, pixels, rowLength, width, height, vkFormat);
+                var uploadPixels = texture.Format == 13
+                    ? ExpandRgb32Pixels(pixels)
+                    : pixels;
+                contentFingerprint = ComputeTextureContentFingerprint(pixels);
+                (stagingBuffer, stagingMemory) = CreateTextureStagingBuffer(
+                    uploadPixels,
+                    $"{TextureDebugName(texture, vkFormat)} staging");
+            }
 
             var supportsMutableUsage = !IsBlockCompressedFormat(vkFormat);
             var supportsAttachmentUsage =
@@ -8341,6 +8434,83 @@ internal static unsafe class VulkanVideoPresenter
             var debugName = TextureDebugName(texture, vkFormat);
             SetDebugName(ObjectType.Image, image.Handle, $"{debugName} image");
             SetDebugName(ObjectType.ImageView, view.Handle, $"{debugName} view");
+
+            // GPU detile: record the deswizzle into the shared batch command buffer
+            // (async — never a blocking submit on the render thread), leaving the
+            // image ShaderReadOnly before the draw that samples it. The transient
+            // buffers + descriptor pool retire with the batch fence. On any failure
+            // fall back to a CPU detile + normal staged upload.
+            var gpuDetiled = false;
+            if (gpuTiledSource is { } detileSource && gpuDetileParams is { } detileParameters)
+            {
+                try
+                {
+                    var detileCommandBuffer = BeginBatchedGuestCommands();
+                    CloseOpenTranslatedRenderPass();
+                    if (EnsureDetilePass().RecordDetile(
+                            detileCommandBuffer,
+                            image,
+                            ImageLayout.Undefined,
+                            width,
+                            height,
+                            layers,
+                            detileSource,
+                            detileParameters,
+                            out var detileTransients))
+                    {
+                        _batchRetireBuffers.AddRange(detileTransients.Buffers);
+                        _batchRetireDescriptorPools.Add(detileTransients.DescriptorPool);
+                        gpuDetiled = true;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] GPU detile failed for addr=0x{texture.Address:X16}, " +
+                        $"falling back to CPU: {exception.Message}");
+                    gpuDetiled = false;
+                }
+
+                if (!gpuDetiled)
+                {
+                    // CPU fallback: the tiled source packs the array slices
+                    // contiguously, so detile each slice into its layer-major
+                    // linear region (single layer degrades to one iteration).
+                    var totalLinear = checked((int)(expectedSize * layers));
+                    var linear = new byte[totalLinear];
+                    var sliceTiledBytes = detileSource.Length / (int)layers;
+                    var sliceLinearBytes = (int)expectedSize;
+                    var detiledAll = true;
+                    for (var layer = 0; layer < layers; layer++)
+                    {
+                        // TryDetile iterates the element grid (for BC, ceil(texels/4)).
+                        if (!GnmTiling.TryDetile(
+                                detileSource.AsSpan(layer * sliceTiledBytes, sliceTiledBytes),
+                                linear.AsSpan(layer * sliceLinearBytes, sliceLinearBytes),
+                                texture.TileMode,
+                                detileParameters.ElementsWide,
+                                detileParameters.ElementsHigh,
+                                detileParameters.BytesPerElement))
+                        {
+                            detiledAll = false;
+                            break;
+                        }
+                    }
+
+                    if (detiledAll)
+                    {
+                        (stagingBuffer, stagingMemory) = CreateTextureStagingBuffer(
+                            linear, $"{TextureDebugName(texture, vkFormat)} staging(cpu-fallback)");
+                    }
+                }
+                else if (_gpuDetileLog && Interlocked.Increment(ref _gpuDetileCount) is 1 or 100 or 1000 or 10000)
+                {
+                    Console.Error.WriteLine(
+                        $"[GPU-DETILE] active: {_gpuDetileCount} texture(s) detiled on GPU " +
+                        $"(latest {width}x{height} mode {texture.TileMode}).");
+                }
+            }
+
             var resource = new TextureResource
             {
                 Address = texture.Address,
@@ -8356,7 +8526,7 @@ internal static unsafe class VulkanVideoPresenter
                 RowLength = rowLength,
                 DstSelect = texture.DstSelect,
                 Layers = layers,
-                NeedsUpload = true,
+                NeedsUpload = !gpuDetiled,
                 OwnsStorage = true,
                 SamplerState = texture.Sampler,
                 CpuContentFingerprint = contentFingerprint,
@@ -8367,6 +8537,7 @@ internal static unsafe class VulkanVideoPresenter
             if (texture.Address != 0 &&
                 !texture.ArrayedView &&
                 layers == 1 &&
+                !gpuDetiled &&
                 !_guestImages.ContainsKey(texture.Address))
             {
                 var guestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType);
@@ -16643,6 +16814,8 @@ internal static unsafe class VulkanVideoPresenter
                 _lastOrderedGuestFlipVersions.Clear();
             }
             DestroySwapchainResources();
+            _detilePass?.Dispose();
+            _detilePass = null;
             if (_device.Handle != 0)
             {
                 if (_pipelineCache.Handle != 0)
