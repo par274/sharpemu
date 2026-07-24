@@ -6128,6 +6128,13 @@ public static partial class AgcExports
                     GpuWaitRegistry.RecordProduced(
                         ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
                 }
+                else if (!wroteData && dataSelection is 1 or 2)
+                {
+                    // See ApplySubmittedReleaseMem: a dropped label write strands
+                    // every waiter on this label permanently.
+                    ReportLabelWriteFailure(
+                        "release_mem_standard", destinationAddress, data, dataSelection);
+                }
 
                 if (tracePacket)
                 {
@@ -6141,6 +6148,33 @@ public static partial class AgcExports
             packetAddress,
             writesGuestMemory ? destinationAddress : 0,
             writesGuestMemory ? writeLength : 0);
+    }
+
+    private static long _labelWriteFailureCount;
+
+    /// <summary>
+    /// Reports a GPU release-label write that could not reach guest memory.
+    /// Rate-limited (first 16, then powers of two) because a wedged queue can
+    /// retry, but never silenced: this is the difference between a diagnosable
+    /// fault and a permanently suspended graphics queue with no explanation.
+    /// </summary>
+    private static void ReportLabelWriteFailure(
+        string packet,
+        ulong destinationAddress,
+        ulong data,
+        uint dataSelection)
+    {
+        var count = Interlocked.Increment(ref _labelWriteFailureCount);
+        if (count > 16 && (count & (count - 1)) != 0)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][ERROR] agc.label_write_failed packet={packet} " +
+            $"dst=0x{destinationAddress:X16} data=0x{data:X16} " +
+            $"data_sel={dataSelection} count={count} — a suspended WAIT_REG_MEM " +
+            $"on this label can no longer be satisfied or deadlock-broken.");
     }
 
     private static (uint Destination, uint DataSelection)
@@ -6202,6 +6236,15 @@ public static partial class AgcExports
                 {
                     GpuWaitRegistry.RecordProduced(
                         ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
+                }
+                else if (!wroteData && dataSelection is 1 or 2)
+                {
+                    // A label write that fails is not a benign miss: this packet
+                    // is the producer a suspended WAIT_REG_MEM is waiting for, and
+                    // RecordProduced above is skipped, so the deadlock breaker has
+                    // no value to replay either. The queue then never resumes.
+                    // Never let that happen quietly.
+                    ReportLabelWriteFailure("release_mem", destinationAddress, data, dataSelection);
                 }
 
                 if (tracePacket)
