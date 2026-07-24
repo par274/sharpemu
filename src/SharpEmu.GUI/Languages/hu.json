@@ -7,8 +7,8 @@
   "Page.GameCount.Other": "{0} játékok",
 
   "Library.SearchWatermark": "Keresés a könyvtárban",
-  "Library.AddFolder": "＋ Mappa hozzáadása",
-  "Library.Rescan": "⟳ Újrakeresés",
+  "Library.AddFolder": "Mappa hozzáadása",
+  "Library.Rescan": "Újrakeresés",
   "Library.OpenFile": "Fájl megnyitása…",
 
   "Library.Context.Launch": "Inditás",
@@ -21,9 +21,14 @@
   "Library.Empty.Hint": "Add meg a játékaidat tartalmazó mappát a kezdáshez.",
   "Library.Empty.SearchTitle": "Nincs találat a elemre",
   "Library.Empty.SearchHint": "A könyvtárban nincs olyan elem, amely egyezne a „{0}” kifejezéssel.",
-  "Library.Empty.AddFolder": "＋ Játékmappa hozzáadása",
+  "Library.Empty.AddFolder": "Játékmappa hozzáadása",
 
   "Library.Loading": "Könyvtár betöltése",
+  "Library.Stat.LastPlayed": "Legutóbb játszva",
+  "Library.Stat.Version": "Verzió",
+  "Library.Stat.Installed": "Telepítve",
+  "Library.Stat.TitleId": "Címazonosító",
+  "Library.Stat.NotPlayed": "Még nem volt elindítva",
 
   "Options.General": "Általános",
   "Options.Env.Tab": "Környezet",
@@ -37,6 +42,7 @@
   "Options.Env.LogNp.Desc": "Az NP (PlayStation Network) könyvtárhívásokat naplózza a konzolra.",
   "Options.Section.Emulation": "EMULÁCIÓ",
   "Options.Section.Logging": "LOGOLÁS",
+  "Options.Logging": "Logolás",
   "Options.Section.Launcher": "INDITÓ",
 
   "Options.CpuEngine.Label": "CPU motor",
@@ -79,6 +85,7 @@
 
   "Common.On": "Be",
   "Common.Off": "Ki",
+  "Common.Override": "Felülírás",
 
   "Console.Title": "KONZOL",
   "Console.SearchWatermark": "Keresés...",
@@ -91,9 +98,9 @@
   "Launch.NoGameSelected": "Nincs játék kiválasztva",
   "Launch.NoGameHint": "Válassz egy játékot a könyvtárból, vagy nyiss meg közvetlenül egy eboot.bin fájlt.",
   "Launch.Idle": "Tétlen",
-  "Launch.Console": "≡ Konzol",
-  "Launch.Launch": "▶  Inditás",
-  "Launch.Stop": "■  Leállítás",
+  "Launch.Console": "Konzol",
+  "Launch.Launch": "Inditás",
+  "Launch.Stop": "Leállítás",
   "Launch.Running": "Fut — {0}",
   "Launch.Stopping": "Leállítás…",
   "Launch.Exited": "Kilépett a következő kóddal: {0} ({1})",
@@ -149,7 +156,11 @@
   "Options.Env.LogIo.Desc": "A fájlmegnyitások, olvasások és útvonal-feloldások naplózása a konzolra.\nAkkor használd, ha egy játék indításkor nem találja az adatfájljait.",
   "Common.Save": "Mentés",
   "Common.Cancel": "Mégse",
+  "Common.Back": "Vissza",
   "PerGame.Title": "Játékonkénti beállítások — {0} ({1})",
+  "PerGame.Heading": "JÁTÉKBEÁLLÍTÁSOK",
+  "PerGame.Overrides": "JÁTÉKSPECIFIKUS FELÜLÍRÁSOK",
+  "PerGame.ApplyHint": "A módosítások a játék következő indításakor lépnek életbe.",
   "PerGame.InheritNote": "A be nem jelölt sorok a globális alapértelmezéseket öröklik.",
   "PerGame.EnvToggles.Label": "Környezeti kapcsolók",
   "PerGame.EnvToggles.Desc": "A globális SHARPEMU_* kapcsolókészlet felülírása ennél a játéknál.",

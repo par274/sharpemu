@@ -7,8 +7,8 @@
   "Page.GameCount.Other": "{0} games",
 
   "Library.SearchWatermark": "Search library…",
-  "Library.AddFolder": "＋ Add folder",
-  "Library.Rescan": "⟳ Rescan",
+  "Library.AddFolder": "Add folder",
+  "Library.Rescan": "Rescan",
   "Library.OpenFile": "Open file…",
 
   "Library.Context.Launch": "Launch",
@@ -22,9 +22,14 @@
   "Library.Empty.Hint": "Add a folder containing your games to get started.",
   "Library.Empty.SearchTitle": "No games match your search",
   "Library.Empty.SearchHint": "Nothing in the library matches “{0}”.",
-  "Library.Empty.AddFolder": "＋ Add game folder",
+  "Library.Empty.AddFolder": "Add game folder",
 
   "Library.Loading": "Loading library…",
+  "Library.Stat.LastPlayed": "Last played",
+  "Library.Stat.Version": "Version",
+  "Library.Stat.Installed": "Installed",
+  "Library.Stat.TitleId": "Title ID",
+  "Library.Stat.NotPlayed": "Not played yet",
 
   "Options.General": "General",
   "Options.Graphics": "Graphics",
@@ -41,6 +46,7 @@
   "Options.Env.LogNp.Desc": "Log NP (PlayStation Network) library calls to the console.",
   "Options.Section.Emulation": "EMULATION",
   "Options.Section.Logging": "LOGGING",
+  "Options.Logging": "Logging",
   "Options.Section.Launcher": "LAUNCHER",
 
   "Options.CpuEngine.Label": "CPU engine",
@@ -87,10 +93,15 @@
 
   "Common.On": "On",
   "Common.Off": "Off",
+  "Common.Override": "Override",
   "Common.Save": "Save",
   "Common.Cancel": "Cancel",
+  "Common.Back": "Back",
 
   "PerGame.Title": "Per-game settings — {0} ({1})",
+  "PerGame.Heading": "GAME SETTINGS",
+  "PerGame.Overrides": "GAME OVERRIDES",
+  "PerGame.ApplyHint": "Changes apply the next time this game is launched.",
   "PerGame.InheritNote": "Unchecked rows inherit the global defaults.",
   "PerGame.EnvToggles.Label": "Environment toggles",
   "PerGame.EnvToggles.Desc": "Override the global set of SHARPEMU_* switches for this game.",
@@ -106,9 +117,9 @@
   "Launch.NoGameSelected": "No game selected",
   "Launch.NoGameHint": "Pick a game from the library, or open an eboot.bin directly.",
   "Launch.Idle": "Idle",
-  "Launch.Console": "≡ Console",
-  "Launch.Launch": "▶  Launch",
-  "Launch.Stop": "■  Stop",
+  "Launch.Console": "Console",
+  "Launch.Launch": "Launch",
+  "Launch.Stop": "Stop",
   "Launch.Running": "Running — {0}",
   "Launch.Stopping": "Stopping…",
   "Launch.Exited": "Exited with code {0} ({1})",

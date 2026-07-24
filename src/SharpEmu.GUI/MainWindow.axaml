@@ -10,223 +10,730 @@ SPDX-License-Identifier: GPL-2.0-or-later
         xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         x:Class="SharpEmu.GUI.MainWindow"
         Title="SharpEmu"
-        Width="1280" Height="820"
-        MinWidth="980" MinHeight="640"
+        Width="1440"
+        Height="900"
+        MinWidth="980"
+        MinHeight="640"
         WindowState="Maximized"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgBrush}"
         ExtendClientAreaToDecorationsHint="True"
-        WindowDecorations="Full"
-        ExtendClientAreaTitleBarHeightHint="44"
+        WindowDecorations="None"
+        ExtendClientAreaTitleBarHeightHint="92"
         Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
         KeyDown="OnKeyDown">
 
-  <Grid x:Name="RootLayout" RowDefinitions="Auto,*,Auto">
-
-    <!-- Selected-game backdrop: key art behind the main content, dimmed by
-         a scrim so tiles and text stay readable. Fades on selection. -->
-    <Panel Grid.Row="1" ClipToBounds="True">
-      <Image x:Name="BackdropImage" Stretch="UniformToFill" Opacity="0"
-             HorizontalAlignment="Center" VerticalAlignment="Center">
-        <Image.Transitions>
+  <Grid x:Name="RootLayout" RowDefinitions="92,*,0" Background="#080B12">
+    <Grid x:Name="MainContent" Grid.Row="0" Grid.RowSpan="2">
+      <!-- Key art and the same three-layer atmosphere used by the WebUI. -->
+      <Grid x:Name="BackdropLayer"
+            Classes="backdropLayer"
+            RenderTransformOrigin="50%,50%">
+        <Grid.Transitions>
           <Transitions>
-            <DoubleTransition Property="Opacity" Duration="0:0:0.35" />
+            <TransformOperationsTransition Property="RenderTransform"
+                                           Duration="0:0:0.46"
+                                           Easing="CubicEaseOut" />
           </Transitions>
-        </Image.Transitions>
-      </Image>
-      <Border>
-        <Border.Background>
-          <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
-            <GradientStop Offset="0" Color="#730D1017" />
-            <GradientStop Offset="0.55" Color="#BF0D1017" />
-            <GradientStop Offset="1" Color="#EB0D1017" />
-          </LinearGradientBrush>
-        </Border.Background>
-      </Border>
-    </Panel>
-
-    <!-- Title bar; hidden in fullscreen (F11) along with the status bar, so
-         the game gets the whole screen. -->
-    <Grid x:Name="TitleBar" Grid.Row="0" Height="44" Background="{StaticResource ChromeBrush}">
-      <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
-        <Image Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico" Width="20" Height="20"
-               RenderOptions.BitmapInterpolationMode="HighQuality" />
-        <TextBlock Text="SharpEmu" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
-        <Border Classes="pill">
-          <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+        </Grid.Transitions>
+        <Image x:Name="BackdropImage"
+               Stretch="UniformToFill"
+               Opacity="0"
+               HorizontalAlignment="Center"
+               VerticalAlignment="Center">
+          <Image.Transitions>
+            <Transitions>
+              <DoubleTransition Property="Opacity" Duration="0:0:0.46" />
+            </Transitions>
+          </Image.Transitions>
+        </Image>
+        <Grid ColumnDefinitions="32*,68*" IsHitTestVisible="False">
+          <Image x:Name="CoverFallbackImage"
+                 Grid.Column="1"
+                 Stretch="Uniform"
+                 Opacity="0"
+                 HorizontalAlignment="Right"
+                 VerticalAlignment="Center">
+            <Image.Transitions>
+              <Transitions>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.46" />
+              </Transitions>
+            </Image.Transitions>
+          </Image>
+        </Grid>
+        <Border Background="#6B03060C" />
+        <Border>
+          <Border.Background>
+            <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+              <GradientStop Offset="0" Color="#EB05080F" />
+              <GradientStop Offset="0.30" Color="#A605080F" />
+              <GradientStop Offset="0.58" Color="#1F05080F" />
+              <GradientStop Offset="1" Color="#0F05080F" />
+            </LinearGradientBrush>
+          </Border.Background>
         </Border>
-      </StackPanel>
-    </Grid>
-
-    <!-- Main content -->
-    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto,Auto">
-
-      <!-- The game owns the full client area while running. Session controls
-           use a native popup so they can stay above this native child surface. -->
-      <Border x:Name="GameView" Grid.Row="0" Grid.RowSpan="4" IsVisible="False" Background="#000000" ClipToBounds="True">
-        <Grid x:Name="GameSurfaceContainer" />
-      </Border>
-
-      <!-- Library / Options page switcher, with the library toolbar sharing
-           the same row on the right. Plain buttons (not TabItem) so there is
-           no underline; LB/RB hint chips flank the pair and the gamepad's
-           shoulder buttons actually switch pages from anywhere. -->
-      <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,20">
-        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-          <Border Classes="padHint" VerticalAlignment="Center">
-            <TextBlock Text="LB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
-          </Border>
-          <Button x:Name="LibraryTabButton" Classes="segment active"
-                  Content="{Binding [Page.Library], Source={x:Static loc:Localization.Instance}}" />
-          <Button x:Name="OptionsTabButton" Classes="segment"
-                  Content="{Binding [Page.Options], Source={x:Static loc:Localization.Instance}}" />
-          <Border Classes="padHint" VerticalAlignment="Center">
-            <TextBlock Text="RB" FontSize="11" FontWeight="Bold" Foreground="{StaticResource MutedBrush}" />
-          </Border>
-        </StackPanel>
-
-        <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
-                    VerticalAlignment="Center">
-          <TextBox x:Name="SearchBox" PlaceholderText="Search library…" Width="240" VerticalAlignment="Center" />
-          <Button x:Name="AddFolderButton" Classes="ghost"
-                  Content="{Binding [Library.AddFolder], Source={x:Static loc:Localization.Instance}}"
-                  VerticalAlignment="Center" />
-          <Button x:Name="RescanButton" Classes="ghost"
-                  Content="{Binding [Library.Rescan], Source={x:Static loc:Localization.Instance}}"
-                  VerticalAlignment="Center" />
-          <Button x:Name="OpenFileButton" Classes="ghost"
-                  Content="{Binding [Library.OpenFile], Source={x:Static loc:Localization.Instance}}"
-                  VerticalAlignment="Center" />
-        </StackPanel>
+        <Border>
+          <Border.Background>
+            <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
+              <GradientStop Offset="0" Color="#FF060912" />
+              <GradientStop Offset="0.18" Color="#C7060912" />
+              <GradientStop Offset="0.58" Color="#0F060912" />
+              <GradientStop Offset="1" Color="#33060912" />
+            </LinearGradientBrush>
+          </Border.Background>
+        </Border>
       </Grid>
 
-      <Panel Grid.Row="1" x:Name="PagesHost">
-
-        <!-- Library page. The tile row gets extra top margin so it sits
-             closer to eye level (PS5 home-screen style) instead of hugging
-             the Library/Options switcher above it. -->
-        <Panel x:Name="LibraryPage" Margin="0,64,0,0">
-          <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
-                   SelectionMode="Single" Padding="0">
+      <Panel x:Name="PagesHost">
+        <!-- Library: horizontal cover rail, then selected-game details. -->
+        <Grid x:Name="LibraryPage" RowDefinitions="136,270,*,72">
+          <Panel x:Name="CarouselHost"
+                 Classes="carouselHost"
+                 Grid.Row="1"
+                 RenderTransformOrigin="50%,50%">
+            <Panel.Transitions>
+              <Transitions>
+                <TransformOperationsTransition Property="RenderTransform"
+                                               Duration="0:0:0.32"
+                                               Easing="CubicEaseOut" />
+                <DoubleTransition Property="Opacity"
+                                  Duration="0:0:0.18"
+                                  Easing="CubicEaseOut" />
+              </Transitions>
+            </Panel.Transitions>
+            <ListBox x:Name="GameList"
+                     Classes="tileGrid"
+                     SelectionMode="Single"
+                     Padding="64,0,64,0">
             <ListBox.ContextMenu>
               <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
                 <MenuItem x:Name="CtxLaunch" Header="Launch" FontWeight="SemiBold">
                   <MenuItem.Icon>
-                    <TextBlock Text="▶" FontSize="11" Foreground="{StaticResource AccentHoverBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="play_arrow" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem x:Name="CtxGameSettings" Header="Game settings…">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="settings" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxOpenFolder" Header="Open game folder">
                   <MenuItem.Icon>
-                    <TextBlock Text="📂" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="folder_open" />
                   </MenuItem.Icon>
                 </MenuItem>
-                <Separator />
                 <MenuItem x:Name="CtxCopyPath" Header="Copy path">
                   <MenuItem.Icon>
-                    <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="content_copy" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxCopyTitleId" Header="Copy title ID">
                   <MenuItem.Icon>
-                    <TextBlock Text="⧉" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="content_copy" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <Separator />
-                <MenuItem x:Name="CtxGameSettings" Header="Game settings…">
-                  <MenuItem.Icon>
-                    <TextBlock Text="⚙" FontSize="13" Foreground="{StaticResource MutedBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
-                  </MenuItem.Icon>
-                </MenuItem>
-                <Separator />
-                <MenuItem x:Name="CtxRemove" Header="Remove from library"
+                <MenuItem x:Name="CtxRemove"
+                          Header="Remove from library"
                           Foreground="{StaticResource DangerHoverBrush}">
                   <MenuItem.Icon>
-                    <TextBlock Text="✕" FontSize="12" Foreground="{StaticResource DangerHoverBrush}"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <TextBlock Classes="materialSymbol compact" Text="delete" />
                   </MenuItem.Icon>
                 </MenuItem>
               </ContextMenu>
             </ListBox.ContextMenu>
             <ListBox.ItemsPanel>
               <ItemsPanelTemplate>
-                <WrapPanel />
+                <StackPanel Orientation="Horizontal" />
               </ItemsPanelTemplate>
             </ListBox.ItemsPanel>
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="local:GameEntry">
-                <StackPanel Width="128" Height="172" Spacing="7">
-                  <Border Classes="coverShadow" Width="128" Height="128">
-                    <Border Classes="coverClip">
-                      <Panel>
-                        <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
-                          <TextBlock Text="{Binding Initials}" FontSize="36" FontWeight="Bold"
-                                     Foreground="#E8ECF4" Opacity="0.85"
-                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                        <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
-                      </Panel>
-                    </Border>
+                <Border Classes="coverShadow" Width="148" Height="198" CornerRadius="7">
+                  <Border Classes="coverClip">
+                    <Panel>
+                      <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
+                        <TextBlock Text="{Binding Initials}"
+                                   FontSize="38"
+                                   FontWeight="Light"
+                                   LetterSpacing="-2"
+                                   Foreground="#7AFFFFFF"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                      </Border>
+                      <Image Source="{Binding Cover}"
+                             Stretch="UniformToFill"
+                             IsVisible="{Binding HasCover}" />
+                    </Panel>
                   </Border>
-                  <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold"
-                             TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"
-                             TextAlignment="Center" HorizontalAlignment="Center" />
-                </StackPanel>
+                </Border>
               </DataTemplate>
             </ListBox.ItemTemplate>
-          </ListBox>
+            </ListBox>
+          </Panel>
 
-          <!-- Empty state -->
-          <StackPanel x:Name="EmptyState" Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+          <Grid Grid.Row="2" Margin="64,0,64,0" ColumnDefinitions="*,Auto">
+            <StackPanel x:Name="SelectedDetailsHost"
+                        Classes="selectedDetailsHost"
+                        VerticalAlignment="Top"
+                        MaxWidth="980"
+                        HorizontalAlignment="Left">
+              <StackPanel.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity" Duration="0:0:0.16" />
+                  <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" />
+                </Transitions>
+              </StackPanel.Transitions>
+              <TextBlock x:Name="SelectedGameTitle"
+                         Text="No game selected"
+                         FontSize="52"
+                         FontWeight="SemiBold"
+                         LetterSpacing="-2"
+                         LineHeight="74"
+                         Margin="0,0,0,5"
+                         TextWrapping="Wrap"
+                         TextTrimming="CharacterEllipsis" />
+
+              <StackPanel x:Name="SelectedBadgesRow"
+                          x:DataType="local:GameEntry"
+                          Orientation="Horizontal"
+                          Spacing="54"
+                          Margin="0,28,0,0"
+                          IsVisible="False">
+                <StackPanel Spacing="6">
+                  <TextBlock x:Name="LastPlayedLabel" Classes="gameStatLabel" Text="Last played" />
+                  <TextBlock x:Name="LastPlayedValue" Classes="gameStatValue" Text="Not played yet" />
+                </StackPanel>
+                <StackPanel Spacing="6" IsVisible="{Binding HasVersion, FallbackValue=False}">
+                  <TextBlock x:Name="VersionLabel" Classes="gameStatLabel" Text="Version" />
+                  <TextBlock Classes="gameStatValue" Text="{Binding VersionText}" />
+                </StackPanel>
+                <StackPanel Spacing="6">
+                  <TextBlock x:Name="InstalledLabel" Classes="gameStatLabel" Text="Installed" />
+                  <TextBlock Classes="gameStatValue" Text="{Binding SizeText}" />
+                </StackPanel>
+                <StackPanel Spacing="6" IsVisible="{Binding HasTitleId, FallbackValue=False}">
+                  <TextBlock x:Name="TitleIdLabel" Classes="gameStatLabel" Text="Title ID" />
+                  <TextBlock Text="{Binding TitleId}"
+                             Classes="gameStatValue"
+                             LetterSpacing="0.5" />
+                </StackPanel>
+              </StackPanel>
+
+              <!-- Kept as native state holders for the existing launcher logic. -->
+              <Panel x:Name="SelectedCoverPanel"
+                     x:DataType="local:GameEntry"
+                     Width="0"
+                     Height="0"
+                     IsVisible="False" />
+              <TextBlock x:Name="SelectedGamePath"
+                         Text="Pick a game from the library."
+                         IsVisible="False" />
+            </StackPanel>
+          </Grid>
+
+          <Grid x:Name="LaunchBar"
+                Classes="launchBar"
+                Grid.Row="3"
+                Margin="64,0,64,22"
+                ColumnDefinitions="Auto,Auto,Auto,*,Auto">
+            <Grid.Transitions>
+              <Transitions>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.18" />
+                <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.22" />
+              </Transitions>
+            </Grid.Transitions>
+            <Button x:Name="LaunchButton"
+                    Grid.Column="0"
+                    Classes="accent"
+                    IsEnabled="False">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="materialSymbol" Text="play_arrow" />
+                <TextBlock x:Name="LaunchButtonLabel" Text="Play" VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
+            <Button x:Name="StopButton"
+                    Grid.Column="1"
+                    Classes="danger"
+                    Margin="10,0,0,0"
+                    IsEnabled="False">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="materialSymbol" Text="stop" />
+                <TextBlock x:Name="StopButtonLabel" Text="Stop" VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
+            <Button x:Name="AddFolderButton"
+                    Grid.Column="2"
+                    Classes="ghost"
+                    Margin="10,0,0,0">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="materialSymbol" Text="create_new_folder" />
+                <TextBlock x:Name="AddFolderButtonLabel" Text="Add game" VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
+            <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="18" VerticalAlignment="Center">
+              <Button x:Name="OpenFileButton" Classes="ghost">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Classes="materialSymbol" Text="file_open" />
+                  <TextBlock x:Name="OpenFileButtonLabel" Text="Open file" VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+              <Button x:Name="RescanButton" Classes="ghost">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Classes="materialSymbol" Text="refresh" />
+                  <TextBlock x:Name="RescanButtonLabel" Text="Rescan" VerticalAlignment="Center" />
+                </StackPanel>
+              </Button>
+              <ToggleButton x:Name="ConsoleToggle" Classes="ghost">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock x:Name="ConsoleToggleLabel" Text="Options" VerticalAlignment="Center" />
+                  <TextBlock Classes="materialSymbol" Text="more_vert" />
+                </StackPanel>
+              </ToggleButton>
+            </StackPanel>
+          </Grid>
+
+          <StackPanel x:Name="EmptyState"
+                      Grid.RowSpan="4"
+                      Spacing="12"
+                      HorizontalAlignment="Center"
+                      VerticalAlignment="Center"
                       IsVisible="False">
-            <TextBlock Text="🎮" FontSize="44" HorizontalAlignment="Center" Opacity="0.7" />
-            <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="18" FontWeight="SemiBold"
+            <TextBlock Text="YOUR PLAYGROUND AWAITS"
+                       Classes="sectionTitle"
+                       HorizontalAlignment="Center"
+                       LetterSpacing="2.4" />
+            <TextBlock x:Name="EmptyStateTitle"
+                       Text="Your library is empty"
+                       FontSize="66"
+                       FontWeight="SemiBold"
+                       LetterSpacing="-3"
                        HorizontalAlignment="Center" />
-            <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
-                       FontSize="13" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
-            <Button x:Name="EmptyAddFolderButton" Classes="accent" Content="＋ Add game folder"
-                    HorizontalAlignment="Center" Margin="0,8,0,0" />
+            <TextBlock x:Name="EmptyStateHint"
+                       Text="Add a folder containing your games to get started."
+                       FontSize="14"
+                       Foreground="{StaticResource MutedBrush}"
+                       HorizontalAlignment="Center" />
+            <Button x:Name="EmptyAddFolderButton"
+                    Classes="accent"
+                    HorizontalAlignment="Center"
+                    Margin="0,16,0,0">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="materialSymbol" Text="create_new_folder" />
+                <TextBlock x:Name="EmptyAddFolderButtonLabel"
+                           Text="Add game folder"
+                           VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
           </StackPanel>
 
-          <!-- Loading state: covers the grid while a scan (initial load,
-               rescan, or a just-added folder) is in flight, so the screen
-               never looks blank mid-scan. -->
-          <StackPanel x:Name="LoadingState" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center"
+          <StackPanel x:Name="LoadingState"
+                      Grid.RowSpan="4"
+                      Spacing="22"
+                      HorizontalAlignment="Center"
+                      VerticalAlignment="Center"
                       IsVisible="False">
-            <ProgressBar IsIndeterminate="True" Width="180" Height="3" />
-            <TextBlock x:Name="LoadingStateText" Text="Loading library…" FontSize="13"
-                       Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
+            <ProgressBar IsIndeterminate="True" Width="46" Height="3" />
+            <TextBlock Text="SHARPEMU"
+                       FontSize="13"
+                       FontWeight="Bold"
+                       LetterSpacing="3"
+                       HorizontalAlignment="Center" />
+            <TextBlock x:Name="LoadingStateText"
+                       Text="Loading library…"
+                       FontSize="12"
+                       Foreground="{StaticResource MutedBrush}"
+                       HorizontalAlignment="Center" />
           </StackPanel>
-        </Panel>
 
-        <!-- Options page: sub-tabs so future categories (Graphics, …) slot
-             in next to General. Card-grouped sections match the visual
-             language used by the console panel and launch bar below. -->
-        <Grid x:Name="OptionsPage" IsVisible="False">
-          <TabControl>
-            <TabItem x:Name="GeneralTabItem" Header="General" FontSize="15">
-              <ScrollViewer>
-                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
+          <!-- Contextual per-game settings. The panel stays in the visual tree
+               so the reveal and dismissal can animate without a second window. -->
+          <Grid x:Name="GameOptionsOverlay"
+                Classes="gameOptionsOverlay"
+                Grid.RowSpan="4"
+                RowDefinitions="2*,3*"
+                IsHitTestVisible="False">
+            <Grid.Transitions>
+              <Transitions>
+                <DoubleTransition Property="Opacity"
+                                  Duration="0:0:0.2"
+                                  Easing="CubicEaseOut" />
+                <TransformOperationsTransition Property="RenderTransform"
+                                               Duration="0:0:0.38"
+                                               Easing="CubicEaseOut" />
+              </Transitions>
+            </Grid.Transitions>
 
-                  <Border Classes="card">
+            <Border Grid.Row="1"
+                    Width="180"
+                    Height="242"
+                    Margin="84,-96,0,0"
+                    ZIndex="2"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Top"
+                    BoxShadow="0 26 54 0 #D1000000"
+                    x:DataType="local:GameEntry">
+              <Border Classes="coverClip"
+                      Background="{Binding PlaceholderBrush}">
+                <Panel>
+                  <TextBlock Text="{Binding Initials}"
+                             FontSize="28"
+                             FontWeight="Medium"
+                             Foreground="#A6FFFFFF"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center"
+                             IsVisible="{Binding !HasCover}" />
+                  <Image Source="{Binding Cover}"
+                         Stretch="UniformToFill"
+                         IsVisible="{Binding HasCover}" />
+                </Panel>
+              </Border>
+            </Border>
+
+            <Border Grid.Row="1"
+                    Background="Transparent">
+              <Grid RowDefinitions="Auto,*">
+                <Border Grid.Row="1"
+                        Background="{StaticResource GameOptionsMenuBrush}" />
+                <Border Grid.Row="1"
+                        Height="1"
+                        ZIndex="1"
+                        IsHitTestVisible="False"
+                        VerticalAlignment="Top"
+                        BoxShadow="0 18 42 0 #A6000000" />
+
+                <Border Padding="300,18,64,14">
+                  <Grid x:Name="GameOptionsIdentity"
+                        x:DataType="local:GameEntry"
+                        ColumnDefinitions="*,Auto"
+                        ColumnSpacing="34">
+                    <StackPanel Spacing="3" VerticalAlignment="Center">
+                      <TextBlock Text="{Binding Name}"
+                                 FontSize="42"
+                                 FontWeight="SemiBold"
+                                 LineHeight="54"
+                                 TextTrimming="CharacterEllipsis" />
+                      <TextBlock Text="{Binding Path}"
+                                 MaxWidth="680"
+                                 HorizontalAlignment="Left"
+                                 FontSize="11"
+                                 Foreground="#99FFFFFF"
+                                 TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="34"
+                                VerticalAlignment="Center">
+                      <StackPanel Spacing="4">
+                        <TextBlock x:Name="GameOptionsLastPlayedLabel"
+                                   Classes="gameStatLabel"
+                                   Text="Last played" />
+                        <TextBlock x:Name="GameOptionsLastPlayedValue"
+                                   Classes="gameStatValue"
+                                   FontSize="15"
+                                   Text="Not played yet" />
+                      </StackPanel>
+                      <StackPanel Spacing="4" IsVisible="{Binding HasVersion}">
+                        <TextBlock x:Name="GameOptionsVersionLabel"
+                                   Classes="gameStatLabel"
+                                   Text="Version" />
+                        <TextBlock Classes="gameStatValue"
+                                   FontSize="15"
+                                   Text="{Binding VersionText}" />
+                      </StackPanel>
+                      <StackPanel Spacing="4">
+                        <TextBlock x:Name="GameOptionsInstalledLabel"
+                                   Classes="gameStatLabel"
+                                   Text="Installed" />
+                        <TextBlock Classes="gameStatValue"
+                                   FontSize="15"
+                                   Text="{Binding SizeText}" />
+                      </StackPanel>
+                      <StackPanel Spacing="4" IsVisible="{Binding HasTitleId}">
+                        <TextBlock x:Name="GameOptionsTitleIdLabel"
+                                   Classes="gameStatLabel"
+                                   Text="Title ID" />
+                        <TextBlock Classes="gameStatValue"
+                                   FontSize="15"
+                                   Text="{Binding TitleId}" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+
+                <Grid Grid.Row="1"
+                      Margin="64,12,64,8"
+                      ColumnDefinitions="220,*"
+                      ColumnSpacing="54">
+                  <StackPanel Margin="0,62,0,0" Spacing="12">
+                    <Button x:Name="GameOptionsLaunchButton"
+                            Classes="gameOptionsLaunch">
+                      <TextBlock x:Name="GameOptionsLaunchLabel"
+                                 Classes="gameOptionsLaunchLabel"
+                                 VerticalAlignment="Center"
+                                 Text="Launch" />
+                    </Button>
+
+                    <Grid x:Name="GameOptionsNavHost"
+                          Background="Transparent"
+                          VerticalAlignment="Top">
+                      <Border x:Name="GameOptionsNavIndicator"
+                              Classes="gameOptionsNavIndicator"
+                              Height="46"
+                              IsHitTestVisible="False"
+                              VerticalAlignment="Top"
+                              BorderBrush="White"
+                              BorderThickness="2"
+                              CornerRadius="8">
+                        <Border.RenderTransform>
+                          <TranslateTransform>
+                            <TranslateTransform.Transitions>
+                              <Transitions>
+                                <DoubleTransition Property="Y"
+                                                  Duration="0:0:0.12"
+                                                  Easing="CubicEaseOut" />
+                              </Transitions>
+                            </TranslateTransform.Transitions>
+                          </TranslateTransform>
+                        </Border.RenderTransform>
+                      </Border>
+
+                      <StackPanel Spacing="7">
+                        <Button x:Name="GameOptionsGeneralNav"
+                                Classes="gameOptionsNav active">
+                          <StackPanel Orientation="Horizontal" Spacing="12">
+                            <TextBlock Classes="materialSymbol" Text="tune" />
+                            <TextBlock x:Name="GameOptionsGeneralNavLabel"
+                                       Classes="gameOptionsNavLabel"
+                                       VerticalAlignment="Center"
+                                       Text="General" />
+                          </StackPanel>
+                        </Button>
+                        <Button x:Name="GameOptionsLoggingNav"
+                                Classes="gameOptionsNav">
+                          <StackPanel Orientation="Horizontal" Spacing="12">
+                            <TextBlock Classes="materialSymbol" Text="terminal" />
+                            <TextBlock x:Name="GameOptionsLoggingNavLabel"
+                                       Classes="gameOptionsNavLabel"
+                                       VerticalAlignment="Center"
+                                       Text="Logging" />
+                          </StackPanel>
+                        </Button>
+                        <Button x:Name="GameOptionsEnvironmentNav"
+                                Classes="gameOptionsNav">
+                          <StackPanel Orientation="Horizontal" Spacing="12">
+                            <TextBlock Classes="materialSymbol" Text="deployed_code" />
+                            <TextBlock x:Name="GameOptionsEnvironmentNavLabel"
+                                       Classes="gameOptionsNavLabel"
+                                       VerticalAlignment="Center"
+                                       Text="Environment" />
+                          </StackPanel>
+                        </Button>
+                        <Button x:Name="GameOptionsBackNav"
+                                Classes="gameOptionsNav">
+                          <StackPanel Orientation="Horizontal" Spacing="12">
+                            <TextBlock Classes="materialSymbol" Text="arrow_back" />
+                            <TextBlock x:Name="GameOptionsBackNavLabel"
+                                       Classes="gameOptionsNavLabel"
+                                       VerticalAlignment="Center"
+                                       Text="Back" />
+                          </StackPanel>
+                        </Button>
+                      </StackPanel>
+                    </Grid>
+                  </StackPanel>
+
+                  <Grid Grid.Column="1">
+                    <ScrollViewer x:Name="GameOptionsGeneralPanel"
+                                  HorizontalScrollBarVisibility="Disabled">
+                      <StackPanel Spacing="12">
+                        <local:SettingRow x:Name="GameStrictRow"
+                                          Label="Strict dynlib resolution"
+                                          Description="Fail the launch when an imported symbol cannot be resolved.">
+                          <ToggleSwitch x:Name="GameStrictToggle" />
+                        </local:SettingRow>
+
+                        <WrapPanel Margin="0,12,0,0"
+                                   ItemWidth="260"
+                                   ItemHeight="54"
+                                   Orientation="Horizontal">
+                          <Button x:Name="GameOptionsOpenFolderButton"
+                                  Classes="gameAction"
+                                  Margin="0,0,10,10">
+                            <StackPanel Orientation="Horizontal" Spacing="11">
+                              <TextBlock Classes="materialSymbol" Text="folder_open" />
+                              <TextBlock x:Name="GameOptionsOpenFolderLabel"
+                                         VerticalAlignment="Center"
+                                         Text="Open game folder" />
+                            </StackPanel>
+                          </Button>
+                          <Button x:Name="GameOptionsCopyPathButton"
+                                  Classes="gameAction"
+                                  Margin="0,0,10,10">
+                            <StackPanel Orientation="Horizontal" Spacing="11">
+                              <TextBlock Classes="materialSymbol" Text="content_copy" />
+                              <TextBlock x:Name="GameOptionsCopyPathLabel"
+                                         VerticalAlignment="Center"
+                                         Text="Copy path" />
+                            </StackPanel>
+                          </Button>
+                          <Button x:Name="GameOptionsCopyTitleIdButton"
+                                  Classes="gameAction"
+                                  Margin="0,0,10,10">
+                            <StackPanel Orientation="Horizontal" Spacing="11">
+                              <TextBlock Classes="materialSymbol" Text="tag" />
+                              <TextBlock x:Name="GameOptionsCopyTitleIdLabel"
+                                         VerticalAlignment="Center"
+                                         Text="Copy title ID" />
+                            </StackPanel>
+                          </Button>
+                          <Button x:Name="GameOptionsRemoveButton"
+                                  Classes="gameAction dangerAction"
+                                  Margin="0,0,10,10">
+                            <StackPanel Orientation="Horizontal" Spacing="11">
+                              <TextBlock Classes="materialSymbol" Text="delete" />
+                              <TextBlock x:Name="GameOptionsRemoveLabel"
+                                         VerticalAlignment="Center"
+                                         Text="Remove from library" />
+                            </StackPanel>
+                          </Button>
+                        </WrapPanel>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="GameOptionsLoggingPanel"
+                                  IsVisible="False"
+                                  HorizontalScrollBarVisibility="Disabled">
+                      <StackPanel Spacing="12">
+                        <local:SettingRow x:Name="GameLogLevelRow"
+                                          Label="Log level"
+                                          Description="Verbosity of the emulator console output.">
+                          <ComboBox x:Name="GameLogLevelBox" Width="170" />
+                        </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameTraceRow"
+                                          Label="Import trace limit"
+                                          Description="Trace the first N imports per module.">
+                          <NumericUpDown x:Name="GameTraceBox"
+                                         Width="170"
+                                         Minimum="0"
+                                         Maximum="4096"
+                                         Increment="16"
+                                         FormatString="0" />
+                        </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameLogToFileRow"
+                                          Label="Log to file"
+                                          Description="Mirror emulator output to a log file.">
+                          <ToggleSwitch x:Name="GameLogToFileToggle" />
+                        </local:SettingRow>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="GameOptionsEnvironmentPanel"
+                                  IsVisible="False"
+                                  HorizontalScrollBarVisibility="Disabled">
+                      <StackPanel Spacing="12">
+                        <TextBlock x:Name="GameOptionsEnvironmentDescription"
+                                   MaxWidth="760"
+                                   HorizontalAlignment="Left"
+                                   FontSize="11"
+                                   Foreground="{StaticResource MutedBrush}"
+                                   Text="Environment switches passed to the emulator for this game."
+                                   TextWrapping="Wrap" />
+
+                        <Grid x:Name="GameEnvironmentList"
+                              Margin="0,8,0,0"
+                              ColumnDefinitions="*,*"
+                              RowDefinitions="Auto,Auto,Auto,Auto"
+                              ColumnSpacing="24"
+                              RowSpacing="8">
+                          <ToggleSwitch x:Name="GameEnvBthidToggle"
+                                        Grid.Row="0"
+                                        OnContent="SHARPEMU_BTHID_UNAVAILABLE"
+                                        OffContent="SHARPEMU_BTHID_UNAVAILABLE" />
+                          <ToggleSwitch x:Name="GameEnvLoopGuardToggle"
+                                        Grid.Row="1"
+                                        OnContent="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
+                                        OffContent="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD" />
+                          <ToggleSwitch x:Name="GameEnvWritableApp0Toggle"
+                                        Grid.Row="2"
+                                        OnContent="SHARPEMU_WRITABLE_APP0"
+                                        OffContent="SHARPEMU_WRITABLE_APP0" />
+                          <ToggleSwitch x:Name="GameEnvVkValidationToggle"
+                                        Grid.Row="3"
+                                        OnContent="SHARPEMU_VK_VALIDATION"
+                                        OffContent="SHARPEMU_VK_VALIDATION" />
+                          <ToggleSwitch x:Name="GameEnvDumpSpirvToggle"
+                                        Grid.Column="1"
+                                        Grid.Row="0"
+                                        OnContent="SHARPEMU_DUMP_SPIRV"
+                                        OffContent="SHARPEMU_DUMP_SPIRV" />
+                          <ToggleSwitch x:Name="GameEnvLogDirectMemoryToggle"
+                                        Grid.Column="1"
+                                        Grid.Row="1"
+                                        OnContent="SHARPEMU_LOG_DIRECT_MEMORY"
+                                        OffContent="SHARPEMU_LOG_DIRECT_MEMORY" />
+                          <ToggleSwitch x:Name="GameEnvLogIoToggle"
+                                        Grid.Column="1"
+                                        Grid.Row="2"
+                                        OnContent="SHARPEMU_LOG_IO"
+                                        OffContent="SHARPEMU_LOG_IO" />
+                          <ToggleSwitch x:Name="GameEnvLogNpToggle"
+                                        Grid.Column="1"
+                                        Grid.Row="3"
+                                        OnContent="SHARPEMU_LOG_NP"
+                                        OffContent="SHARPEMU_LOG_NP" />
+                        </Grid>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                  </Grid>
+                </Grid>
+
+              </Grid>
+            </Border>
+          </Grid>
+        </Grid>
+
+        <!-- Options mirrors the former WebUI's single translucent settings column. -->
+        <Grid x:Name="OptionsPage" IsVisible="False" RowDefinitions="124,*">
+          <Border Grid.RowSpan="2" Background="#080B12" />
+          <Border Grid.RowSpan="2">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="100%,0%" EndPoint="35%,55%">
+                <GradientStop Offset="0" Color="#2464A7FF" />
+                <GradientStop Offset="0.42" Color="#00080B12" />
+              </LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <ScrollViewer Grid.Row="1" Margin="64,0,24,30">
+            <StackPanel Width="1040" HorizontalAlignment="Left" Spacing="24">
+              <StackPanel Spacing="8" Margin="0,0,0,16">
+                <TextBlock Text="SHARPEMU / SYSTEM" Classes="sectionTitle" />
+                <TextBlock Text="Options"
+                           FontSize="66"
+                           FontWeight="SemiBold"
+                           LetterSpacing="-3" />
+              </StackPanel>
+
+              <Border Classes="optionsSurface">
+                <StackPanel>
+                  <Border Classes="card" BorderThickness="0">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="EmulationSectionTitle" Classes="sectionTitle" Text="EMULATION" />
-
-                      <local:SettingRow x:Name="CpuEngineRow" Label="CPU engine"
+                      <local:SettingRow x:Name="CpuEngineRow"
+                                        Label="CPU engine"
                                         Description="Execution engine used to run game code.">
-                        <ComboBox x:Name="CpuEngineBox" Width="160" SelectedIndex="0"
-                                  VerticalAlignment="Center" CornerRadius="8">
+                        <ComboBox x:Name="CpuEngineBox" Width="160" SelectedIndex="0">
                           <ComboBoxItem x:Name="CpuEngineNativeItem" Content="Native" />
                         </ComboBox>
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="StrictRow" Label="Strict dynlib resolution"
+                      <local:SettingRow x:Name="StrictRow"
+                                        Label="Strict dynlib resolution"
                                         Description="Fail the launch when an imported symbol cannot be resolved.">
-                        <ToggleSwitch x:Name="StrictToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="StrictToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
@@ -234,11 +741,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   <Border Classes="card">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="LoggingSectionTitle" Classes="sectionTitle" Text="LOGGING" />
-
-                      <local:SettingRow x:Name="LogLevelRow" Label="Log level"
+                      <local:SettingRow x:Name="LogLevelRow"
+                                        Label="Log level"
                                         Description="Verbosity of the emulator console output.">
-                        <ComboBox x:Name="LogLevelBox" Width="160" SelectedIndex="2"
-                                  VerticalAlignment="Center" CornerRadius="8">
+                        <ComboBox x:Name="LogLevelBox" Width="160" SelectedIndex="2">
                           <ComboBoxItem x:Name="LogLevelTraceItem" Content="Trace" />
                           <ComboBoxItem x:Name="LogLevelDebugItem" Content="Debug" />
                           <ComboBoxItem x:Name="LogLevelInfoItem" Content="Info" />
@@ -247,30 +753,31 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <ComboBoxItem x:Name="LogLevelCriticalItem" Content="Critical" />
                         </ComboBox>
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="TraceImportsRow" Label="Import trace limit"
+                      <local:SettingRow x:Name="TraceImportsRow"
+                                        Label="Import trace limit"
                                         Description="Trace the first N imports per module (0 = off).">
-                        <NumericUpDown x:Name="TraceImportsBox" Width="160" Minimum="0"
-                                       Maximum="4096" Increment="16" Value="0" FormatString="0"
-                                       VerticalAlignment="Center" CornerRadius="8" />
+                        <NumericUpDown x:Name="TraceImportsBox"
+                                       Width="160"
+                                       Minimum="0"
+                                       Maximum="4096"
+                                       Increment="16"
+                                       Value="0"
+                                       FormatString="0" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="LogToFileRow" Label="Log to file"
+                      <local:SettingRow x:Name="LogToFileRow"
+                                        Label="Log to file"
                                         Description="Mirror emulator output to a log file.">
-                        <ToggleSwitch x:Name="LogToFileToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="LogToFileToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="LogFilePathRow" Label="Log file path"
+                      <local:SettingRow x:Name="LogFilePathRow"
+                                        Label="Log file path"
                                         Description="No custom path">
-                        <Button x:Name="SelectLogFilePathButton" Classes="ghost" Content="Select…"
-                                VerticalAlignment="Center" />
+                        <Button x:Name="SelectLogFilePathButton" Classes="ghost" Content="Select…" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="OverrideLogFileRow" Label="Override log file"
+                      <local:SettingRow x:Name="OverrideLogFileRow"
+                                        Label="Override log file"
                                         Description="Use the exact file path instead of appending title ID and timestamp.">
-                        <ToggleSwitch x:Name="OverrideLogFileToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="OverrideLogFileToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
@@ -278,11 +785,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   <Border Classes="card">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="LauncherSectionTitle" Classes="sectionTitle" Text="LAUNCHER" />
-
-                      <local:SettingRow x:Name="LanguageRow" Label="Emulator language"
+                      <local:SettingRow x:Name="LanguageRow"
+                                        Label="Emulator language"
                                         Description="Language used throughout the launcher. Applies immediately.">
-                        <ComboBox x:Name="LanguageBox" Width="160"
-                                  VerticalAlignment="Center" CornerRadius="8">
+                        <ComboBox x:Name="LanguageBox" Width="160">
                           <ComboBox.ItemTemplate>
                             <DataTemplate x:DataType="local:Localization+LanguageInfo">
                               <TextBlock Text="{Binding NativeName}" />
@@ -290,142 +796,31 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           </ComboBox.ItemTemplate>
                         </ComboBox>
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="TitleMusicRow" Label="Title music"
+                      <local:SettingRow x:Name="TitleMusicRow"
+                                        Label="Title music"
                                         Description="Loop the selected game's preview music in the library.">
-                        <ToggleSwitch x:Name="TitleMusicToggle" OnContent="On" OffContent="Off"
-                                      IsChecked="True" VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="TitleMusicToggle" OnContent="On" OffContent="Off" IsChecked="True" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="DiscordRow" Label="Discord presence"
+                      <local:SettingRow x:Name="DiscordRow"
+                                        Label="Discord presence"
                                         Description="Show the running game on your Discord profile.">
-                        <ToggleSwitch x:Name="DiscordToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="DiscordToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="AutoUpdateRow" Label="Check for updates on startup"
+                      <local:SettingRow x:Name="AutoUpdateRow"
+                                        Label="Check for updates on startup"
                                         Description="Checks GitHub without delaying startup.">
-                        <ToggleSwitch x:Name="AutoUpdateToggle" OnContent="On" OffContent="Off"
-                                      IsChecked="True" VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="AutoUpdateToggle" OnContent="On" OffContent="Off" IsChecked="True" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
-                  <Border Classes="card">
-                    <StackPanel Spacing="14">
-                      <TextBlock x:Name="AboutSectionTitle"
-                                Classes="sectionTitle"
-                                Text="ABOUT" />
-
-                      <!--Latest commit info-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/commit-icon.png"
-                                    Width="24" Height="24" VerticalAlignment="Center" />
-                          <StackPanel Spacing="2" VerticalAlignment="Center">
-                            <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="13"/>
-                            <TextBlock x:Name="LatestCommitDescription" Text="Latest commit on the main branch" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
-                          </StackPanel>
-                        </StackPanel>
-
-                        <Button Grid.Column="1" x:Name="LatestCommitHashText" Classes="ghost"
-                          Content="Loading…" FontSize="12" FontFamily="Consolas,monospace"
-                          VerticalAlignment="Center" IsEnabled="False" />
-
-                      </Grid>
-
-                      <!--Update-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/update-icon.png"
-                                    Width="24"
-                                    Height="24"
-                                    VerticalAlignment="Center" />
-                          <StackPanel Spacing="2" VerticalAlignment="Center">
-                            <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="13" />
-                            <TextBlock x:Name="UpdateStatusText" Text="Current build: dev" FontSize="11"
-                                      Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-                          </StackPanel>
-                        </StackPanel>
-                        <Button Grid.Column="1" x:Name="UpdateButton" Classes="ghost"
-                                Content="Check for updates" VerticalAlignment="Center" />
-                      </Grid>
-                      
-                      <!--Github-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0"
-                                      Orientation="Horizontal"
-                                      Spacing="8"
-                                      VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/github.png"
-                                    Width="20"
-                                    Height="20"
-                                    VerticalAlignment="Center" />
-                          <StackPanel VerticalAlignment="Center"
-                                          Spacing="2">
-                            <TextBlock x:Name="GithubLabel"
-                                            Text="GitHub"
-                                            FontSize="13" />
-                            <TextBlock x:Name="GithubDesc"
-                                            Text="Source code, issues and project development."
-                                            FontSize="11"
-                                            Foreground="{StaticResource MutedBrush}"
-                                            TextWrapping="Wrap" />
-                          </StackPanel>
-                        </StackPanel>
-
-                        <Button Grid.Column="1"
-                                x:Name="GithubButton"
-                                Classes="ghost"
-                                Content="Open"
-                                VerticalAlignment="Center" />
-                      </Grid>
-
-                      <!--Discord-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0"
-                                        Orientation="Horizontal"
-                                        Spacing="8"
-                                        VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/discord.png"
-                                  Width="20"
-                                  Height="20"
-                                  VerticalAlignment="Center" />
-                          <StackPanel VerticalAlignment="Center"
-                                      Spacing="2">
-                            <TextBlock x:Name="DiscordServerLabel"
-                                      Text="Discord"
-                                      FontSize="13" />
-                            <TextBlock x:Name="DiscordServerDesc"
-                                      Text="Join the community, get support and follow development."
-                                      FontSize="11"
-                                      Foreground="{StaticResource MutedBrush}"
-                                      TextWrapping="Wrap" />
-                          </StackPanel>
-                        </StackPanel>
-
-                        <Button Grid.Column="1"
-                                x:Name="DiscordButton"
-                                Classes="ghost"
-                                Content="Join"
-                                VerticalAlignment="Center" />
-                      </Grid>
-                    </StackPanel>
-                  </Border>
-                </StackPanel>
-              </ScrollViewer>
-            </TabItem>
-            <TabItem x:Name="GraphicsTabItem" Header="Graphics" FontSize="15">
-              <ScrollViewer>
-                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
 
                   <Border Classes="card">
                     <StackPanel Spacing="14">
                       <TextBlock x:Name="RenderingSectionTitle" Classes="sectionTitle" Text="RENDERING" />
-
-                      <local:SettingRow x:Name="RenderResolutionRow" Label="Internal resolution"
-                                        Description="Render offscreen targets below native resolution and upscale on present. Lower values trade image quality for GPU headroom; takes effect on next launch.">
-                        <ComboBox x:Name="RenderResolutionBox" Width="160" SelectedIndex="0"
-                                  VerticalAlignment="Center" CornerRadius="8">
+                      <local:SettingRow x:Name="RenderResolutionRow"
+                                        Label="Internal resolution"
+                                        Description="Render below native resolution and upscale on present. Takes effect on next launch.">
+                        <ComboBox x:Name="RenderResolutionBox" Width="160" SelectedIndex="0">
                           <ComboBoxItem x:Name="RenderResolution100Item" Content="100% (native)" Tag="1.0" />
                           <ComboBoxItem x:Name="RenderResolution75Item" Content="75%" Tag="0.75" />
                           <ComboBoxItem x:Name="RenderResolution50Item" Content="50%" Tag="0.5" />
@@ -434,174 +829,394 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
-                </StackPanel>
-              </ScrollViewer>
-            </TabItem>
-            <TabItem x:Name="EnvTabItem" Header="Environment" FontSize="15">
-              <ScrollViewer>
-                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
 
                   <Border Classes="card">
                     <StackPanel Spacing="14">
-                      <TextBlock x:Name="EnvSectionTitle" Classes="sectionTitle" Text="ENVIRONMENT VARIABLES" />
+                      <TextBlock x:Name="EnvSectionTitle" Classes="sectionTitle" Text="ENVIRONMENT" />
                       <TextBlock x:Name="EnvDesc"
                                  Text="Switches passed to the emulator as environment variables at launch."
-                                 FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-
-                      <local:SettingRow x:Name="EnvBthidRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_BTHID_UNAVAILABLE"
-                                        Description="Report Bluetooth HID as unavailable for titles whose wheel/FFB middleware polls forever.&#10;Leave off normally. Some titles freeze when init fails.">
-                        <ToggleSwitch x:Name="EnvBthidToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                                 FontSize="11"
+                                 Foreground="{StaticResource MutedBrush}"
+                                 TextWrapping="Wrap" />
+                      <local:SettingRow x:Name="EnvBthidRow"
+                                        LabelFontFamily="Cascadia Mono,Consolas,monospace"
+                                        Label="SHARPEMU_BTHID_UNAVAILABLE">
+                        <ToggleSwitch x:Name="EnvBthidToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvLoopGuardRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
-                                        Description="Do not force quit titles that repeat the same call for too long.&#10;Try this when a game exits on its own while loading.">
-                        <ToggleSwitch x:Name="EnvLoopGuardToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                      <local:SettingRow x:Name="EnvLoopGuardRow"
+                                        LabelFontFamily="Cascadia Mono,Consolas,monospace"
+                                        Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD">
+                        <ToggleSwitch x:Name="EnvLoopGuardToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvWritableApp0Row" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_WRITABLE_APP0"
-                                        Description="Allow titles to create and write files inside their install folder.&#10;Needed by unpackaged dumps that write their save or config data under /app0.">
-                        <ToggleSwitch x:Name="EnvWritableApp0Toggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                      <local:SettingRow x:Name="EnvWritableApp0Row"
+                                        LabelFontFamily="Cascadia Mono,Consolas,monospace"
+                                        Label="SHARPEMU_WRITABLE_APP0">
+                        <ToggleSwitch x:Name="EnvWritableApp0Toggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvVkValidationRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_VK_VALIDATION"
-                                        Description="Enable Vulkan validation layers for GPU debugging.&#10;Slow. Requires the Vulkan SDK to be installed.">
-                        <ToggleSwitch x:Name="EnvVkValidationToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                      <local:SettingRow x:Name="EnvVkValidationRow"
+                                        LabelFontFamily="Cascadia Mono,Consolas,monospace"
+                                        Label="SHARPEMU_VK_VALIDATION">
+                        <ToggleSwitch x:Name="EnvVkValidationToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvDumpSpirvRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DUMP_SPIRV"
-                                        Description="Dump AGC shaders and their SPIR-V translations to the shader-dumps folder.&#10;Use when reporting shader or rendering bugs.">
-                        <ToggleSwitch x:Name="EnvDumpSpirvToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                      <local:SettingRow x:Name="EnvDumpSpirvRow"
+                                        LabelFontFamily="Cascadia Mono,Consolas,monospace"
+                                        Label="SHARPEMU_DUMP_SPIRV">
+                        <ToggleSwitch x:Name="EnvDumpSpirvToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_DIRECT_MEMORY"
-                                        Description="Log direct memory allocations and failures to the console.&#10;Use when a game aborts or exits during boot.">
-                        <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                      <local:SettingRow x:Name="EnvLogDirectMemoryRow"
+                                        LabelFontFamily="Cascadia Mono,Consolas,monospace"
+                                        Label="SHARPEMU_LOG_DIRECT_MEMORY">
+                        <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvLogIoRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_IO"
-                                        Description="Log file open, read, and path-resolve activity to the console.&#10;Use when a game cannot find its data files during boot.">
-                        <ToggleSwitch x:Name="EnvLogIoToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                      <local:SettingRow x:Name="EnvLogIoRow"
+                                        LabelFontFamily="Cascadia Mono,Consolas,monospace"
+                                        Label="SHARPEMU_LOG_IO">
+                        <ToggleSwitch x:Name="EnvLogIoToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
-
-                      <local:SettingRow x:Name="EnvLogNpRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_NP"
-                                        Description="Log NP (PlayStation Network) library calls to the console.">
-                        <ToggleSwitch x:Name="EnvLogNpToggle" OnContent="On" OffContent="Off"
-                                      VerticalAlignment="Center" />
+                      <local:SettingRow x:Name="EnvLogNpRow"
+                                        LabelFontFamily="Cascadia Mono,Consolas,monospace"
+                                        Label="SHARPEMU_LOG_NP">
+                        <ToggleSwitch x:Name="EnvLogNpToggle" OnContent="On" OffContent="Off" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
 
+                  <Border Classes="card">
+                    <StackPanel Spacing="16">
+                      <TextBlock x:Name="AboutSectionTitle" Classes="sectionTitle" Text="ABOUT" />
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel>
+                          <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="13" />
+                          <TextBlock x:Name="LatestCommitDescription"
+                                     Text="Latest commit on the main branch"
+                                     FontSize="11"
+                                     Foreground="{StaticResource MutedBrush}" />
+                        </StackPanel>
+                        <Button x:Name="LatestCommitHashText"
+                                Grid.Column="1"
+                                Classes="ghost"
+                                Content="Loading…"
+                                FontFamily="Cascadia Mono,Consolas,monospace"
+                                IsEnabled="False" />
+                      </Grid>
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel>
+                          <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="13" />
+                          <TextBlock x:Name="UpdateStatusText"
+                                     Text="Current build: dev"
+                                     FontSize="11"
+                                     Foreground="{StaticResource MutedBrush}" />
+                        </StackPanel>
+                        <Button x:Name="UpdateButton"
+                                Grid.Column="1"
+                                Classes="ghost"
+                                Content="Check for updates" />
+                      </Grid>
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel>
+                          <TextBlock x:Name="GithubLabel" Text="GitHub" FontSize="13" />
+                          <TextBlock x:Name="GithubDesc"
+                                     Text="Source code, issues and project development."
+                                     FontSize="11"
+                                     Foreground="{StaticResource MutedBrush}" />
+                        </StackPanel>
+                        <Button x:Name="GithubButton" Grid.Column="1" Classes="ghost" Content="Open" />
+                      </Grid>
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel>
+                          <TextBlock x:Name="DiscordServerLabel" Text="Discord" FontSize="13" />
+                          <TextBlock x:Name="DiscordServerDesc"
+                                     Text="Join the community, get support and follow development."
+                                     FontSize="11"
+                                     Foreground="{StaticResource MutedBrush}" />
+                        </StackPanel>
+                        <Button x:Name="DiscordButton" Grid.Column="1" Classes="ghost" Content="Join" />
+                      </Grid>
+                    </StackPanel>
+                  </Border>
                 </StackPanel>
-              </ScrollViewer>
-            </TabItem>
-          </TabControl>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+
+        <!-- Console is a first-class page, as in the WebUI. -->
+        <Grid x:Name="ConsolePanel" IsVisible="False" RowDefinitions="124,*">
+          <Border Grid.RowSpan="2" Background="#080B12" />
+          <Border Grid.RowSpan="2">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="100%,0%" EndPoint="35%,55%">
+                <GradientStop Offset="0" Color="#2464A7FF" />
+                <GradientStop Offset="0.42" Color="#00080B12" />
+              </LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <Grid Grid.Row="1" Margin="64,0,64,30" RowDefinitions="Auto,*">
+            <StackPanel Spacing="8" Margin="0,0,0,20">
+              <TextBlock Text="SHARPEMU / RUNTIME" Classes="sectionTitle" />
+              <TextBlock x:Name="ConsoleSectionTitle"
+                         Text="Console"
+                         FontSize="66"
+                         FontWeight="SemiBold"
+                         LetterSpacing="-3" />
+            </StackPanel>
+            <Border Grid.Row="1"
+                    Background="#C70B0F17"
+                    BorderBrush="#12FFFFFF"
+                    BorderThickness="1"
+                    CornerRadius="20"
+                    ClipToBounds="True">
+              <Grid RowDefinitions="Auto,*">
+                <Grid ColumnDefinitions="*,320,Auto,Auto,Auto,Auto"
+                      Margin="18,14"
+                      ColumnSpacing="10">
+                  <TextBlock Text="LIVE OUTPUT"
+                             Classes="sectionTitle"
+                             VerticalAlignment="Center" />
+                  <TextBox x:Name="ConsoleSearchBox"
+                           Grid.Column="1"
+                           FontSize="12"
+                           PlaceholderText="Search…" />
+                  <CheckBox x:Name="AutoScrollCheck"
+                            Grid.Column="2"
+                            Content="Auto-scroll"
+                            IsChecked="True"
+                            FontSize="12"
+                            VerticalAlignment="Center" />
+                  <Button x:Name="DetachConsoleButton"
+                          Grid.Column="3"
+                          Classes="ghost"
+                          Content="Split" />
+                  <Button x:Name="CopyLogButton"
+                          Grid.Column="4"
+                          Classes="ghost"
+                          Content="Copy" />
+                  <Button x:Name="ClearLogButton"
+                          Grid.Column="5"
+                          Classes="ghost"
+                          Content="Clear" />
+                </Grid>
+                <ListBox x:Name="ConsoleList"
+                         Grid.Row="1"
+                         Classes="console"
+                         BorderBrush="#12FFFFFF"
+                         BorderThickness="0,1,0,0">
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="local:LogLine">
+                      <TextBlock Text="{Binding Text}"
+                                 Foreground="{Binding Brush}"
+                                 TextWrapping="NoWrap" />
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+              </Grid>
+            </Border>
+          </Grid>
         </Grid>
       </Panel>
 
-      <!-- Console (collapsible) -->
-      <Border Grid.Row="2" x:Name="ConsolePanel" Classes="card" Padding="0" Height="240"
-              Margin="0,12,0,0" IsVisible="False">
-        <Grid RowDefinitions="Auto,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
-            <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle" Text="CONSOLE" VerticalAlignment="Center" />
-            <TextBox Grid.Column="1" FontSize="12" Margin="0,0,12,0" x:Name="ConsoleSearchBox"
-                    PlaceholderText="Search..." Width="320" />
-            <CheckBox Grid.Column="2" x:Name="AutoScrollCheck" Content="Auto-scroll" IsChecked="True"
-                    FontSize="12" Margin="0,0,12,0" />
-            <Button Grid.Column="3" x:Name="DetachConsoleButton" Classes="ghost" Content="Split" FontSize="12"
-                    Padding="10,4" Margin="0,0,8,0" />
-            <Button Grid.Column="4" x:Name="CopyLogButton" Classes="ghost" Content="Copy" FontSize="12"
-                    Padding="10,4" Margin="0,0,8,0" />
-            <Button Grid.Column="5" x:Name="ClearLogButton" Classes="ghost" Content="Clear" FontSize="12"
-                    Padding="10,4" />
-          </Grid>
-          <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
-                   BorderBrush="{StaticResource CardBorderBrush}" CornerRadius="0,0,12,12">
-            <ListBox.ItemTemplate>
-              <DataTemplate x:DataType="local:LogLine">
-                <TextBlock Text="{Binding Text}" Foreground="{Binding Brush}" TextWrapping="NoWrap" />
-              </DataTemplate>
-            </ListBox.ItemTemplate>
-          </ListBox>
-        </Grid>
-      </Border>
-
-      <!-- Launch bar; capped so it does not sprawl on a maximized window. -->
-      <Border Grid.Row="3" x:Name="LaunchBar" Classes="card" Margin="0,12,0,0" Padding="14" MaxWidth="1280">
-        <StackPanel Spacing="14">
-          <Grid ColumnDefinitions="Auto,*,Auto">
-
-            <!-- Selected game cover thumbnail -->
-            <Border Grid.Column="0" Classes="coverClip" Width="56" Height="56" CornerRadius="8"
-                    VerticalAlignment="Center">
-              <Panel x:Name="SelectedCoverPanel" x:DataType="local:GameEntry">
-                <Border Background="{Binding PlaceholderBrush, FallbackValue={x:Null}}"
-                        IsVisible="{Binding !HasCover, FallbackValue=False}">
-                  <TextBlock Text="{Binding Initials}" FontSize="20" FontWeight="Bold"
-                             Foreground="#E8ECF4" Opacity="0.85"
-                             HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </Border>
-                <Image Source="{Binding Cover}" Stretch="UniformToFill"
-                       IsVisible="{Binding HasCover, FallbackValue=False}" />
-              </Panel>
-            </Border>
-
-            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center" Margin="14,0,14,0">
-              <Grid ColumnDefinitions="Auto,Auto,*">
-                <TextBlock Grid.Column="0" x:Name="SelectedGameTitle" Text="No game selected" FontSize="16"
-                           FontWeight="Bold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
-                           MaxWidth="340" Margin="0,0,10,0" />
-
-                <!-- Title id / version / size badges, right next to the
-                     title. The title's own MaxWidth (not a "*" column) is
-                     what keeps them from drifting to the far right. -->
-                <StackPanel Grid.Column="1" x:Name="SelectedBadgesRow" Orientation="Horizontal" Spacing="6"
-                            x:DataType="local:GameEntry" IsVisible="False" VerticalAlignment="Center">
-                  <Border Classes="pill" IsVisible="{Binding HasTitleId, FallbackValue=False}">
-                    <TextBlock Text="{Binding TitleId}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                  <Border Classes="pill" IsVisible="{Binding HasVersion, FallbackValue=False}">
-                    <TextBlock Text="{Binding VersionText}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                  <Border Classes="pill">
-                    <TextBlock Text="{Binding SizeText, FallbackValue=''}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                </StackPanel>
-              </Grid>
-
-              <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin directly."
-                         FontSize="11" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
-              <StackPanel Orientation="Horizontal" Spacing="7">
-                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{StaticResource FaintBrush}"
-                         VerticalAlignment="Center" />
-                <TextBlock x:Name="StatusText" Text="Idle" FontSize="11" Foreground="{StaticResource MutedBrush}"
-                           VerticalAlignment="Center" />
-              </StackPanel>
-            </StackPanel>
-
-            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-              <ToggleButton x:Name="ConsoleToggle" Classes="ghost" Content="≡ Console" />
-              <Button x:Name="LaunchButton" Classes="accent" Content="▶  Launch" IsEnabled="False" />
-              <Button x:Name="StopButton" Classes="danger" Content="■  Stop" IsEnabled="False" />
-            </StackPanel>
-          </Grid>
-        </StackPanel>
+      <!-- Native game surface must remain above the Avalonia shell. -->
+      <Border x:Name="GameView"
+              IsVisible="False"
+              Background="#000000"
+              ClipToBounds="True">
+        <Grid x:Name="GameSurfaceContainer" />
       </Border>
     </Grid>
 
-    <!-- Avalonia's regular overlay layer cannot appear over a native child
-         HWND/X11/Metal surface. Keep the running-session controls in a native
-         popup so the game reaches the bottom status bar without losing Stop. -->
+    <!-- 92 px WebUI top bar: brand, centered navigation, utility cluster. -->
+    <Grid x:Name="TitleBar" Grid.Row="0">
+      <Border>
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="#9405080F" />
+            <GradientStop Offset="1" Color="#0005080F" />
+          </LinearGradientBrush>
+        </Border.Background>
+      </Border>
+      <Grid x:Name="ContentToolbar"
+            Margin="46,0"
+            ColumnDefinitions="*,Auto,*">
+        <StackPanel Orientation="Horizontal"
+                    Spacing="11"
+                    VerticalAlignment="Center">
+          <Image Source="avares://SharpEmu.GUI/Assets/logo.png"
+                 Width="46"
+                 Height="46"
+                 Stretch="Uniform" />
+          <TextBlock x:Name="VersionText"
+                     Text="v0.0.1"
+                     FontSize="10"
+                     Foreground="#70FFFFFF"
+                     VerticalAlignment="Center"
+                     Margin="4,1,0,0" />
+        </StackPanel>
+
+        <StackPanel Grid.Column="1"
+                    Orientation="Horizontal"
+                    Spacing="10"
+                    VerticalAlignment="Center">
+          <Border Classes="padHint">
+            <TextBlock Text="L1"
+                       FontSize="9"
+                       FontWeight="Bold"
+                       Foreground="#07101D"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+          </Border>
+          <Button x:Name="LibraryTabButton"
+                  Classes="segment active"
+                  Content="{Binding [Page.Library], Source={x:Static loc:Localization.Instance}}" />
+          <Button x:Name="OptionsTabButton"
+                  Classes="segment"
+                  Content="{Binding [Page.Options], Source={x:Static loc:Localization.Instance}}" />
+          <Border Classes="padHint">
+            <TextBlock Text="R1"
+                       FontSize="9"
+                       FontWeight="Bold"
+                       Foreground="#07101D"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+          </Border>
+        </StackPanel>
+
+        <StackPanel x:Name="LibraryToolbar"
+                    Grid.Column="2"
+                    Orientation="Horizontal"
+                    Spacing="6"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center">
+          <TextBox x:Name="SearchBox"
+                   Width="220"
+                   Height="40"
+                   IsVisible="False"
+                   PlaceholderText="Search library…"
+                   FontSize="12"
+                   CornerRadius="20"
+                   Padding="15,0" />
+          <Button x:Name="ConsoleNavButton"
+                  Classes="icon"
+                  ToolTip.Tip="Console">
+            <TextBlock Classes="materialSymbol" Text="terminal" />
+          </Button>
+          <Ellipse x:Name="StatusDot"
+                   Width="7"
+                   Height="7"
+                   Fill="{StaticResource FaintBrush}"
+                   Margin="9,0,7,0"
+                   VerticalAlignment="Center" />
+          <TextBlock x:Name="ClockText"
+                     Text="00:00"
+                     Width="48"
+                     TextAlignment="Right"
+                     FontSize="13"
+                     Foreground="#D9FFFFFF"
+                     VerticalAlignment="Center" />
+          <Button x:Name="MinimizeButton"
+                  Classes="icon"
+                  ToolTip.Tip="Minimize">
+            <TextBlock Classes="materialSymbol compact" Text="minimize" />
+          </Button>
+          <Button x:Name="MaximizeButton"
+                  Classes="icon"
+                  ToolTip.Tip="Maximize">
+            <TextBlock Classes="materialSymbol compact" Text="crop_square" />
+          </Button>
+          <Button x:Name="CloseButton"
+                  Classes="icon"
+                  ToolTip.Tip="Close">
+            <TextBlock Classes="materialSymbol" Text="close" />
+          </Button>
+        </StackPanel>
+      </Grid>
+    </Grid>
+
+    <!-- Existing status channels stay available to the launcher code but do
+         not add a second strip to the WebUI composition. -->
+    <Grid x:Name="StatusBar" Grid.Row="2" Height="0" IsVisible="False">
+      <TextBlock x:Name="EmulatorPathText" />
+      <TextBlock x:Name="StatusBarRight" />
+      <TextBlock x:Name="StatusText" />
+    </Grid>
+
+    <!-- Portable resize hit targets for the frameless desktop window. -->
+    <Border Tag="North"
+              Grid.RowSpan="3"
+              ZIndex="1000"
+              Height="6"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="South"
+              Grid.RowSpan="3"
+              ZIndex="1000"
+              Height="6"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="West"
+              Grid.RowSpan="3"
+              ZIndex="1000"
+              Width="6"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Stretch"
+              Background="#01000000"
+              Cursor="LeftSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="East"
+              Grid.RowSpan="3"
+              ZIndex="1000"
+              Width="6"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Background="#01000000"
+              Cursor="RightSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="NorthWest"
+              Grid.RowSpan="3"
+              ZIndex="1001"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopLeftCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="NorthEast"
+              Grid.RowSpan="3"
+              ZIndex="1001"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopRightCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="SouthWest"
+              Grid.RowSpan="3"
+              ZIndex="1001"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomLeftCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="SouthEast"
+              Grid.RowSpan="3"
+              ZIndex="1001"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomRightCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+
     <primitives:Popup x:Name="SessionBarPopup"
                       IsOpen="False"
                       PlacementTarget="{Binding #GameView}"
@@ -611,39 +1226,62 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       ShouldUseOverlayLayer="False"
                       TakesFocusFromNativeControl="False"
                       IsLightDismissEnabled="False">
-      <Border Classes="card" Width="598" Height="58" CornerRadius="16" Padding="14,8">
+      <Border Background="#F5202023"
+              Width="598"
+              Height="58"
+              CornerRadius="16"
+              Padding="14,8"
+              BoxShadow="0 10 34 0 #55000000">
         <Grid ColumnDefinitions="*,Auto">
           <StackPanel Spacing="3" VerticalAlignment="Center">
             <StackPanel Orientation="Horizontal" Spacing="8">
-              <TextBlock x:Name="SessionGameTitle" Text="GAME RUNNING" FontSize="13" FontWeight="SemiBold"
-                         MaxWidth="240" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+              <TextBlock x:Name="SessionGameTitle"
+                         Text="GAME RUNNING"
+                         FontSize="13"
+                         FontWeight="SemiBold"
+                         MaxWidth="240"
+                         TextTrimming="CharacterEllipsis"
+                         VerticalAlignment="Center" />
               <Border Classes="badge running" VerticalAlignment="Center">
-                <TextBlock Text="RUNNING" FontSize="9" FontWeight="Bold" LetterSpacing="1"
+                <TextBlock Text="RUNNING"
+                           FontSize="9"
+                           FontWeight="Bold"
+                           LetterSpacing="1"
                            Foreground="{StaticResource SuccessBrush}" />
               </Border>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Spacing="7">
-              <Border x:Name="SessionF11Badge" Classes="badge key" VerticalAlignment="Center">
-                <TextBlock Text="F11" FontSize="9" FontWeight="Bold"
+              <Border x:Name="SessionF11Badge" Classes="badge key">
+                <TextBlock Text="F11"
+                           FontSize="9"
+                           FontWeight="Bold"
                            Foreground="{StaticResource InfoBrush}" />
               </Border>
-              <TextBlock x:Name="SessionHintText" Text="Fullscreen" FontSize="11"
-                         Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
+              <TextBlock x:Name="SessionHintText"
+                         Text="Fullscreen"
+                         FontSize="11"
+                         Foreground="{StaticResource MutedBrush}"
+                         VerticalAlignment="Center" />
             </StackPanel>
           </StackPanel>
           <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-            <Button x:Name="SessionConsoleButton" Classes="ghost" Content="≡ Console" />
-            <Button x:Name="SessionStopButton" Classes="danger" Content="■  Stop" IsEnabled="False" />
+            <Button x:Name="SessionConsoleButton" Classes="ghost">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="materialSymbol" Text="terminal" />
+                <TextBlock x:Name="SessionConsoleButtonLabel" Text="Console" VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
+            <Button x:Name="SessionStopButton" Classes="danger" IsEnabled="False">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Classes="materialSymbol" Text="stop" />
+                <TextBlock x:Name="SessionStopButtonLabel" Text="Stop" VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
           </StackPanel>
         </Grid>
       </Border>
     </primitives:Popup>
 
-    <!-- This is a native popup rather than an Avalonia overlay because the
-         emulated Vulkan surface is a native child window. -->
-    <!-- Anchored to MainContent, not GameView: the surface host is parked in
-         a 1x1 corner while loading/closing, which would pull a GameView-
-         anchored popup into the corner with it. -->
     <primitives:Popup x:Name="SessionLoadingPopup"
                       IsOpen="False"
                       PlacementTarget="{Binding #MainContent}"
@@ -652,24 +1290,24 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       ShouldUseOverlayLayer="False"
                       TakesFocusFromNativeControl="False"
                       IsLightDismissEnabled="False">
-      <Border Classes="card" Width="380" CornerRadius="18" Padding="22,18">
+      <Border Background="#F5202023"
+              Width="380"
+              CornerRadius="18"
+              Padding="22,18"
+              BoxShadow="0 10 34 0 #55000000">
         <StackPanel Spacing="12">
-          <TextBlock x:Name="SessionLoadingTitle" Text="Loading game" FontSize="16" FontWeight="SemiBold" />
-          <TextBlock x:Name="SessionLoadingDetail" Text="Preparing the emulation session..." FontSize="12"
-                     Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
+          <TextBlock x:Name="SessionLoadingTitle"
+                     Text="Loading game"
+                     FontSize="16"
+                     FontWeight="SemiBold" />
+          <TextBlock x:Name="SessionLoadingDetail"
+                     Text="Preparing the emulation session..."
+                     FontSize="12"
+                     Foreground="{StaticResource MutedBrush}"
+                     TextTrimming="CharacterEllipsis" />
           <ProgressBar IsIndeterminate="True" Height="5" />
         </StackPanel>
       </Border>
     </primitives:Popup>
-
-    <!-- Status bar -->
-    <Grid x:Name="StatusBar" Grid.Row="2" Height="32" Background="{StaticResource ChromeBrush}"
-          ColumnDefinitions="*,Auto">
-      <TextBlock x:Name="EmulatorPathText" Grid.Column="0" Text="Emulator: locating…" FontSize="11"
-                 Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0"
-                 TextTrimming="CharacterEllipsis" />
-      <TextBlock x:Name="StatusBarRight" Grid.Column="1" Text="" FontSize="11"
-                 Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0" />
-    </Grid>
   </Grid>
 </Window>

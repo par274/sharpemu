@@ -10,47 +10,57 @@ SPDX-License-Identifier: GPL-2.0-or-later
              RequestedThemeVariant="Dark">
 
   <Application.Resources>
-    <Color x:Key="SystemAccentColor">#7C5CFC</Color>
-
-    <LinearGradientBrush x:Key="BgBrush" StartPoint="0%,0%" EndPoint="100%,100%">
-      <GradientStop Offset="0" Color="#12151F" />
-      <GradientStop Offset="0.55" Color="#0D1017" />
-      <GradientStop Offset="1" Color="#0B0D14" />
-    </LinearGradientBrush>
-
-    <SolidColorBrush x:Key="ChromeBrush" Color="#090C12" />
-    <SolidColorBrush x:Key="CardBrush" Color="#141924" />
-    <SolidColorBrush x:Key="CardBorderBrush" Color="#232B3A" />
-    <SolidColorBrush x:Key="ElevatedBrush" Color="#1B2230" />
-    <SolidColorBrush x:Key="TextBrush" Color="#E8ECF4" />
-    <SolidColorBrush x:Key="MutedBrush" Color="#8B94A7" />
-    <SolidColorBrush x:Key="FaintBrush" Color="#5A6478" />
-    <SolidColorBrush x:Key="AccentBrush" Color="#7C5CFC" />
-    <SolidColorBrush x:Key="AccentHoverBrush" Color="#8F73FF" />
-    <SolidColorBrush x:Key="DangerBrush" Color="#E5484D" />
-    <SolidColorBrush x:Key="DangerHoverBrush" Color="#F2555A" />
-    <SolidColorBrush x:Key="SuccessBrush" Color="#46C46B" />
-    <SolidColorBrush x:Key="InfoBrush" Color="#58A6FF" />
-    <SolidColorBrush x:Key="TileHoverBrush" Color="#1A2130" />
-    <SolidColorBrush x:Key="TileSelectedBrush" Color="#212A3F" />
+    <!-- Web launcher design tokens. -->
+    <Color x:Key="SystemAccentColor">#64A7FF</Color>
+    <SolidColorBrush x:Key="BgBrush" Color="#080B12" />
+    <SolidColorBrush x:Key="ChromeBrush" Color="#04060B" />
+    <SolidColorBrush x:Key="CardBrush" Color="#10141E" />
+    <SolidColorBrush x:Key="CardBorderBrush" Color="#12FFFFFF" />
+    <SolidColorBrush x:Key="ElevatedBrush" Color="#171C28" />
+    <SolidColorBrush x:Key="OverlayBrush" Color="#202634" />
+    <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#1B1B1B" />
+    <SolidColorBrush x:Key="TextBrush" Color="#F7F8FB" />
+    <SolidColorBrush x:Key="SecondaryTextBrush" Color="#C0C5CF" />
+    <SolidColorBrush x:Key="MutedBrush" Color="#777F8E" />
+    <SolidColorBrush x:Key="FaintBrush" Color="#4D5461" />
+    <SolidColorBrush x:Key="AccentBrush" Color="#64A7FF" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#82B8FF" />
+    <SolidColorBrush x:Key="DangerBrush" Color="#FF646E" />
+    <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF858D" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#66F2A3" />
+    <SolidColorBrush x:Key="InfoBrush" Color="#64A7FF" />
+    <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
+    <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
+    <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
 
     <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
+      <Setter Property="MinHeight" Value="52" />
       <Setter Property="Template">
         <ControlTemplate>
-          <Grid ColumnDefinitions="*,Auto">
-            <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-              <TextBlock x:Name="PART_Label" Text="{TemplateBinding Label}" FontSize="13" />
-              <TextBlock Text="{TemplateBinding Description}" FontSize="11"
-                         Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
+          <Grid ColumnDefinitions="*,Auto" Margin="0,2">
+            <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,24,0">
+              <TextBlock x:Name="PART_Label"
+                         Text="{TemplateBinding Label}"
+                         FontFamily="{TemplateBinding LabelFontFamily}"
+                         FontSize="13"
+                         Foreground="{StaticResource TextBrush}" />
+              <TextBlock Text="{TemplateBinding Description}"
+                         FontSize="11"
+                         Foreground="{StaticResource MutedBrush}"
+                         LineHeight="15"
+                         TextWrapping="Wrap"
                          IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
                                      Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-              <ToggleSwitch OnContent="Override" OffContent="Override" MinWidth="0"
-                            VerticalAlignment="Center"
+              <ToggleSwitch OnContent="{TemplateBinding OverrideText}"
+                            OffContent="{TemplateBinding OverrideText}"
+                            MinWidth="0"
                             IsVisible="{TemplateBinding ShowOverride}"
                             IsChecked="{Binding IsOverridden, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" />
-              <ContentPresenter x:Name="PART_Slot" Content="{TemplateBinding Content}" VerticalAlignment="Center" />
+              <ContentPresenter x:Name="PART_Slot"
+                                Content="{TemplateBinding Content}"
+                                VerticalAlignment="Center" />
             </StackPanel>
           </Grid>
         </ControlTemplate>
@@ -62,206 +72,390 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <FluentTheme />
 
     <Style Selector="Window">
-      <Setter Property="FontFamily" Value="Inter, Segoe UI, sans-serif" />
+      <Setter Property="FontFamily" Value="Google Sans, Segoe UI Variable, Segoe UI, sans-serif" />
       <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Background" Value="{StaticResource BgBrush}" />
+    </Style>
+
+    <Style Selector="Button">
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="TextBlock.materialSymbol">
+      <Setter Property="FontFamily" Value="{StaticResource MaterialSymbolsRounded}" />
+      <Setter Property="FontFeatures" Value="+liga" />
+      <Setter Property="FontSize" Value="18" />
+      <Setter Property="FontWeight" Value="Normal" />
+      <Setter Property="LineHeight" Value="20" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="TextAlignment" Value="Center" />
+    </Style>
+    <Style Selector="TextBlock.materialSymbol.compact">
+      <Setter Property="FontSize" Value="16" />
+      <Setter Property="LineHeight" Value="18" />
+    </Style>
+
+    <Style Selector="TextBlock.gameStatLabel">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Normal" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Opacity" Value="0.75" />
+    </Style>
+    <Style Selector="TextBlock.gameStatValue">
+      <Setter Property="FontSize" Value="18" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Grid.backdropLayer">
+      <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    </Style>
+    <Style Selector="Panel.carouselHost">
+      <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="StackPanel.selectedDetailsHost">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="Grid.launchBar">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="Grid.gameOptionsOverlay">
+      <Setter Property="RenderTransform" Value="translateY(96px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="Grid.backdropLayer.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(-92px) scale(1.04)" />
+    </Style>
+    <Style Selector="Panel.carouselHost.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(-18px) scale(1)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="StackPanel.selectedDetailsHost.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(-28px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="Grid.launchBar.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(30px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="Grid.gameOptionsOverlay.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="StackPanel.selectedDetailsHost.detailsOut">
+      <Setter Property="RenderTransform" Value="translateY(-9px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="StackPanel.selectedDetailsHost.detailsInStart">
+      <Setter Property="RenderTransform" Value="translateY(11px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+
+    <Style Selector="Button.pill, ToggleButton.pill">
+      <Setter Property="MinHeight" Value="40" />
+      <Setter Property="Padding" Value="20,9" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Bold" />
+    </Style>
+    <Style Selector="Button.pill:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     ToggleButton.pill:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#1FFFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Button.accent">
+      <Setter Property="MinHeight" Value="42" />
+      <Setter Property="Padding" Value="21,9" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Background" Value="White" />
+      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="FontWeight" Value="Bold" />
+    </Style>
+    <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#F7F8FB" />
+      <Setter Property="Foreground" Value="#07101D" />
+    </Style>
+
+    <Style Selector="Button.danger">
+      <Setter Property="MinHeight" Value="42" />
+      <Setter Property="Padding" Value="21,9" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Background" Value="{StaticResource DangerBrush}" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="FontWeight" Value="Bold" />
+    </Style>
+
+    <Style Selector="Button.ghost, ToggleButton.ghost">
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="Padding" Value="14,7" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#1FFFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Button.icon">
+      <Setter Property="Width" Value="40" />
+      <Setter Property="Height" Value="40" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="CornerRadius" Value="20" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontSize" Value="19" />
+    </Style>
+    <Style Selector="Button.icon:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.icon.active /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#24FFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Button.segment">
+      <Setter Property="MinWidth" Value="112" />
+      <Setter Property="MinHeight" Value="42" />
+      <Setter Property="Padding" Value="20,10" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#A6FFFFFF" />
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.segment.active /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#24FFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Button.gameOptionsNav">
+      <Setter Property="Height" Value="46" />
+      <Setter Property="Padding" Value="14,0" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#B8FFFFFF" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.gameOptionsNav:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.gameOptionsNav.active /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="TextBlock.gameOptionsNavLabel">
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+
+    <Style Selector="Button.gameOptionsLaunch">
+      <Setter Property="Width" Value="220" />
+      <Setter Property="Height" Value="46" />
+      <Setter Property="Padding" Value="20,0" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Background" Value="White" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.gameOptionsLaunch /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="BoxShadow" Value="0 0 0 0 Transparent" />
+    </Style>
+    <Style Selector="TextBlock.gameOptionsLaunchLabel">
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.gameOptionsLaunch:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#EAF3FF" />
+      <Setter Property="Foreground" Value="#07101D" />
+    </Style>
+
+    <Style Selector="Button.gameAction">
+      <Setter Property="Width" Value="250" />
+      <Setter Property="Height" Value="48" />
+      <Setter Property="Padding" Value="16,0" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Background" Value="#0FFFFFFF" />
+      <Setter Property="BorderBrush" Value="#14FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.gameAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#1AFFFFFF" />
+      <Setter Property="BorderBrush" Value="#28FFFFFF" />
+    </Style>
+    <Style Selector="Button.gameAction.dangerAction">
+      <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+      <Setter Property="BorderBrush" Value="#48FF646E" />
+    </Style>
+    <Style Selector="Button.gameAction.dangerAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#1FFF646E" />
+      <Setter Property="BorderBrush" Value="{StaticResource DangerBrush}" />
+    </Style>
+
+    <Style Selector="Border.padHint">
+      <Setter Property="Width" Value="28" />
+      <Setter Property="Height" Value="19" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Background" Value="#D9FFFFFF" />
+    </Style>
+
+    <Style Selector="TextBlock.sectionTitle">
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="Bold" />
+      <Setter Property="LetterSpacing" Value="2" />
+      <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
     </Style>
 
     <Style Selector="Border.card">
-      <Setter Property="Background" Value="{StaticResource CardBrush}" />
-      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="12" />
-      <Setter Property="Padding" Value="16" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="#12FFFFFF" />
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="Padding" Value="30,26" />
     </Style>
 
-    <Style Selector="Border.pill">
+    <Style Selector="Border.optionsSurface">
+      <Setter Property="Background" Value="#08FFFFFF" />
+      <Setter Property="CornerRadius" Value="22" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+
+    <Style Selector="TextBox, ComboBox, NumericUpDown">
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="CornerRadius" Value="10" />
       <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-      <Setter Property="CornerRadius" Value="999" />
-      <Setter Property="Padding" Value="10,3" />
+      <Setter Property="BorderBrush" Value="#14FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
     </Style>
 
-    <!-- Session status/hotkey badges: the title-id pill geometry with a
-         tinted fill so state (RUNNING) and keys (F11) read at a glance. -->
+    <Style Selector="ContextMenu">
+      <Setter Property="Width" Value="390" />
+      <Setter Property="Background" Value="#FA202023" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="8" />
+    </Style>
+    <Style Selector="ContextMenu MenuItem">
+      <Setter Property="MinHeight" Value="50" />
+      <Setter Property="Padding" Value="14,0" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Foreground" Value="#D1FFFFFF" />
+      <Setter Property="FontSize" Value="18" />
+      <Setter Property="FontWeight" Value="Light" />
+    </Style>
+    <Style Selector="ContextMenu MenuItem:pointerover">
+      <Setter Property="Background" Value="#0CFFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ContextMenu Separator">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="Height" Value="1" />
+      <Setter Property="Margin" Value="14,5" />
+    </Style>
+
+    <Style Selector="ListBox.tileGrid">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Hidden" />
+      <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem">
+      <Setter Property="Width" Value="156" />
+      <Setter Property="Height" Value="206" />
+      <Setter Property="Padding" Value="4" />
+      <Setter Property="Margin" Value="0,10,12,20" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="2" />
+      <Setter Property="Opacity" Value="0.68" />
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.18" />
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.26" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover,
+                     ListBox.tileGrid ListBoxItem:selected">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateY(-7px) scale(1.045)" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     ListBox.tileGrid ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="White" />
+    </Style>
+
+    <Style Selector="Border.coverShadow">
+      <Setter Property="BoxShadow" Value="0 12 28 0 #61000000" />
+    </Style>
+    <Style Selector="Border.coverClip">
+      <Setter Property="CornerRadius" Value="7" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="Background" Value="#151925" />
+    </Style>
+
+    <Style Selector="ListBox.console">
+      <Setter Property="Background" Value="#D6030509" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="ListBox.console ListBoxItem">
+      <Setter Property="Padding" Value="12,1" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+
     <Style Selector="Border.badge">
       <Setter Property="CornerRadius" Value="999" />
       <Setter Property="Padding" Value="8,2" />
       <Setter Property="BorderThickness" Value="1" />
     </Style>
     <Style Selector="Border.badge.running">
-      <Setter Property="Background" Value="#1E46C46B" />
-      <Setter Property="BorderBrush" Value="#5546C46B" />
+      <Setter Property="Background" Value="#1E66F2A3" />
+      <Setter Property="BorderBrush" Value="#5566F2A3" />
     </Style>
     <Style Selector="Border.badge.key">
-      <Setter Property="Background" Value="#1E58A6FF" />
-      <Setter Property="BorderBrush" Value="#5558A6FF" />
-    </Style>
-
-    <Style Selector="TextBlock.sectionTitle">
-      <Setter Property="FontSize" Value="11" />
-      <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="LetterSpacing" Value="1.5" />
-      <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-    </Style>
-
-    <Style Selector="TextBlock.fieldLabel">
-      <Setter Property="FontSize" Value="12" />
-      <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-      <Setter Property="Margin" Value="0,0,0,6" />
-    </Style>
-
-    <Style Selector="TextBox">
-      <Setter Property="CornerRadius" Value="8" />
-    </Style>
-
-    <Style Selector="Button.accent">
-      <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-      <Setter Property="Foreground" Value="White" />
-      <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="Padding" Value="22,10" />
-      <Setter Property="CornerRadius" Value="8" />
-    </Style>
-    <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
-      <Setter Property="Foreground" Value="White" />
-    </Style>
-
-    <Style Selector="Button.danger">
-      <Setter Property="Background" Value="{StaticResource DangerBrush}" />
-      <Setter Property="Foreground" Value="White" />
-      <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="Padding" Value="22,10" />
-      <Setter Property="CornerRadius" Value="8" />
-    </Style>
-    <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource DangerHoverBrush}" />
-      <Setter Property="Foreground" Value="White" />
-    </Style>
-
-    <Style Selector="Button.ghost">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-      <Setter Property="Padding" Value="12,7" />
-      <Setter Property="CornerRadius" Value="8" />
-    </Style>
-    <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    </Style>
-
-    <Style Selector="ToggleButton.ghost">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-      <Setter Property="Padding" Value="12,7" />
-      <Setter Property="CornerRadius" Value="8" />
-    </Style>
-    <Style Selector="ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    </Style>
-    <Style Selector="ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    </Style>
-
-    <!-- Top-level page switcher (Library / Options): plain transparent
-         buttons, not TabItem, so there is no Fluent selected-tab underline.
-         The active page is conveyed by brightness alone; LB/RB gamepad
-         hints flank the pair. -->
-    <Style Selector="Button.segment">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="0" />
-      <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-      <Setter Property="FontSize" Value="22" />
-      <Setter Property="FontWeight" Value="Bold" />
-      <Setter Property="Padding" Value="6,4" />
-      <Setter Property="CornerRadius" Value="8" />
-    </Style>
-    <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    </Style>
-    <Style Selector="Button.segment.active">
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    </Style>
-
-    <!-- Gamepad shoulder-button hint chip (LB/RB, L1/R1). -->
-    <Style Selector="Border.padHint">
-      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-      <Setter Property="CornerRadius" Value="6" />
-      <Setter Property="Padding" Value="8,3" />
-    </Style>
-
-    <Style Selector="ContextMenu">
-      <Setter Property="Background" Value="{StaticResource CardBrush}" />
-      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="CornerRadius" Value="10" />
-      <Setter Property="Padding" Value="6" />
-    </Style>
-    <Style Selector="ContextMenu MenuItem">
-      <Setter Property="Padding" Value="10,7" />
-      <Setter Property="CornerRadius" Value="7" />
-    </Style>
-    <Style Selector="ContextMenu Separator">
-      <Setter Property="Background" Value="{StaticResource CardBorderBrush}" />
-      <Setter Property="Height" Value="1" />
-      <Setter Property="Margin" Value="8,4" />
-    </Style>
-
-    <Style Selector="ListBox.console">
-      <Setter Property="Background" Value="#0B0E14" />
-      <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New, monospace" />
-      <Setter Property="FontSize" Value="12" />
-    </Style>
-    <Style Selector="ListBox.console ListBoxItem">
-      <Setter Property="Padding" Value="10,1" />
-      <Setter Property="MinHeight" Value="0" />
-    </Style>
-
-    <!-- Cover-art library grid -->
-    <Style Selector="ListBox.tileGrid ListBoxItem">
-      <Setter Property="Padding" Value="10" />
-      <Setter Property="Margin" Value="5" />
-      <Setter Property="CornerRadius" Value="14" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="RenderTransform" Value="translateY(0px)" />
-      <Setter Property="Transitions">
-        <Transitions>
-          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" />
-        </Transitions>
-      </Setter>
-    </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover">
-      <Setter Property="RenderTransform" Value="translateY(-3px)" />
-    </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource TileHoverBrush}" />
-    </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource TileSelectedBrush}" />
-      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
-    </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="{StaticResource TileSelectedBrush}" />
-      <Setter Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
-    </Style>
-
-    <Style Selector="Border.coverShadow">
-      <Setter Property="CornerRadius" Value="10" />
-      <Setter Property="BoxShadow" Value="0 6 14 0 #55000000" />
-    </Style>
-    <Style Selector="Border.coverClip">
-      <Setter Property="CornerRadius" Value="10" />
-      <Setter Property="ClipToBounds" Value="True" />
-      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="Background" Value="#1E64A7FF" />
+      <Setter Property="BorderBrush" Value="#5564A7FF" />
     </Style>
   </Application.Styles>
-
 </Application>

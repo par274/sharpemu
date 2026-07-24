@@ -25,6 +25,10 @@ public sealed class SettingRow : ContentControl
         AvaloniaProperty.Register<SettingRow, bool>(
             nameof(IsOverridden), defaultBindingMode: BindingMode.TwoWay);
 
+    public static readonly StyledProperty<string?> OverrideTextProperty =
+        AvaloniaProperty.Register<SettingRow, string?>(
+            nameof(OverrideText), "Override");
+
     public static readonly StyledProperty<FontFamily?> LabelFontFamilyProperty =
         AvaloniaProperty.Register<SettingRow, FontFamily?>(nameof(LabelFontFamily));
 
@@ -53,6 +57,12 @@ public sealed class SettingRow : ContentControl
     {
         get => GetValue(IsOverriddenProperty);
         set => SetValue(IsOverriddenProperty, value);
+    }
+
+    public string? OverrideText
+    {
+        get => GetValue(OverrideTextProperty);
+        set => SetValue(OverrideTextProperty, value);
     }
 
     public FontFamily? LabelFontFamily

@@ -7,11 +7,11 @@ using ReactiveUI;
 using ReactiveUI.SourceGenerators;
 
 /// <summary>
-/// Backs the per-game settings dialog. Each setting carries an "override"
+/// Backs the contextual per-game settings surface. Each setting carries an "override"
 /// flag (whether it diverges from the global defaults); only overridden values
 /// are persisted. Previously the dialog window edited controls and wrote to
 /// PerGameSettings.Save inline; this view-model owns the editable state so the
-/// window can be reduced to pure binding.
+/// view can be reduced to state presentation and interaction wiring.
 /// </summary>
 public partial class PerGameSettingsViewModel : ReactiveObject
 {

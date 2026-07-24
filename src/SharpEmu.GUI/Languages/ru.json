@@ -7,8 +7,8 @@
   "Page.GameCount.Other": "Игр: {0}",
 
   "Library.SearchWatermark": "Поиск…",
-  "Library.AddFolder": "＋ Добавить папку",
-  "Library.Rescan": "⟳ Сканировать",
+  "Library.AddFolder": "Добавить папку",
+  "Library.Rescan": "Сканировать",
   "Library.OpenFile": "Открыть файл…",
 
   "Library.Context.Launch": "Запустить",
@@ -22,9 +22,14 @@
   "Library.Empty.Hint": "Добавьте папку с играми, чтобы начать.",
   "Library.Empty.SearchTitle": "По вашему запросу ничего не найдено",
   "Library.Empty.SearchHint": "В библиотеке нет игр, соответствующих запросу «{0}».",
-  "Library.Empty.AddFolder": "＋ Добавить папку с играми",
+  "Library.Empty.AddFolder": "Добавить папку с играми",
 
   "Library.Loading": "Загрузка библиотеки…",
+  "Library.Stat.LastPlayed": "Последний запуск",
+  "Library.Stat.Version": "Версия",
+  "Library.Stat.Installed": "Установлено",
+  "Library.Stat.TitleId": "ID игры",
+  "Library.Stat.NotPlayed": "Ещё не запускалась",
 
   "Options.General": "Основные",
   "Options.Env.Tab": "Окружение",
@@ -40,6 +45,7 @@
   "Options.Env.LogNp.Desc": "Выводить в консоль вызовы библиотеки NP (PlayStation Network).",
   "Options.Section.Emulation": "ЭМУЛЯЦИЯ",
   "Options.Section.Logging": "ЛОГГИРОВАНИЕ",
+  "Options.Logging": "Логгирование",
   "Options.Section.Launcher": "ЛАУНЧЕР",
 
   "Options.CpuEngine.Label": "Движок ЦП",
@@ -82,10 +88,15 @@
 
   "Common.On": "Включено",
   "Common.Off": "Выключено",
+  "Common.Override": "Переопределить",
   "Common.Save": "Сохранить",
   "Common.Cancel": "Отмена",
+  "Common.Back": "Назад",
 
   "PerGame.Title": "Настройки игры — {0} ({1})",
+  "PerGame.Heading": "НАСТРОЙКИ ИГРЫ",
+  "PerGame.Overrides": "ПЕРЕОПРЕДЕЛЕНИЯ ИГРЫ",
+  "PerGame.ApplyHint": "Изменения применятся при следующем запуске этой игры.",
   "PerGame.InheritNote": "Неотмеченные строки наследуют глобальные настройки.",
   "PerGame.EnvToggles.Label": "Переключатели окружения",
   "PerGame.EnvToggles.Desc": "Переопределить глобальный набор переключателей SHARPEMU_* для этой игры.",
@@ -101,9 +112,9 @@
   "Launch.NoGameSelected": "Ничего не выбрано",
   "Launch.NoGameHint": "Выберите игру из библиотеки или откройте eboot.bin напрямую.",
   "Launch.Idle": "Ожидание",
-  "Launch.Console": "≡ Консоль",
-  "Launch.Launch": "▶  Запустить",
-  "Launch.Stop": "■  Остановить",
+  "Launch.Console": "Консоль",
+  "Launch.Launch": "Запустить",
+  "Launch.Stop": "Остановить",
   "Launch.Running": "Запущено - {0}",
   "Launch.Stopping": "Остановка…",
   "Launch.Exited": "Завершено с кодом {0} ({1})",

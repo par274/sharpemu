@@ -7,8 +7,8 @@
   "Page.GameCount.Other": "{0} jeux",
 
   "Library.SearchWatermark": "Rechercher dans la bibliothèque…",
-  "Library.AddFolder": "＋ Ajouter un dossier",
-  "Library.Rescan": "⟳ Analyser à nouveau",
+  "Library.AddFolder": "Ajouter un dossier",
+  "Library.Rescan": "Analyser à nouveau",
   "Library.OpenFile": "Ouvrir un fichier…",
 
   "Library.Context.Launch": "Lancer",
@@ -21,9 +21,14 @@
   "Library.Empty.Hint": "Ajoutez un dossier contenant vos jeux pour commencer.",
   "Library.Empty.SearchTitle": "Aucun jeu ne correspond à votre recherche",
   "Library.Empty.SearchHint": "Aucun élément de la bibliothèque ne correspond à « {0} ».",
-  "Library.Empty.AddFolder": "＋ Ajouter un dossier de jeux",
+  "Library.Empty.AddFolder": "Ajouter un dossier de jeux",
 
   "Library.Loading": "Chargement de la bibliothèque…",
+  "Library.Stat.LastPlayed": "Dernière partie",
+  "Library.Stat.Version": "Version",
+  "Library.Stat.Installed": "Installé",
+  "Library.Stat.TitleId": "ID du titre",
+  "Library.Stat.NotPlayed": "Jamais lancé",
 
   "Options.General": "Général",
   "Options.Env.Tab": "Environnement",
@@ -37,6 +42,7 @@
   "Options.Env.LogNp.Desc": "Journaliser les appels de la bibliothèque NP (PlayStation Network) dans la console.",
   "Options.Section.Emulation": "ÉMULATION",
   "Options.Section.Logging": "JOURNALISATION",
+  "Options.Logging": "Journalisation",
   "Options.Section.Launcher": "LANCEUR",
 
   "Options.CpuEngine.Label": "Moteur CPU",
@@ -79,6 +85,7 @@
 
   "Common.On": "Activé",
   "Common.Off": "Désactivé",
+  "Common.Override": "Remplacer",
 
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Rechercher…",
@@ -91,9 +98,9 @@
   "Launch.NoGameSelected": "Aucun jeu sélectionné",
   "Launch.NoGameHint": "Choisissez un jeu dans la bibliothèque ou ouvrez directement un fichier eboot.bin.",
   "Launch.Idle": "Inactif",
-  "Launch.Console": "≡ Console",
-  "Launch.Launch": "▶  Lancer",
-  "Launch.Stop": "■  Arrêter",
+  "Launch.Console": "Console",
+  "Launch.Launch": "Lancer",
+  "Launch.Stop": "Arrêter",
   "Launch.Running": "En cours d’exécution — {0}",
   "Launch.Stopping": "Arrêt en cours…",
   "Launch.Exited": "Processus terminé avec le code {0} ({1})",
@@ -149,7 +156,11 @@
   "Options.Env.LogIo.Desc": "Journaliser l’ouverture et la lecture des fichiers ainsi que la résolution des chemins dans la console.\nÀ utiliser quand un jeu ne trouve pas ses fichiers de données au démarrage.",
   "Common.Save": "Enregistrer",
   "Common.Cancel": "Annuler",
+  "Common.Back": "Retour",
   "PerGame.Title": "Paramètres par jeu — {0} ({1})",
+  "PerGame.Heading": "PARAMÈTRES DU JEU",
+  "PerGame.Overrides": "REMPLACEMENTS DU JEU",
+  "PerGame.ApplyHint": "Les modifications seront appliquées au prochain lancement de ce jeu.",
   "PerGame.InheritNote": "Les lignes non cochées héritent des valeurs globales par défaut.",
   "PerGame.EnvToggles.Label": "Variables d’environnement",
   "PerGame.EnvToggles.Desc": "Remplacer l’ensemble global des options SHARPEMU_* pour ce jeu.",

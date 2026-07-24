@@ -54,6 +54,7 @@ public partial class MainWindow : Window
     private AvaloniaList<LogLine> _consoleLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
     private readonly DispatcherTimer _libraryBlurTimer;
+    private readonly DispatcherTimer _clockTimer;
     private BlurEffect? _libraryBlur;
     private double _libraryBlurStartRadius;
     private double _libraryBlurTargetRadius;
@@ -94,6 +95,11 @@ public partial class MainWindow : Window
     // desktop-topmost popup, so it closes while the launcher is in the
     // background or minimized and reopens from this flag on activation.
     private bool _sessionLoadingActive;
+    private bool _isGameSettingsOpen;
+    private bool _isLoadingGameSettings;
+    private int _gameOptionsSectionIndex;
+    private int _selectedDetailsAnimationGeneration;
+    private ViewModels.PerGameSettingsViewModel? _gameSettingsViewModel;
 
     // Controller navigation state.
     private readonly DispatcherTimer _gamepadTimer;
@@ -160,8 +166,6 @@ public partial class MainWindow : Window
         ConsoleList.ItemsSource = _consoleLines;
         _consoleMirror = GuiConsoleMirror.Install((line, isError) =>
             _logService.Enqueue(line, isError));
-        Closed += (_, _) => _emulatorService.Stop();
-
         _consoleFlushTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(80),
@@ -178,6 +182,19 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromMilliseconds(16),
         };
         _libraryBlurTimer.Tick += (_, _) => AdvanceLibraryBlur();
+
+        _clockTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(15),
+        };
+        _clockTimer.Tick += (_, _) => UpdateClock();
+        UpdateClock();
+        _clockTimer.Start();
+        Closed += (_, _) =>
+        {
+            _clockTimer.Stop();
+            _emulatorService.Stop();
+        };
 
         // Native popups float above every window on the desktop; they must
         // follow the launcher into the background or a minimized state.
@@ -220,7 +237,75 @@ public partial class MainWindow : Window
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
-        ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        ConsoleNavButton.Click += (_, _) => SetActivePage(2);
+        ConsoleToggle.Click += (_, _) => OpenSelectedGameSettings();
+        var gameOptionsNavButtons = new[]
+        {
+            GameOptionsGeneralNav,
+            GameOptionsLoggingNav,
+            GameOptionsEnvironmentNav,
+            GameOptionsBackNav,
+        };
+        for (var index = 0; index < gameOptionsNavButtons.Length; index++)
+        {
+            var section = index;
+            var button = gameOptionsNavButtons[index];
+            if (section < 3)
+            {
+                button.Click += (_, _) => SetGameOptionsSection(section);
+            }
+            else
+            {
+                button.Click += (_, _) => CloseGameSettings();
+            }
+
+            button.PointerEntered += (_, _) =>
+            {
+                if (_isGameSettingsOpen)
+                {
+                    SetGameOptionsNavIndicator(section);
+                }
+            };
+            button.GotFocus += (_, _) => SetGameOptionsNavIndicator(section);
+        }
+        GameOptionsNavHost.PointerExited += (_, _) =>
+        {
+            if (_isGameSettingsOpen)
+            {
+                SetGameOptionsNavIndicator(_gameOptionsSectionIndex);
+            }
+        };
+        GameOptionsLaunchButton.Click += (_, _) =>
+        {
+            CloseGameSettings();
+            LaunchSelected();
+        };
+        GameOptionsOpenFolderButton.Click += (_, _) => OpenSelectedGameFolder();
+        GameOptionsCopyPathButton.Click += async (_, _) =>
+            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path, "Clipboard.Path");
+        GameOptionsCopyTitleIdButton.Click += async (_, _) =>
+            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId, "Clipboard.TitleId");
+        GameOptionsRemoveButton.Click += (_, _) =>
+        {
+            CloseGameSettings();
+            RemoveSelectedFromLibrary();
+        };
+        GameLogLevelBox.ItemsSource = ViewModels.PerGameSettingsViewModel.LogLevels;
+        GameLogLevelBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameTraceBox.ValueChanged += (_, _) => PersistOpenGameSettings();
+        GameStrictToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
+        GameLogToFileToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
+        foreach (var (_, toggle) in GameEnvironmentToggles())
+        {
+            toggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
+        }
+
+        MinimizeButton.Click += (_, _) => WindowState = WindowState.Minimized;
+        MaximizeButton.Click += (_, _) =>
+            WindowState = WindowState == WindowState.Maximized
+                ? WindowState.Normal
+                : WindowState.Maximized;
+        CloseButton.Click += (_, _) => Close();
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
@@ -333,11 +418,17 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Switches between the Library and Options pages. Also reachable via
+    /// Switches between the Library, Options and Console pages. Library and
+    /// Options are also reachable via
     /// the gamepad's shoulder buttons (LB/RB, L1/R1) from <see cref="PollGamepad"/>.
     /// </summary>
     private void SetActivePage(int index)
     {
+        if (index != 0 && _isGameSettingsOpen)
+        {
+            CloseGameSettings();
+        }
+
         // The shell view-model owns the active-page state (and the save-on-leave
         // side effect); the window only mirrors it into control visibility.
         _main.NavigateTo(index);
@@ -345,9 +436,12 @@ public partial class MainWindow : Window
 
         SetActiveClass(LibraryTabButton, _activePageIndex == 0);
         SetActiveClass(OptionsTabButton, _activePageIndex == 1);
+        SetActiveClass(ConsoleNavButton, _activePageIndex == 2);
         LibraryPage.IsVisible = _activePageIndex == 0;
-        LibraryToolbar.IsVisible = _activePageIndex == 0;
+        LibraryToolbar.IsVisible = true;
+        SearchBox.IsVisible = false;
         OptionsPage.IsVisible = _activePageIndex == 1;
+        ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
     }
 
     private static void SetActiveClass(Button button, bool active)
@@ -363,6 +457,11 @@ public partial class MainWindow : Window
         {
             button.Classes.Remove("active");
         }
+    }
+
+    private void UpdateClock()
+    {
+        ClockText.Text = DateTime.Now.ToString("HH:mm");
     }
 
     // ---- Github http client config ----
@@ -542,10 +641,12 @@ public partial class MainWindow : Window
     {
         var loc = Localization.Instance;
 
-        // Page.Library / Page.Options and the toolbar buttons (AddFolder,
-        // Rescan, OpenFile) are now XAML-bound to the Localization indexer, so
-        // they refresh automatically on language change.
+        LibraryTabButton.Content = loc.Get("Page.Library");
+        OptionsTabButton.Content = loc.Get("Page.Options");
         SearchBox.PlaceholderText = loc.Get("Library.SearchWatermark");
+        AddFolderButtonLabel.Text = loc.Get("Library.AddFolder");
+        RescanButtonLabel.Text = loc.Get("Library.Rescan");
+        OpenFileButtonLabel.Text = loc.Get("Library.OpenFile");
 
         CtxLaunch.Header = loc.Get("Library.Context.Launch");
         CtxOpenFolder.Header = loc.Get("Library.Context.OpenFolder");
@@ -554,12 +655,39 @@ public partial class MainWindow : Window
         CtxGameSettings.Header = loc.Get("Library.Context.GameSettings");
         CtxRemove.Header = loc.Get("Library.Context.Remove");
 
-        EmptyAddFolderButton.Content = loc.Get("Library.Empty.AddFolder");
+        EmptyAddFolderButtonLabel.Text = loc.Get("Library.Empty.AddFolder");
         LoadingStateText.Text = loc.Get("Library.Loading");
+        LastPlayedLabel.Text = loc.Get("Library.Stat.LastPlayed");
+        VersionLabel.Text = loc.Get("Library.Stat.Version");
+        InstalledLabel.Text = loc.Get("Library.Stat.Installed");
+        TitleIdLabel.Text = loc.Get("Library.Stat.TitleId");
+        LastPlayedValue.Text = loc.Get("Library.Stat.NotPlayed");
 
-        GeneralTabItem.Header = loc.Get("Options.General");
-        GraphicsTabItem.Header = loc.Get("Options.Graphics");
-        EnvTabItem.Header = loc.Get("Options.Env.Tab");
+        GameOptionsLastPlayedLabel.Text = loc.Get("Library.Stat.LastPlayed");
+        GameOptionsVersionLabel.Text = loc.Get("Library.Stat.Version");
+        GameOptionsInstalledLabel.Text = loc.Get("Library.Stat.Installed");
+        GameOptionsTitleIdLabel.Text = loc.Get("Library.Stat.TitleId");
+        GameOptionsLastPlayedValue.Text = loc.Get("Library.Stat.NotPlayed");
+        GameOptionsGeneralNavLabel.Text = loc.Get("Options.General");
+        GameOptionsLoggingNavLabel.Text = loc.Get("Options.Logging");
+        GameOptionsEnvironmentNavLabel.Text = loc.Get("Options.Env.Tab");
+        GameOptionsBackNavLabel.Text = loc.Get("Common.Back");
+        GameOptionsEnvironmentDescription.Text = loc.Get("Options.Env.Desc");
+        GameOptionsLaunchLabel.Text = loc.Get("Library.Context.Launch");
+        GameOptionsOpenFolderLabel.Text = loc.Get("Library.Context.OpenFolder");
+        GameOptionsCopyPathLabel.Text = loc.Get("Library.Context.CopyPath");
+        GameOptionsCopyTitleIdLabel.Text = loc.Get("Library.Context.CopyTitleId");
+        GameOptionsRemoveLabel.Text = loc.Get("Library.Context.Remove");
+
+        GameStrictRow.Label = loc.Get("Options.Strict.Label");
+        GameStrictRow.Description = loc.Get("Options.Strict.Desc");
+        GameLogLevelRow.Label = loc.Get("Options.LogLevel.Label");
+        GameLogLevelRow.Description = loc.Get("Options.LogLevel.Desc");
+        GameTraceRow.Label = loc.Get("Options.TraceImports.Label");
+        GameTraceRow.Description = loc.Get("Options.TraceImports.Desc");
+        GameLogToFileRow.Label = loc.Get("Options.LogToFile.Label");
+        GameLogToFileRow.Description = loc.Get("Options.LogToFile.Desc");
+
         EnvSectionTitle.Text = loc.Get("Options.Section.Environment");
         EnvDesc.Text = loc.Get("Options.Env.Desc");
         EnvBthidRow.Description = loc.Get("Options.Env.Bthid.Desc");
@@ -618,7 +746,11 @@ public partial class MainWindow : Window
         AutoUpdateRow.Label = loc.Get("Updater.Auto.Label");
         AutoUpdateRow.Description = loc.Get("Updater.Auto.Desc");
 
-        foreach (var toggle in new[] { StrictToggle, LogToFileToggle, OverrideLogFileToggle, TitleMusicToggle, DiscordToggle, AutoUpdateToggle })
+        foreach (var toggle in new[]
+                 {
+                     StrictToggle, LogToFileToggle, OverrideLogFileToggle, TitleMusicToggle, DiscordToggle,
+                     AutoUpdateToggle, GameStrictToggle, GameLogToFileToggle,
+                 })
         {
             toggle.OnContent = loc.Get("Common.On");
             toggle.OffContent = loc.Get("Common.Off");
@@ -631,9 +763,11 @@ public partial class MainWindow : Window
         CopyLogButton.Content = loc.Get("Console.Copy");
         ClearLogButton.Content = loc.Get("Console.Clear");
 
-        ConsoleToggle.Content = loc.Get("Launch.Console");
-        LaunchButton.Content = loc.Get("Launch.Launch");
-        StopButton.Content = loc.Get("Launch.Stop");
+        ConsoleToggleLabel.Text = loc.Get("Page.Options");
+        LaunchButtonLabel.Text = loc.Get("Launch.Launch");
+        StopButtonLabel.Text = loc.Get("Launch.Stop");
+        SessionConsoleButtonLabel.Text = loc.Get("Launch.Console");
+        SessionStopButtonLabel.Text = loc.Get("Launch.Stop");
 
         AboutSectionTitle.Text = loc.Get("Options.About");
         GithubLabel.Text = loc.Get("About.Github.Label");
@@ -705,6 +839,25 @@ public partial class MainWindow : Window
 
     private void OnPreviewKeyDown(object? sender, KeyEventArgs args)
     {
+        if (_isGameSettingsOpen && args.Key == Key.Escape)
+        {
+            CloseGameSettings();
+            args.Handled = true;
+            return;
+        }
+
+        if (!_isRunning &&
+            _activePageIndex == 0 &&
+            !_isGameSettingsOpen &&
+            !SearchBox.IsKeyboardFocusWithin &&
+            args.Key is Key.Left or Key.Right)
+        {
+            MoveSelection(args.Key == Key.Left ? -1 : 1);
+            GameList.Focus();
+            args.Handled = true;
+            return;
+        }
+
         // While a session is on screen, Enter and Space are game input
         // (Cross button). Keyboard focus stays on the launcher window, so a
         // previously clicked, still-focused button (console toggle, session
@@ -726,19 +879,17 @@ public partial class MainWindow : Window
             // Leaving F11 should restore a monitor-sized window with the
             // launcher chrome, not fall back to the design-time window size.
             WindowState = WindowState.Maximized;
-            WindowDecorations = WindowDecorations.Full;
+            WindowDecorations = WindowDecorations.None;
             TitleBar.IsVisible = true;
             StatusBar.IsVisible = true;
             if (_gameFullscreen)
             {
                 _gameFullscreen = false;
-                Grid.SetRow(MainContent, 1);
-                Grid.SetRowSpan(MainContent, 1);
-                MainContent.Margin = _isRunning
-                    ? new Thickness(0)
-                    : new Thickness(32, 24, 32, 20);
+                Grid.SetRow(MainContent, 0);
+                Grid.SetRowSpan(MainContent, 2);
+                MainContent.Margin = new Thickness(0);
                 ContentToolbar.IsVisible = !_isRunning;
-                ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+                ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
                 LaunchBar.IsVisible = true;
                 QueueGameSurfaceResize();
                 UpdateSessionBarVisibility();
@@ -794,10 +945,27 @@ public partial class MainWindow : Window
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        var source = e.Source as Visual;
+        if (source?.FindAncestorOfType<Button>(includeSelf: true) is null &&
+            source?.FindAncestorOfType<TextBox>(includeSelf: true) is null &&
+            e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
         {
             BeginMoveDrag(e);
         }
+    }
+
+    private void OnResizeHandlePointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (WindowState != WindowState.Normal ||
+            !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed ||
+            sender is not Control { Tag: string edgeName } ||
+            !Enum.TryParse<WindowEdge>(edgeName, out var edge))
+        {
+            return;
+        }
+
+        BeginResizeDrag(edge, e);
+        e.Handled = true;
     }
 
     // ---- Settings ----
@@ -1035,6 +1203,7 @@ public partial class MainWindow : Window
         var games = await Task.Run(() => library.ScanFolders(folders, excluded));
 
         _library.ApplyScannedGames(games);
+        RefreshVisibleGames();
         _allGames.Clear();
         _allGames.AddRange(games);
         LoadingState.IsVisible = false;
@@ -1086,7 +1255,167 @@ public partial class MainWindow : Window
         }
 
         var vm = new ViewModels.PerGameSettingsViewModel(game.TitleId, game.Name, _settings);
-        _ = new PerGameSettingsDialog(vm).ShowDialog(this);
+        _gameSettingsViewModel = vm;
+        LoadGameSettings(vm);
+        GameOptionsOverlay.DataContext = game;
+        SetGameOptionsSection(0);
+        GameOptionsLaunchButton.IsEnabled = !_isRunning;
+        GameOptionsCopyTitleIdButton.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
+
+        _selectedDetailsAnimationGeneration++;
+        SelectedDetailsHost.Classes.Remove("detailsOut");
+        SelectedDetailsHost.Classes.Remove("detailsInStart");
+        SetStateClass(BackdropLayer, "gameOptionsOpen", active: true);
+        SetStateClass(CarouselHost, "gameOptionsOpen", active: true);
+        SetStateClass(SelectedDetailsHost, "gameOptionsOpen", active: true);
+        SetStateClass(LaunchBar, "gameOptionsOpen", active: true);
+        SetStateClass(GameOptionsOverlay, "gameOptionsOpen", active: true);
+
+        _isGameSettingsOpen = true;
+        ConsoleToggle.IsChecked = true;
+        GameList.IsHitTestVisible = false;
+        LaunchBar.IsHitTestVisible = false;
+        GameOptionsOverlay.IsHitTestVisible = true;
+        GameOptionsGeneralNav.Focus();
+    }
+
+    private void CloseGameSettings()
+    {
+        if (!_isGameSettingsOpen)
+        {
+            return;
+        }
+
+        _isGameSettingsOpen = false;
+        SetStateClass(BackdropLayer, "gameOptionsOpen", active: false);
+        SetStateClass(CarouselHost, "gameOptionsOpen", active: false);
+        SetStateClass(SelectedDetailsHost, "gameOptionsOpen", active: false);
+        SetStateClass(LaunchBar, "gameOptionsOpen", active: false);
+        SetStateClass(GameOptionsOverlay, "gameOptionsOpen", active: false);
+        GameOptionsOverlay.IsHitTestVisible = false;
+        GameList.IsHitTestVisible = true;
+        LaunchBar.IsHitTestVisible = true;
+        ConsoleToggle.IsChecked = false;
+        GameList.Focus();
+    }
+
+    private void LoadGameSettings(ViewModels.PerGameSettingsViewModel vm)
+    {
+        _isLoadingGameSettings = true;
+        try
+        {
+            GameLogLevelBox.SelectedItem = vm.SelectedLogLevel;
+            GameTraceBox.Value = vm.ImportTraceLimit;
+            GameStrictToggle.IsChecked = vm.IsStrictDynlibResolution;
+            GameLogToFileToggle.IsChecked = vm.IsLogToFile;
+
+            foreach (var (name, toggle) in GameEnvironmentToggles())
+            {
+                toggle.IsChecked = vm.GetEnvironment(name);
+            }
+        }
+        finally
+        {
+            _isLoadingGameSettings = false;
+        }
+    }
+
+    private void PersistOpenGameSettings()
+    {
+        if (_isGameSettingsOpen &&
+            !_isLoadingGameSettings &&
+            _gameSettingsViewModel is { } vm)
+        {
+            PersistGameSettings(vm);
+        }
+    }
+
+    private void PersistGameSettings(ViewModels.PerGameSettingsViewModel vm)
+    {
+        vm.SelectedLogLevel = (string?)GameLogLevelBox.SelectedItem ?? "Info";
+        vm.IsLogLevelOverridden =
+            !string.Equals(vm.SelectedLogLevel, _settings.LogLevel, StringComparison.Ordinal);
+        vm.ImportTraceLimit = (int)(GameTraceBox.Value ?? 0);
+        vm.IsImportTraceOverridden = vm.ImportTraceLimit != _settings.ImportTraceLimit;
+        vm.IsStrictDynlibResolution = GameStrictToggle.IsChecked == true;
+        vm.IsStrictOverridden =
+            vm.IsStrictDynlibResolution != _settings.StrictDynlibResolution;
+        vm.IsLogToFile = GameLogToFileToggle.IsChecked == true;
+        vm.IsLogToFileOverridden = vm.IsLogToFile != _settings.LogToFile;
+
+        var selectedEnvironment = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (name, toggle) in GameEnvironmentToggles())
+        {
+            var isEnabled = toggle.IsChecked == true;
+            vm.SetEnvironment(name, isEnabled);
+            if (isEnabled)
+            {
+                selectedEnvironment.Add(name);
+            }
+        }
+
+        vm.IsEnvironmentOverridden =
+            !_settings.EnvironmentToggles.ToHashSet(StringComparer.Ordinal).SetEquals(selectedEnvironment);
+        vm.Save();
+    }
+
+    private void SetGameOptionsSection(int section)
+    {
+        var buttons = new[]
+        {
+            GameOptionsGeneralNav,
+            GameOptionsLoggingNav,
+            GameOptionsEnvironmentNav,
+        };
+        var panels = new Control[]
+        {
+            GameOptionsGeneralPanel,
+            GameOptionsLoggingPanel,
+            GameOptionsEnvironmentPanel,
+        };
+
+        _gameOptionsSectionIndex = section;
+        SetGameOptionsNavIndicator(section);
+        for (var index = 0; index < buttons.Length; index++)
+        {
+            SetActiveClass(buttons[index], index == section);
+            panels[index].IsVisible = index == section;
+        }
+    }
+
+    private void SetGameOptionsNavIndicator(int section)
+    {
+        if (GameOptionsNavIndicator.RenderTransform is TranslateTransform transform)
+        {
+            transform.Y = Math.Clamp(section, 0, 3) * 53;
+        }
+    }
+
+    private (string Name, ToggleSwitch Toggle)[] GameEnvironmentToggles() =>
+    [
+        ("SHARPEMU_BTHID_UNAVAILABLE", GameEnvBthidToggle),
+        ("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", GameEnvLoopGuardToggle),
+        ("SHARPEMU_WRITABLE_APP0", GameEnvWritableApp0Toggle),
+        ("SHARPEMU_VK_VALIDATION", GameEnvVkValidationToggle),
+        ("SHARPEMU_DUMP_SPIRV", GameEnvDumpSpirvToggle),
+        ("SHARPEMU_LOG_DIRECT_MEMORY", GameEnvLogDirectMemoryToggle),
+        ("SHARPEMU_LOG_IO", GameEnvLogIoToggle),
+        ("SHARPEMU_LOG_NP", GameEnvLogNpToggle),
+    ];
+
+    private static void SetStateClass(StyledElement element, string className, bool active)
+    {
+        if (active)
+        {
+            if (!element.Classes.Contains(className))
+            {
+                element.Classes.Add(className);
+            }
+        }
+        else
+        {
+            element.Classes.Remove(className);
+        }
     }
 
     private void OpenSelectedGameFolder()
@@ -1170,6 +1499,17 @@ public partial class MainWindow : Window
         {
             GameList.SelectedItem = reselected;
         }
+        else if (_visibleGames.Count > 0)
+        {
+            var first = _visibleGames[0];
+            GameList.SelectedItem = first;
+            _library.SelectedGame = first;
+        }
+        else
+        {
+            GameList.SelectedItem = null;
+            _library.SelectedGame = null;
+        }
 
         EmptyState.IsVisible = _visibleGames.Count == 0;
         UpdateEmptyStateTexts();
@@ -1201,26 +1541,66 @@ public partial class MainWindow : Window
 
     private void UpdateSelectedGame()
     {
-        if (GameList.SelectedItem is GameEntry game)
+        var game = GameList.SelectedItem as GameEntry;
+        _ = AnimateSelectedGameDetailsAsync(game);
+
+        if (game is not null)
         {
-            UpdateSelectedGameTexts();
-            SelectedCoverPanel.DataContext = game;
-            SelectedBadgesRow.DataContext = game;
-            SelectedBadgesRow.IsVisible = true;
             _ = UpdateBackdropAsync(game);
             PlaySelectedGamePreview(game);
         }
         else
         {
-            UpdateSelectedGameTexts();
-            SelectedCoverPanel.DataContext = null;
-            SelectedBadgesRow.DataContext = null;
-            SelectedBadgesRow.IsVisible = false;
             _ = UpdateBackdropAsync(null);
             _sndPreview.Stop();
         }
 
         UpdateRunButtons();
+    }
+
+    private async Task AnimateSelectedGameDetailsAsync(GameEntry? game)
+    {
+        var generation = ++_selectedDetailsAnimationGeneration;
+        SelectedDetailsHost.Classes.Remove("detailsInStart");
+        SelectedDetailsHost.Classes.Add("detailsOut");
+        await Task.Delay(110);
+
+        if (generation != _selectedDetailsAnimationGeneration)
+        {
+            return;
+        }
+
+        ApplySelectedGameDetails(game);
+        SelectedDetailsHost.Classes.Remove("detailsOut");
+        SelectedDetailsHost.Classes.Add("detailsInStart");
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
+
+        if (generation != _selectedDetailsAnimationGeneration)
+        {
+            return;
+        }
+
+        SelectedDetailsHost.Classes.Remove("detailsInStart");
+    }
+
+    private void ApplySelectedGameDetails(GameEntry? game)
+    {
+        if (game is not null)
+        {
+            SelectedGameTitle.Text = game.Name;
+            SelectedGamePath.Text = game.Path;
+            SelectedCoverPanel.DataContext = game;
+            SelectedBadgesRow.DataContext = game;
+            SelectedBadgesRow.IsVisible = true;
+        }
+        else
+        {
+            SelectedGameTitle.Text = Localization.Instance.Get("Launch.NoGameSelected");
+            SelectedGamePath.Text = Localization.Instance.Get("Launch.NoGameHint");
+            SelectedCoverPanel.DataContext = null;
+            SelectedBadgesRow.DataContext = null;
+            SelectedBadgesRow.IsVisible = false;
+        }
     }
 
     /// <summary>
@@ -1230,16 +1610,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void UpdateSelectedGameTexts()
     {
-        if (GameList.SelectedItem is GameEntry game)
-        {
-            SelectedGameTitle.Text = game.Name;
-            SelectedGamePath.Text = game.Path;
-        }
-        else
-        {
-            SelectedGameTitle.Text = Localization.Instance.Get("Launch.NoGameSelected");
-            SelectedGamePath.Text = Localization.Instance.Get("Launch.NoGameHint");
-        }
+        ApplySelectedGameDetails(GameList.SelectedItem as GameEntry);
     }
 
     /// <summary>
@@ -1314,6 +1685,7 @@ public partial class MainWindow : Window
     {
         var generation = ++_backdropGeneration;
         BackdropImage.Opacity = 0;
+        CoverFallbackImage.Opacity = 0;
 
         // The bundled key art is the primary backdrop whenever the selection
         // has no art of its own; the window color stays as the last fallback.
@@ -1326,9 +1698,43 @@ public partial class MainWindow : Window
             }
         }
 
-        if (game?.BackgroundPath is null)
+        if (game is null)
         {
             ShowDefaultBackdrop();
+            return;
+        }
+
+        if (game.BackgroundPath is null)
+        {
+            ShowDefaultBackdrop();
+            if (game.CoverPath is null)
+            {
+                return;
+            }
+
+            if (game.Cover is null)
+            {
+                try
+                {
+                    var coverPath = game.CoverPath;
+                    game.Cover = await Task.Run(() =>
+                    {
+                        using var stream = File.OpenRead(coverPath);
+                        return Bitmap.DecodeToWidth(stream, 720);
+                    });
+                }
+                catch (Exception)
+                {
+                    return;
+                }
+            }
+
+            if (generation == _backdropGeneration)
+            {
+                CoverFallbackImage.Source = game.Cover;
+                CoverFallbackImage.Opacity = 1.0;
+            }
+
             return;
         }
 
@@ -1677,12 +2083,13 @@ public partial class MainWindow : Window
         SessionBarPopup.IsOpen = false;
         HideSessionLoading();
         AnimateLibraryBlur(0, clearWhenComplete: true);
-        MainContent.Margin = new Thickness(32, 24, 32, 20);
+        MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
         LaunchBar.IsVisible = true;
         LibraryPage.IsVisible = _activePageIndex == 0;
-        LibraryToolbar.IsVisible = _activePageIndex == 0;
+        LibraryToolbar.IsVisible = true;
+        SearchBox.IsVisible = false;
         OptionsPage.IsVisible = _activePageIndex == 1;
         // Game art when the source still holds it, otherwise the bundled
         // default; a bare color only when neither is available.
@@ -1788,12 +2195,13 @@ public partial class MainWindow : Window
         GameView.IsHitTestVisible = false;
         SessionBarPopup.IsOpen = false;
         AnimateLibraryBlur(LaunchBlurRadius);
-        MainContent.Margin = new Thickness(32, 24, 32, 20);
+        MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
         LaunchBar.IsVisible = true;
         LibraryPage.IsVisible = _activePageIndex == 0;
-        LibraryToolbar.IsVisible = _activePageIndex == 0;
+        LibraryToolbar.IsVisible = true;
+        SearchBox.IsVisible = false;
         OptionsPage.IsVisible = _activePageIndex == 1;
         BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
         UpdateRunButtons();
@@ -1870,7 +2278,6 @@ public partial class MainWindow : Window
         }
 
         ConsoleSearchBox.Text = string.Empty;
-        ConsoleToggle.IsChecked = false;
         ConsolePanel.IsVisible = false;
         // The detached window shares the same log buffer as the inline panel,
         // owned by ILogService; clearing it clears both views.
@@ -1881,8 +2288,7 @@ public partial class MainWindow : Window
         _consoleWindow.Closed += (_, _) =>
         {
             _consoleWindow = null;
-            ConsoleToggle.IsChecked = true;
-            ConsolePanel.IsVisible = true;
+            ConsolePanel.IsVisible = _activePageIndex == 2;
         };
         _consoleWindow.Show(this);
     }
