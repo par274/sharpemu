@@ -24,7 +24,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
         KeyDown="OnKeyDown">
 
-  <Grid x:Name="RootLayout" RowDefinitions="92,*,0" Background="#080B12">
+  <Grid x:Name="RootLayout" RowDefinitions="92,*,0" Background="#0C0C0C">
     <Grid x:Name="MainContent" Grid.Row="0" Grid.RowSpan="2">
       <!-- Key art and the same three-layer atmosphere used by the WebUI. -->
       <Grid x:Name="BackdropLayer"
@@ -62,24 +62,24 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </Image.Transitions>
           </Image>
         </Grid>
-        <Border Background="#6B03060C" />
+        <Border Background="#6B070707" />
         <Border>
           <Border.Background>
             <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
-              <GradientStop Offset="0" Color="#EB05080F" />
-              <GradientStop Offset="0.30" Color="#A605080F" />
-              <GradientStop Offset="0.58" Color="#1F05080F" />
-              <GradientStop Offset="1" Color="#0F05080F" />
+              <GradientStop Offset="0" Color="#EB090909" />
+              <GradientStop Offset="0.30" Color="#A6090909" />
+              <GradientStop Offset="0.58" Color="#1F090909" />
+              <GradientStop Offset="1" Color="#0F090909" />
             </LinearGradientBrush>
           </Border.Background>
         </Border>
         <Border>
           <Border.Background>
             <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
-              <GradientStop Offset="0" Color="#FF060912" />
-              <GradientStop Offset="0.18" Color="#C7060912" />
-              <GradientStop Offset="0.58" Color="#0F060912" />
-              <GradientStop Offset="1" Color="#33060912" />
+              <GradientStop Offset="0" Color="#FF0B0B0B" />
+              <GradientStop Offset="0.18" Color="#C70B0B0B" />
+              <GradientStop Offset="0.58" Color="#0F0B0B0B" />
+              <GradientStop Offset="1" Color="#330B0B0B" />
             </LinearGradientBrush>
           </Border.Background>
         </Border>
@@ -87,7 +87,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
       <Panel x:Name="PagesHost">
         <!-- Library: horizontal cover rail, then selected-game details. -->
-        <Grid x:Name="LibraryPage" RowDefinitions="136,270,*">
+        <Grid x:Name="LibraryPage" Classes="appPage" RowDefinitions="136,270,*">
           <Panel x:Name="CarouselHost"
                  Classes="carouselHost"
                  Grid.Row="1"
@@ -654,16 +654,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
 
         <!-- Options mirrors the former WebUI's single translucent settings column. -->
-        <Grid x:Name="OptionsPage" IsVisible="False" RowDefinitions="124,*">
-          <Border Grid.RowSpan="2" Background="#080B12" />
-          <Border Grid.RowSpan="2">
-            <Border.Background>
-              <LinearGradientBrush StartPoint="100%,0%" EndPoint="35%,55%">
-                <GradientStop Offset="0" Color="#2464A7FF" />
-                <GradientStop Offset="0.42" Color="#00080B12" />
-              </LinearGradientBrush>
-            </Border.Background>
-          </Border>
+        <Grid x:Name="OptionsPage" Classes="appPage" IsVisible="False" RowDefinitions="124,*">
+          <Border Grid.RowSpan="2" Background="{StaticResource GameOptionsMenuBrush}" />
           <ScrollViewer Grid.Row="1" Margin="64,0,24,30">
             <StackPanel Width="1040" HorizontalAlignment="Left" Spacing="24">
               <StackPanel Spacing="8" Margin="0,0,0,16">
@@ -897,16 +889,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
 
         <!-- Console is a first-class page, as in the WebUI. -->
-        <Grid x:Name="ConsolePanel" IsVisible="False" RowDefinitions="124,*">
-          <Border Grid.RowSpan="2" Background="#080B12" />
-          <Border Grid.RowSpan="2">
-            <Border.Background>
-              <LinearGradientBrush StartPoint="100%,0%" EndPoint="35%,55%">
-                <GradientStop Offset="0" Color="#2464A7FF" />
-                <GradientStop Offset="0.42" Color="#00080B12" />
-              </LinearGradientBrush>
-            </Border.Background>
-          </Border>
+        <Grid x:Name="ConsolePanel" Classes="appPage" IsVisible="False" RowDefinitions="124,*">
+          <Border Grid.RowSpan="2" Background="{StaticResource GameOptionsMenuBrush}" />
           <Grid Grid.Row="1" Margin="64,0,64,30" RowDefinitions="Auto,*">
             <StackPanel Spacing="8" Margin="0,0,0,20">
               <TextBlock Text="SHARPEMU / RUNTIME" Classes="sectionTitle" />
@@ -917,7 +901,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                          LetterSpacing="-3" />
             </StackPanel>
             <Border Grid.Row="1"
-                    Background="#C70B0F17"
+                    Background="#C7101010"
                     BorderBrush="#12FFFFFF"
                     BorderThickness="1"
                     CornerRadius="20"
@@ -985,8 +969,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Border>
         <Border.Background>
           <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
-            <GradientStop Offset="0" Color="#9405080F" />
-            <GradientStop Offset="1" Color="#0005080F" />
+            <GradientStop Offset="0" Color="#94090909" />
+            <GradientStop Offset="1" Color="#00090909" />
           </LinearGradientBrush>
         </Border.Background>
       </Border>
@@ -1016,7 +1000,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <TextBlock Text="L1"
                        FontSize="9"
                        FontWeight="Bold"
-                       Foreground="#07101D"
+                       Foreground="#111111"
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center" />
           </Border>
@@ -1064,7 +1048,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <TextBlock Text="R1"
                        FontSize="9"
                        FontWeight="Bold"
-                       Foreground="#07101D"
+                       Foreground="#111111"
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center" />
           </Border>
@@ -1210,7 +1194,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       ShouldUseOverlayLayer="False"
                       TakesFocusFromNativeControl="False"
                       IsLightDismissEnabled="False">
-      <Border Background="#F5202023"
+      <Border Background="#F5202020"
               Width="598"
               Height="58"
               CornerRadius="16"
@@ -1274,7 +1258,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       ShouldUseOverlayLayer="False"
                       TakesFocusFromNativeControl="False"
                       IsLightDismissEnabled="False">
-      <Border Background="#F5202023"
+      <Border Background="#F5202020"
               Width="380"
               CornerRadius="18"
               Padding="22,18"

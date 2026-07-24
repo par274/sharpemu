@@ -495,6 +495,7 @@ public partial class MainWindow : Window
         // The shell view-model owns the active-page state (and the save-on-leave
         // side effect); the window only mirrors it into control visibility.
         _main.NavigateTo(index);
+        var previousIndex = _activePageIndex;
         _activePageIndex = _main.ActivePage;
 
         SetActiveClass(LibraryTabButton, _activePageIndex == 0);
@@ -514,12 +515,86 @@ public partial class MainWindow : Window
             TopNavigationIndicator.Opacity = 0;
         }
 
-        LibraryPage.IsVisible = _activePageIndex == 0;
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
-        OptionsPage.IsVisible = _activePageIndex == 1;
-        ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
+
+        AnimatePageTransition(previousIndex, _activePageIndex);
     }
+
+    /// <summary>
+    /// Cross-fades the top-level pages with a slight horizontal slide: the page
+    /// being entered slides in from the direction of travel while the page being
+    /// left slides out the opposite way. Pages live in a shared Panel so both
+    /// can overlap for the duration of the transition.
+    /// </summary>
+    private async void AnimatePageTransition(int previousIndex, int nextIndex)
+    {
+        if (previousIndex == nextIndex)
+        {
+            // No transition, but still ensure the active page is shown.
+            EnsurePageVisible(nextIndex);
+            return;
+        }
+
+        var entering = GetAppPage(nextIndex);
+        var leaving = GetAppPage(previousIndex);
+        if (entering is null)
+        {
+            return;
+        }
+
+        if (nextIndex == 2 && _consoleWindow is not null)
+        {
+            return;
+        }
+
+        const double slide = 48;
+        var direction = nextIndex > previousIndex ? 1 : -1;
+
+        entering.Opacity = 0;
+        entering.RenderTransform = new TranslateTransform(direction * slide, 0);
+        entering.IsVisible = true;
+
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
+
+        entering.Opacity = 1;
+        entering.RenderTransform = new TranslateTransform(0, 0);
+
+        if (leaving is not null && leaving != entering)
+        {
+            leaving.Opacity = 0;
+            leaving.RenderTransform = new TranslateTransform(-direction * slide, 0);
+
+            _ = DispatcherTimer.RunOnce(() =>
+            {
+                if (_activePageIndex != GetPageIndex(leaving))
+                {
+                    leaving.IsVisible = false;
+                    leaving.Opacity = 1;
+                    leaving.RenderTransform = new TranslateTransform(0, 0);
+                }
+            }, TimeSpan.FromMilliseconds(PageTransitionMs + 40));
+        }
+    }
+
+    private void EnsurePageVisible(int index)
+    {
+        LibraryPage.IsVisible = index == 0;
+        OptionsPage.IsVisible = index == 1;
+        ConsolePanel.IsVisible = index == 2 && _consoleWindow is null;
+    }
+
+    private Grid? GetAppPage(int index) => index switch
+    {
+        0 => LibraryPage,
+        1 => OptionsPage,
+        2 => ConsolePanel,
+        _ => null,
+    };
+
+    private int GetPageIndex(Grid page) => page == LibraryPage ? 0 : page == OptionsPage ? 1 : 2;
+
+    private const int PageTransitionMs = 300;
 
     private static void SetActiveClass(Button button, bool active)
     {

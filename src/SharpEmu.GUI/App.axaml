@@ -12,11 +12,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <Application.Resources>
     <!-- Web launcher design tokens. -->
     <Color x:Key="SystemAccentColor">#64A7FF</Color>
-    <SolidColorBrush x:Key="BgBrush" Color="#080B12" />
-    <SolidColorBrush x:Key="ChromeBrush" Color="#04060B" />
-    <SolidColorBrush x:Key="CardBrush" Color="#10141E" />
+    <SolidColorBrush x:Key="BgBrush" Color="#0C0C0C" />
+    <SolidColorBrush x:Key="ChromeBrush" Color="#070707" />
+    <SolidColorBrush x:Key="CardBrush" Color="#161616" />
     <SolidColorBrush x:Key="CardBorderBrush" Color="#12FFFFFF" />
-    <SolidColorBrush x:Key="ElevatedBrush" Color="#171C28" />
+    <SolidColorBrush x:Key="ElevatedBrush" Color="#1E1E1E" />
     <SolidColorBrush x:Key="OverlayBrush" Color="#202634" />
     <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#1B1B1B" />
     <SolidColorBrush x:Key="TextBrush" Color="#F7F8FB" />
@@ -115,6 +115,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
       <Setter Property="Opacity" Value="1" />
     </Style>
+    <!-- Top-level pages (Library/Options/Console) cross-fade with a slight slide
+         on transitions between them. Each page carries its own transitions so a
+         visibility flip animates rather than snaps. -->
+    <Style Selector="Grid.appPage">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.28" Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.28" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
     <Style Selector="StackPanel.selectedDetailsHost">
       <Setter Property="RenderTransform" Value="translateY(0px)" />
       <Setter Property="Opacity" Value="1" />
@@ -168,14 +180,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Padding" Value="21,9" />
       <Setter Property="CornerRadius" Value="999" />
       <Setter Property="Background" Value="White" />
-      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="Foreground" Value="#111111" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="FontSize" Value="13" />
       <Setter Property="FontWeight" Value="Bold" />
     </Style>
     <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="#F7F8FB" />
-      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="Foreground" Value="#111111" />
     </Style>
 
     <!-- Large primary launch action, set under the selected game's details. -->
@@ -185,7 +197,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Padding" Value="34,13" />
       <Setter Property="CornerRadius" Value="999" />
       <Setter Property="Background" Value="White" />
-      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="Foreground" Value="#111111" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="FontSize" Value="16" />
       <Setter Property="FontWeight" Value="Bold" />
@@ -194,7 +206,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Style>
     <Style Selector="Button.playButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="#F0F1F5" />
-      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="Foreground" Value="#111111" />
     </Style>
 
     <!-- Round per-game options button sitting next to the launch button. -->
@@ -371,7 +383,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="CornerRadius" Value="999" />
       <Setter Property="Background" Value="White" />
       <Setter Property="BorderThickness" Value="0" />
-      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="Foreground" Value="#111111" />
       <Setter Property="FontSize" Value="15" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
@@ -384,7 +396,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Style>
     <Style Selector="Button.gameOptionsLaunch:pointerover /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="#EAF3FF" />
-      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="Foreground" Value="#111111" />
     </Style>
 
     <Style Selector="Button.gameAction">
@@ -451,7 +463,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     <Style Selector="ContextMenu">
       <Setter Property="Width" Value="390" />
-      <Setter Property="Background" Value="#FA202023" />
+      <Setter Property="Background" Value="#FA202020" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="CornerRadius" Value="8" />
       <Setter Property="Padding" Value="8" />
@@ -516,7 +528,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Style Selector="Border.coverClip">
       <Setter Property="CornerRadius" Value="7" />
       <Setter Property="ClipToBounds" Value="True" />
-      <Setter Property="Background" Value="#151925" />
+      <Setter Property="Background" Value="#1C1C1C" />
     </Style>
 
     <!-- Trailing "add folder" action tile in the library carousel. It matches a
@@ -575,7 +587,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Style>
 
     <Style Selector="ListBox.console">
-      <Setter Property="Background" Value="#D6030509" />
+      <Setter Property="Background" Value="#D6060606" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace" />
       <Setter Property="FontSize" Value="12" />
