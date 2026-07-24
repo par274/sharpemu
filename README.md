@@ -25,6 +25,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ---
 
+<p align="center">
+  <a href="#support">
+    <img src="https://img.shields.io/badge/Support-GitHub%20Sponsors%20%26%20Crypto-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Support SharpEmu">
+  </a>
+</p>
+
+---
+
 > [!NOTE]  
 > SharpEmu supports Windows x64, Linux x64, and macOS x64. Apple Silicon Macs
 > can run the macOS x64 build through Rosetta 2, and Windows on ARM devices
@@ -135,6 +143,18 @@ Provided valuable references for filesystem handling and low-level C# implementa
 # License
 
 - [**GPL-2.0 license**](https://github.com/sharpemu/sharpemu/blob/main/LICENSE)
+
+## Support
+
+Support SharpEmu via GitHub Sponsors or cryptocurrency. Every contribution helps fund ongoing development and long-term maintenance. GitHub Sponsors is the preferred way to support the project, but cryptocurrency donations are also appreciated.
+
+### ETH/USDT
+
+`0xF315F5d986c790bB3A58DbE60F1B2760997dEd82`
+
+### BTC
+
+`bc1qmr9k8899njys5ny63xsues4jgmkk96erslrkmv`
 
 ## Contributing
 
