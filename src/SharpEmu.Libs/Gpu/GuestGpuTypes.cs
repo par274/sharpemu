@@ -36,14 +36,14 @@ internal sealed record GuestDrawTexture(
     long WriteGeneration = -1,
     bool ArrayedView = false,
     uint ArrayLayers = 1,
+    uint Type = 9,
+    uint Depth = 1,
     // GPU-detile opt-in (SHARPEMU_GPU_DETILE): when Detile is non-null the AGC
     // layer skipped the CPU deswizzle and shipped the raw TILED bytes here in
     // TiledSource; the Vulkan backend detiles them on the GPU. RgbaPixels is
     // empty in that case. Both are neutral (no host graphics-API values).
     byte[]? TiledSource = null,
     DetileParams? Detile = null);
-    uint Type = 9,
-    uint Depth = 1);
 
 /// <summary>Raw guest sampler descriptor dwords, copied verbatim from guest memory.</summary>
 internal readonly record struct GuestSampler(
