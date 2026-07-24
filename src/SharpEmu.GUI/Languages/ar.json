@@ -22,6 +22,8 @@
   "Library.Empty.SearchTitle": "لا توجد ألعاب تطابق بحثك",
   "Library.Empty.SearchHint": "لا شيء في المكتبة يطابق “{0}”.",
   "Library.Empty.AddFolder": "إضافة مجلد ألعاب",
+  "Library.Welcome.Title": "مرحبًا بك في SharpEmu",
+  "Library.Welcome.Hint": "أضف لعبتك الأولى باستخدام البطاقة بالأعلى.",
 
   "Library.Loading": "جارٍ تحميل المكتبة...",
   "Library.Stat.LastPlayed": "آخر تشغيل",

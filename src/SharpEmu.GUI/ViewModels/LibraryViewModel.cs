@@ -40,8 +40,13 @@ public partial class LibraryViewModel : ReactiveObject
             .Subscribe(_ => Avalonia.Threading.Dispatcher.UIThread.Post(RefreshVisibleGames));
     }
 
-    /// <summary>Games matching the current search, shown in the grid.</summary>
-    public ObservableCollection<GameEntry> Games { get; } = new();
+    /// <summary>
+    /// Carousel items matching the current search: real games followed by the
+    /// trailing <see cref="AddFolderTile"/> action card. The action tile is
+    /// always appended last so the launcher keeps a single, consistent entry
+    /// point for adding a folder even when the library is empty.
+    /// </summary>
+    public ObservableCollection<LibraryTile> Games { get; } = new();
 
     [Reactive]
     private string _searchText = string.Empty;
@@ -89,6 +94,7 @@ public partial class LibraryViewModel : ReactiveObject
         var selectedPath = SelectedGame?.Path;
 
         Games.Clear();
+        var gameCount = 0;
         foreach (var game in _allGames)
         {
             if (query.Length == 0 ||
@@ -97,17 +103,25 @@ public partial class LibraryViewModel : ReactiveObject
                 (game.TitleId?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
             {
                 Games.Add(game);
+                gameCount++;
             }
         }
 
+        // The "add folder" action is the trailing carousel tile, shown whenever
+        // the library (or the filtered view) would otherwise be empty too.
+        if (query.Length == 0 || gameCount > 0)
+        {
+            Games.Add(AddFolderTile.Instance);
+        }
+
         if (selectedPath is not null &&
-            Games.FirstOrDefault(g => g.Path.Equals(selectedPath, GameLibraryService.PathComparison))
+            Games.OfType<GameEntry>().FirstOrDefault(g => g.Path.Equals(selectedPath, GameLibraryService.PathComparison))
                 is { } reselected)
         {
             SelectedGame = reselected;
         }
 
-        IsEmpty = Games.Count == 0;
+        IsEmpty = gameCount == 0;
     }
 
     /// <summary>

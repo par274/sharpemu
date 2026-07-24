@@ -22,6 +22,8 @@
   "Library.Empty.SearchTitle": "검색 결과와 일치하는 게임이 없습니다",
   "Library.Empty.SearchHint": "라이브러리에 '{0}'와(과) 일치하는 항목이 없습니다.",
   "Library.Empty.AddFolder": "게임 폴더 추가",
+  "Library.Welcome.Title": "SharpEmu에 오신 것을 환영합니다",
+  "Library.Welcome.Hint": "위 카드를 사용해 첫 게임을 추가하세요.",
 
   "Library.Loading": "라이브러리 불러오는 중…",
   "Library.Stat.LastPlayed": "마지막 플레이",

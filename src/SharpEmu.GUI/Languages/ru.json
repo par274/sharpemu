@@ -23,6 +23,8 @@
   "Library.Empty.SearchTitle": "По вашему запросу ничего не найдено",
   "Library.Empty.SearchHint": "В библиотеке нет игр, соответствующих запросу «{0}».",
   "Library.Empty.AddFolder": "Добавить папку с играми",
+  "Library.Welcome.Title": "Добро пожаловать в SharpEmu",
+  "Library.Welcome.Hint": "Добавьте свою первую игру с помощью карточки выше.",
 
   "Library.Loading": "Загрузка библиотеки…",
   "Library.Stat.LastPlayed": "Последний запуск",

@@ -48,7 +48,7 @@ public partial class MainWindow : Window
         : StringComparison.Ordinal;
 
     private readonly List<GameEntry> _allGames = new();
-    private readonly ObservableCollection<GameEntry> _visibleGames;
+    private readonly ObservableCollection<LibraryTile> _visibleGames;
     // Console buffer is owned by ILogService; aliased here for the XAML-bound
     // ConsoleList and the few remaining imperative reads.
     private AvaloniaList<LogLine> _consoleLines = new();
@@ -97,6 +97,8 @@ public partial class MainWindow : Window
     private bool _sessionLoadingActive;
     private bool _isGameSettingsOpen;
     private bool _isLoadingGameSettings;
+    private bool _addFolderInProgress;
+    private bool _suppressSelectionChanged;
     private int _gameOptionsSectionIndex;
     private int _selectedDetailsAnimationGeneration;
     private ViewModels.PerGameSettingsViewModel? _gameSettingsViewModel;
@@ -212,10 +214,54 @@ public partial class MainWindow : Window
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
         GameList.SelectionChanged += (_, _) =>
         {
+            // A re-entrant raise from cancelling a selection below must not
+            // reset the visible game.
+            if (_suppressSelectionChanged)
+            {
+                return;
+            }
+
+            // The trailing "add folder" card is an action, not a selectable
+            // game: it must never become active. Cancel the selection (keeping
+            // any previously selected game highlighted) and open the picker.
+            if (GameList.SelectedItem is AddFolderTile)
+            {
+                var previous = _library.SelectedGame;
+                _suppressSelectionChanged = true;
+                try
+                {
+                    GameList.SelectedItem = previous;
+                }
+                finally
+                {
+                    _suppressSelectionChanged = false;
+                }
+
+                if (!_addFolderInProgress)
+                {
+                    _addFolderInProgress = true;
+                    _ = AddFolderAsync().ContinueWith(_ => _addFolderInProgress = false);
+                }
+                return;
+            }
+
             _library.SelectedGame = GameList.SelectedItem as GameEntry;
             UpdateSelectedGame();
         };
-        GameList.DoubleTapped += (_, _) => LaunchSelected();
+        GameList.DoubleTapped += (_, _) =>
+        {
+            if (GameList.SelectedItem is AddFolderTile)
+            {
+                if (!_addFolderInProgress)
+                {
+                    _addFolderInProgress = true;
+                    _ = AddFolderAsync().ContinueWith(_ => _addFolderInProgress = false);
+                }
+                return;
+            }
+
+            LaunchSelected();
+        };
         SearchBox.TextChanged += (_, _) =>
         {
             _library.SearchText = SearchBox.Text ?? string.Empty;
@@ -224,13 +270,10 @@ public partial class MainWindow : Window
             RefreshVisibleGames();
         };
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
-        AddFolderButton.Click += async (_, _) => await AddFolderAsync();
-        EmptyAddFolderButton.Click += async (_, _) => await AddFolderAsync();
         RescanButton.Click += async (_, _) => await RescanLibraryAsync();
         OpenFileButton.Click += async (_, _) => await OpenFileAsync();
         LaunchButton.Click += (_, _) => LaunchSelected();
         ClearLogButton.Click += (_, _) => _logService.Clear();
-        StopButton.Click += (_, _) => StopEmulator();
         SessionStopButton.Click += (_, _) => StopEmulator();
         SessionConsoleButton.Click += (_, _) => ShowConsoleWindow();
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
@@ -658,7 +701,6 @@ public partial class MainWindow : Window
         LibraryTabButton.Content = loc.Get("Page.Library");
         OptionsTabButton.Content = loc.Get("Page.Options");
         SearchBox.PlaceholderText = loc.Get("Library.SearchWatermark");
-        AddFolderButtonLabel.Text = loc.Get("Library.AddFolder");
         RescanButtonLabel.Text = loc.Get("Library.Rescan");
         OpenFileButtonLabel.Text = loc.Get("Library.OpenFile");
 
@@ -669,7 +711,6 @@ public partial class MainWindow : Window
         CtxGameSettings.Header = loc.Get("Library.Context.GameSettings");
         CtxRemove.Header = loc.Get("Library.Context.Remove");
 
-        EmptyAddFolderButtonLabel.Text = loc.Get("Library.Empty.AddFolder");
         LoadingStateText.Text = loc.Get("Library.Loading");
         LastPlayedLabel.Text = loc.Get("Library.Stat.LastPlayed");
         VersionLabel.Text = loc.Get("Library.Stat.Version");
@@ -777,9 +818,7 @@ public partial class MainWindow : Window
         CopyLogButton.Content = loc.Get("Console.Copy");
         ClearLogButton.Content = loc.Get("Console.Clear");
 
-        ConsoleToggleLabel.Text = loc.Get("Page.Options");
         LaunchButtonLabel.Text = loc.Get("Launch.Launch");
-        StopButtonLabel.Text = loc.Get("Launch.Stop");
         SessionConsoleButtonLabel.Text = loc.Get("Launch.Console");
         SessionStopButtonLabel.Text = loc.Get("Launch.Stop");
 
@@ -795,7 +834,6 @@ public partial class MainWindow : Window
         LatestCommitDescription.Text = loc.Get("About.Github.LatestCommitDescription");
         RefreshUpdateText();
 
-        UpdateEmptyStateTexts();
         UpdateSelectedGameTexts();
     }
 
@@ -1208,7 +1246,6 @@ public partial class MainWindow : Window
         var folders = _settings.GameFolders.ToArray();
         var excluded = new HashSet<string>(_settings.ExcludedGames, FilePathComparer);
         StatusBarRight.Text = Localization.Instance.Get("Status.ScanningLibrary");
-        EmptyState.IsVisible = false;
         LoadingState.IsVisible = true;
 
         // The scan runs in the injected library service; the view-model owns
@@ -1503,19 +1540,20 @@ public partial class MainWindow : Window
     private void RefreshVisibleGames()
     {
         // Filtering lives in the view-model; here we only sync the UI state that
-        // is still driven imperatively from the window (selection, empty state).
+        // is still driven imperatively from the window (selection). The carousel
+        // always holds the trailing "add folder" tile, so the empty case is now
+        // expressed by the absence of selectable games rather than an overlay.
         _library.RefreshVisibleGames();
 
         var selectedPath = _library.SelectedGame?.Path;
         if (selectedPath is not null &&
-            _visibleGames.FirstOrDefault(g => g.Path.Equals(selectedPath, FilePathComparison))
+            _visibleGames.OfType<GameEntry>().FirstOrDefault(g => g.Path.Equals(selectedPath, FilePathComparison))
                 is { } reselected)
         {
             GameList.SelectedItem = reselected;
         }
-        else if (_visibleGames.Count > 0)
+        else if (_visibleGames.OfType<GameEntry>().FirstOrDefault() is { } first)
         {
-            var first = _visibleGames[0];
             GameList.SelectedItem = first;
             _library.SelectedGame = first;
         }
@@ -1525,32 +1563,7 @@ public partial class MainWindow : Window
             _library.SelectedGame = null;
         }
 
-        EmptyState.IsVisible = _visibleGames.Count == 0;
-        UpdateEmptyStateTexts();
-
         UpdateSelectedGame();
-    }
-
-    /// <summary>
-    /// Refreshes the empty-state title/hint from the current language and
-    /// search text; a no-op while the empty state is not showing.
-    /// </summary>
-    private void UpdateEmptyStateTexts()
-    {
-        if (_visibleGames.Count != 0)
-        {
-            return;
-        }
-
-        var query = SearchBox.Text?.Trim() ?? string.Empty;
-        var hasFilter = query.Length > 0;
-        EmptyStateTitle.Text = hasFilter
-            ? Localization.Instance.Get("Library.Empty.SearchTitle")
-            : Localization.Instance.Get("Library.Empty.Title");
-        EmptyStateHint.Text = hasFilter
-            ? Localization.Instance.Format("Library.Empty.SearchHint", query)
-            : Localization.Instance.Get("Library.Empty.Hint");
-        EmptyAddFolderButton.IsVisible = !hasFilter;
     }
 
     private void UpdateSelectedGame()
@@ -1603,14 +1616,21 @@ public partial class MainWindow : Window
         {
             SelectedGameTitle.Text = game.Name;
             SelectedGamePath.Text = game.Path;
+            SelectedEmptyHint.IsVisible = false;
+            SelectedActionsHost.IsVisible = true;
             SelectedCoverPanel.DataContext = game;
             SelectedBadgesRow.DataContext = game;
             SelectedBadgesRow.IsVisible = true;
         }
         else
         {
-            SelectedGameTitle.Text = Localization.Instance.Get("Launch.NoGameSelected");
-            SelectedGamePath.Text = Localization.Instance.Get("Launch.NoGameHint");
+            // Empty library: a welcome state rather than "no game selected".
+            // The launch/options actions have nothing to act on, so they stay hidden.
+            SelectedGameTitle.Text = Localization.Instance.Get("Library.Welcome.Title");
+            SelectedGamePath.Text = Localization.Instance.Get("Library.Welcome.Hint");
+            SelectedEmptyHint.Text = Localization.Instance.Get("Library.Welcome.Hint");
+            SelectedEmptyHint.IsVisible = true;
+            SelectedActionsHost.IsVisible = false;
             SelectedCoverPanel.DataContext = null;
             SelectedBadgesRow.DataContext = null;
             SelectedBadgesRow.IsVisible = false;
@@ -1877,7 +1897,6 @@ public partial class MainWindow : Window
 
         _isStopping = true;
         _session.OnStopRequested();
-        StopButton.IsEnabled = false;
         SessionStopButton.IsEnabled = false;
         SessionHintText.Text = Localization.Instance.Get("Launch.Stopping");
         SessionF11Badge.IsVisible = false;
@@ -2223,7 +2242,6 @@ public partial class MainWindow : Window
     private void UpdateRunButtons()
     {
         LaunchButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
-        StopButton.IsEnabled = _isRunning && !_isStopping;
         SessionStopButton.IsEnabled = _isRunning && !_isStopping;
         OpenFileButton.IsEnabled = !_isRunning;
     }

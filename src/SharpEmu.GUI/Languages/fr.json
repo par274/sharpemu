@@ -22,6 +22,8 @@
   "Library.Empty.SearchTitle": "Aucun jeu ne correspond à votre recherche",
   "Library.Empty.SearchHint": "Aucun élément de la bibliothèque ne correspond à « {0} ».",
   "Library.Empty.AddFolder": "Ajouter un dossier de jeux",
+  "Library.Welcome.Title": "Bienvenue sur SharpEmu",
+  "Library.Welcome.Hint": "Ajoutez votre premier jeu via la carte ci-dessus.",
 
   "Library.Loading": "Chargement de la bibliothèque…",
   "Library.Stat.LastPlayed": "Dernière partie",

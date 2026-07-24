@@ -22,6 +22,8 @@
   "Library.Empty.SearchTitle": "Keine Spiele gefunden",
   "Library.Empty.SearchHint": "Nichts in der Bibliothek entspricht “{0}”.",
   "Library.Empty.AddFolder": "Spielordner hinzufügen",
+  "Library.Welcome.Title": "Willkommen bei SharpEmu",
+  "Library.Welcome.Hint": "Füge dein erstes Spiel über die Karte oben hinzu.",
 
   "Library.Loading": "Bibliothek wird geladen…",
   "Library.Stat.LastPlayed": "Zuletzt gespielt",

@@ -148,7 +148,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <StackPanel Orientation="Horizontal" />
               </ItemsPanelTemplate>
             </ListBox.ItemsPanel>
-            <ListBox.ItemTemplate>
+            <ListBox.DataTemplates>
               <DataTemplate x:DataType="local:GameEntry">
                 <Border Classes="coverShadow" Width="148" Height="198" CornerRadius="7">
                   <Border Classes="coverClip">
@@ -169,7 +169,29 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   </Border>
                 </Border>
               </DataTemplate>
-            </ListBox.ItemTemplate>
+              <DataTemplate x:DataType="local:AddFolderTile">
+                <Border Classes="addFolderTile" Width="148" Height="198">
+                  <StackPanel HorizontalAlignment="Center"
+                              VerticalAlignment="Center"
+                              Spacing="12">
+                    <Border Classes="addFolderTileIcon">
+                      <TextBlock Classes="materialSymbol addFolderGlyph"
+                                 Text="add"
+                                 FontSize="32"
+                                 LineHeight="32"
+                                 HorizontalAlignment="Center"
+                                 VerticalAlignment="Center" />
+                    </Border>
+                    <TextBlock Classes="addFolderGlyph"
+                               Text="{Binding [Library.AddFolder], Source={x:Static loc:Localization.Instance}}"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               LetterSpacing="0.4"
+                               HorizontalAlignment="Center" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ListBox.DataTemplates>
             </ListBox>
           </Panel>
 
@@ -194,6 +216,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
                          Margin="0,0,0,5"
                          TextWrapping="Wrap"
                          TextTrimming="CharacterEllipsis" />
+
+              <TextBlock x:Name="SelectedEmptyHint"
+                         Text=""
+                         FontSize="14"
+                         Foreground="{StaticResource MutedBrush}"
+                         Margin="0,6,0,0"
+                         TextWrapping="Wrap"
+                         MaxWidth="720"
+                         IsVisible="False" />
 
               <StackPanel x:Name="SelectedBadgesRow"
                           x:DataType="local:GameEntry"
@@ -221,6 +252,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 </StackPanel>
               </StackPanel>
 
+              <!-- Launch + per-game options live with the selected game's details,
+                   not in the bottom utility bar. Hidden until a real game is picked. -->
+              <StackPanel x:Name="SelectedActionsHost"
+                          Orientation="Horizontal"
+                          Spacing="12"
+                          Margin="0,32,0,0"
+                          IsVisible="False">
+                <Button x:Name="LaunchButton"
+                        Classes="playButton"
+                        IsEnabled="False">
+                  <TextBlock x:Name="LaunchButtonLabel" Text="Play" VerticalAlignment="Center" />
+                </Button>
+                <ToggleButton x:Name="ConsoleToggle"
+                              Classes="optionsCircle"
+                              ToolTip.Tip="{Binding [Page.Options], Source={x:Static loc:Localization.Instance}}">
+                  <TextBlock Classes="materialSymbol" Text="more_horiz" />
+                </ToggleButton>
+              </StackPanel>
+
               <!-- Kept as native state holders for the existing launcher logic. -->
               <Panel x:Name="SelectedCoverPanel"
                      x:DataType="local:GameEntry"
@@ -237,42 +287,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 Classes="launchBar"
                 Grid.Row="3"
                 Margin="64,0,64,22"
-                ColumnDefinitions="Auto,Auto,Auto,*,Auto">
+                ColumnDefinitions="*,Auto">
             <Grid.Transitions>
               <Transitions>
                 <DoubleTransition Property="Opacity" Duration="0:0:0.18" />
                 <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.22" />
               </Transitions>
             </Grid.Transitions>
-            <Button x:Name="LaunchButton"
-                    Grid.Column="0"
-                    Classes="accent"
-                    IsEnabled="False">
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Classes="materialSymbol" Text="play_arrow" />
-                <TextBlock x:Name="LaunchButtonLabel" Text="Play" VerticalAlignment="Center" />
-              </StackPanel>
-            </Button>
-            <Button x:Name="StopButton"
-                    Grid.Column="1"
-                    Classes="danger"
-                    Margin="10,0,0,0"
-                    IsEnabled="False">
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Classes="materialSymbol" Text="stop" />
-                <TextBlock x:Name="StopButtonLabel" Text="Stop" VerticalAlignment="Center" />
-              </StackPanel>
-            </Button>
-            <Button x:Name="AddFolderButton"
-                    Grid.Column="2"
-                    Classes="ghost"
-                    Margin="10,0,0,0">
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Classes="materialSymbol" Text="create_new_folder" />
-                <TextBlock x:Name="AddFolderButtonLabel" Text="Add game" VerticalAlignment="Center" />
-              </StackPanel>
-            </Button>
-            <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="18" VerticalAlignment="Center">
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="18" VerticalAlignment="Center">
               <Button x:Name="OpenFileButton" Classes="ghost">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                   <TextBlock Classes="materialSymbol" Text="file_open" />
@@ -285,48 +307,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   <TextBlock x:Name="RescanButtonLabel" Text="Rescan" VerticalAlignment="Center" />
                 </StackPanel>
               </Button>
-              <ToggleButton x:Name="ConsoleToggle" Classes="ghost">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                  <TextBlock x:Name="ConsoleToggleLabel" Text="Options" VerticalAlignment="Center" />
-                  <TextBlock Classes="materialSymbol" Text="more_vert" />
-                </StackPanel>
-              </ToggleButton>
             </StackPanel>
           </Grid>
-
-          <StackPanel x:Name="EmptyState"
-                      Grid.RowSpan="4"
-                      Spacing="12"
-                      HorizontalAlignment="Center"
-                      VerticalAlignment="Center"
-                      IsVisible="False">
-            <TextBlock Text="YOUR PLAYGROUND AWAITS"
-                       Classes="sectionTitle"
-                       HorizontalAlignment="Center"
-                       LetterSpacing="2.4" />
-            <TextBlock x:Name="EmptyStateTitle"
-                       Text="Your library is empty"
-                       FontSize="66"
-                       FontWeight="SemiBold"
-                       LetterSpacing="-3"
-                       HorizontalAlignment="Center" />
-            <TextBlock x:Name="EmptyStateHint"
-                       Text="Add a folder containing your games to get started."
-                       FontSize="14"
-                       Foreground="{StaticResource MutedBrush}"
-                       HorizontalAlignment="Center" />
-            <Button x:Name="EmptyAddFolderButton"
-                    Classes="accent"
-                    HorizontalAlignment="Center"
-                    Margin="0,16,0,0">
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Classes="materialSymbol" Text="create_new_folder" />
-                <TextBlock x:Name="EmptyAddFolderButtonLabel"
-                           Text="Add game folder"
-                           VerticalAlignment="Center" />
-              </StackPanel>
-            </Button>
-          </StackPanel>
 
           <StackPanel x:Name="LoadingState"
                       Grid.RowSpan="4"

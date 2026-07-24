@@ -22,6 +22,8 @@
   "Library.Empty.SearchTitle": "Nincs találat a elemre",
   "Library.Empty.SearchHint": "A könyvtárban nincs olyan elem, amely egyezne a „{0}” kifejezéssel.",
   "Library.Empty.AddFolder": "Játékmappa hozzáadása",
+  "Library.Welcome.Title": "Üdvözöl a SharpEmu",
+  "Library.Welcome.Hint": "Add hozzá az első játékot a fenti kártyával.",
 
   "Library.Loading": "Könyvtár betöltése",
   "Library.Stat.LastPlayed": "Legutóbb játszva",

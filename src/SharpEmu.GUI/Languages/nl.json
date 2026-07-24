@@ -22,6 +22,8 @@
   "Library.Empty.SearchTitle": "Geen games komen overeen met je zoekopdracht",
   "Library.Empty.SearchHint": "Niets in de bibliotheek komt overeen met “{0}”.",
   "Library.Empty.AddFolder": "Gamemap toevoegen",
+  "Library.Welcome.Title": "Welkom bij SharpEmu",
+  "Library.Welcome.Hint": "Voeg je eerste spel toe via de kaart hierboven.",
 
   "Library.Loading": "Bibliotheek laden…",
   "Library.Stat.LastPlayed": "Laatst gespeeld",

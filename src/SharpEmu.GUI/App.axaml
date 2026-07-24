@@ -186,6 +186,41 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Foreground" Value="#07101D" />
     </Style>
 
+    <!-- Large primary launch action, set under the selected game's details. -->
+    <Style Selector="Button.playButton">
+      <Setter Property="MinHeight" Value="54" />
+      <Setter Property="MinWidth" Value="200" />
+      <Setter Property="Padding" Value="34,13" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Background" Value="White" />
+      <Setter Property="Foreground" Value="#07101D" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FontSize" Value="16" />
+      <Setter Property="FontWeight" Value="Bold" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.playButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#F0F1F5" />
+      <Setter Property="Foreground" Value="#07101D" />
+    </Style>
+
+    <!-- Round per-game options button sitting next to the launch button. -->
+    <Style Selector="ToggleButton.optionsCircle">
+      <Setter Property="Width" Value="54" />
+      <Setter Property="Height" Value="54" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="CornerRadius" Value="27" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ToggleButton.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     ToggleButton.optionsCircle:checked /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#24FFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
     <Style Selector="Button.danger">
       <Setter Property="MinHeight" Value="42" />
       <Setter Property="Padding" Value="21,9" />
@@ -490,6 +525,56 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="CornerRadius" Value="7" />
       <Setter Property="ClipToBounds" Value="True" />
       <Setter Property="Background" Value="#151925" />
+    </Style>
+
+    <!-- Trailing "add folder" action tile in the library carousel. It matches a
+         game cover's footprint but reads as an affordance, not content. -->
+    <Style Selector="Border.addFolderTile">
+      <Setter Property="CornerRadius" Value="7" />
+      <Setter Property="Background" Value="#0CFFFFFF" />
+      <Setter Property="BorderBrush" Value="#2EFFFFFF" />
+      <Setter Property="BorderThickness" Value="1.5" />
+      <Setter Property="BoxShadow" Value="0 12 28 0 #3A000000" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.18" Easing="CubicEaseOut" />
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.addFolderTileIcon">
+      <Setter Property="Width" Value="60" />
+      <Setter Property="Height" Value="60" />
+      <Setter Property="CornerRadius" Value="30" />
+      <Setter Property="Background" Value="#1BFFFFFF" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <!-- Tile glyph + label share one rest color and animate to pure white on
+         hover, matching the icon to the label color as requested. -->
+    <Style Selector="TextBlock.addFolderGlyph">
+      <Setter Property="Foreground" Value="#A6FFFFFF" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover TextBlock.addFolderGlyph,
+                     ListBox.tileGrid ListBoxItem:selected TextBlock.addFolderGlyph">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTile,
+                     ListBox.tileGrid ListBoxItem:selected Border.addFolderTile">
+      <Setter Property="Background" Value="#1AFFFFFF" />
+      <Setter Property="BorderBrush" Value="#55FFFFFF" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTileIcon,
+                     ListBox.tileGrid ListBoxItem:selected Border.addFolderTileIcon">
+      <Setter Property="Background" Value="#2EFFFFFF" />
     </Style>
 
     <Style Selector="ListBox.console">

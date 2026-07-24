@@ -22,6 +22,8 @@
   "Library.Empty.SearchTitle": "Aramanızla eşleşen oyun yok",
   "Library.Empty.SearchHint": "Kütüphanede “{0}” ile eşleşen bir şey yok.",
   "Library.Empty.AddFolder": "Oyun klasörü ekle",
+  "Library.Welcome.Title": "SharpEmu'ya hoş geldiniz",
+  "Library.Welcome.Hint": "İlk oyunu yukarıdaki kartı kullanarak ekleyin.",
 
   "Library.Loading": "Kütüphane yükleniyor…",
   "Library.Stat.LastPlayed": "Son oynama",

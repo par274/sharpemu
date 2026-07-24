@@ -22,6 +22,8 @@
   "Library.Empty.SearchTitle": "Ingen spil matcher din søgning",
   "Library.Empty.SearchHint": "Intet i biblioteket matcher “{0}”.",
   "Library.Empty.AddFolder": "Tilføj spilmappe",
+  "Library.Welcome.Title": "Velkommen til SharpEmu",
+  "Library.Welcome.Hint": "Tilføj dit første spil via kortet ovenfor.",
 
   "Library.Loading": "Indlæser bibliotek…",
   "Library.Stat.LastPlayed": "Sidst spillet",

@@ -23,6 +23,8 @@
   "Library.Empty.SearchTitle": "No games match your search",
   "Library.Empty.SearchHint": "Nothing in the library matches “{0}”.",
   "Library.Empty.AddFolder": "Add game folder",
+  "Library.Welcome.Title": "Welcome to SharpEmu",
+  "Library.Welcome.Hint": "Add your first game using the card above.",
 
   "Library.Loading": "Loading library…",
   "Library.Stat.LastPlayed": "Last played",

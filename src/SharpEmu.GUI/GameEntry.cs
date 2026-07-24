@@ -8,7 +8,7 @@ using Avalonia.Media.Imaging;
 
 namespace SharpEmu.GUI;
 
-public sealed class GameEntry : INotifyPropertyChanged
+public class GameEntry : LibraryTile, INotifyPropertyChanged
 {
     // Placeholder gradients for games without cover art, picked
     // deterministically from the game name so a game keeps its color.
