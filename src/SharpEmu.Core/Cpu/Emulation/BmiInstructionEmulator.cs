@@ -13,12 +13,12 @@ namespace SharpEmu.Core.Cpu.Emulation;
 /// Zen 2 cores implement BMI1/BMI2/ABM, but a host CPU that predates those extensions raises
 /// #UD (STATUS_ILLEGAL_INSTRUCTION) when it meets one of these opcodes. This class provides the
 /// register-only arithmetic so the exception handler can finish the instruction in software and
-/// resume, instead of aborting the title.
+/// resume, instead of aborting the title. The eflags value is updated in place where an
+/// instruction defines its flags.
 ///
 /// The methods deliberately operate on plain integers rather than on the OS CONTEXT record so the
 /// semantics can be unit-tested in isolation; the unsafe register/memory plumbing lives in the
-/// backend adapter. Each method returns the result already masked to the operand width and, where
-/// the instruction is defined to touch flags, updates <paramref name="eflags"/> in place. Flags
+/// backend adapter. Each method returns the result already masked to the operand width. Flags
 /// documented as "undefined" by the vendor manuals are left untouched so behaviour stays
 /// deterministic across hosts.
 /// </summary>
