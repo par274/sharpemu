@@ -87,7 +87,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
       <Panel x:Name="PagesHost">
         <!-- Library: horizontal cover rail, then selected-game details. -->
-        <Grid x:Name="LibraryPage" RowDefinitions="136,270,*,72">
+        <Grid x:Name="LibraryPage" RowDefinitions="136,270,*">
           <Panel x:Name="CarouselHost"
                  Classes="carouselHost"
                  Grid.Row="1"
@@ -175,7 +175,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                               VerticalAlignment="Center"
                               Spacing="12">
                     <Border Classes="addFolderTileIcon">
-                      <TextBlock Classes="materialSymbol addFolderGlyph"
+                      <TextBlock Classes="materialSymbol addFolderGlyph addFolderIconGlyph"
                                  Text="add"
                                  FontSize="32"
                                  LineHeight="32"
@@ -283,35 +283,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </StackPanel>
           </Grid>
 
-          <Grid x:Name="LaunchBar"
-                Classes="launchBar"
-                Grid.Row="3"
-                Margin="64,0,64,22"
-                ColumnDefinitions="*,Auto">
-            <Grid.Transitions>
-              <Transitions>
-                <DoubleTransition Property="Opacity" Duration="0:0:0.18" />
-                <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.22" />
-              </Transitions>
-            </Grid.Transitions>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="18" VerticalAlignment="Center">
-              <Button x:Name="OpenFileButton" Classes="ghost">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                  <TextBlock Classes="materialSymbol" Text="file_open" />
-                  <TextBlock x:Name="OpenFileButtonLabel" Text="Open file" VerticalAlignment="Center" />
-                </StackPanel>
-              </Button>
-              <Button x:Name="RescanButton" Classes="ghost">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                  <TextBlock Classes="materialSymbol" Text="refresh" />
-                  <TextBlock x:Name="RescanButtonLabel" Text="Rescan" VerticalAlignment="Center" />
-                </StackPanel>
-              </Button>
-            </StackPanel>
-          </Grid>
-
           <StackPanel x:Name="LoadingState"
-                      Grid.RowSpan="4"
+                      Grid.RowSpan="3"
                       Spacing="22"
                       HorizontalAlignment="Center"
                       VerticalAlignment="Center"
@@ -333,7 +306,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                so the reveal and dismissal can animate without a second window. -->
           <Grid x:Name="GameOptionsOverlay"
                 Classes="gameOptionsOverlay"
-                Grid.RowSpan="4"
+                Grid.RowSpan="3"
                 RowDefinitions="2*,3*"
                 IsHitTestVisible="False">
             <Grid.Transitions>

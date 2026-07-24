@@ -23,4 +23,18 @@ public interface IGameLibraryService
 
     /// <summary>Totals the size of the directory holding the eboot.</summary>
     long ComputeInstallSize(string ebootPath);
+
+    /// <summary>
+    /// Watches the given folders for changes that could alter the library — a
+    /// game being added, removed or having its metadata rewritten. The raise is
+    /// debounced, so a burst of filesystem events surfaces as a single
+    /// <see cref="LibraryChanged"/>. Call again whenever the watched set changes.
+    /// </summary>
+    void Watch(IReadOnlyList<string> folders);
+
+    /// <summary>
+    /// Raised (on a background thread) when the watcher detects a library-affecting
+    /// change. Subscribers must marshal to the UI thread themselves.
+    /// </summary>
+    event EventHandler? LibraryChanged;
 }

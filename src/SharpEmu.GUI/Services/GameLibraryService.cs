@@ -12,7 +12,7 @@ using SharpEmu.GUI.Services.Abstractions;
 /// private statics inside <c>MainWindow</c>; moved here unchanged so it can run
 /// on a background thread without any dependency on UI controls.
 /// </summary>
-internal sealed class GameLibraryService : IGameLibraryService
+internal sealed class GameLibraryService : IGameLibraryService, IDisposable
 {
     // OS-aware path comparison shared with the window's own settings lookups.
     internal static StringComparer PathComparer => OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
@@ -24,6 +24,107 @@ internal sealed class GameLibraryService : IGameLibraryService
         : StringComparison.Ordinal;
 
     private const int CoverDecodeWidth = 312;
+
+    private readonly List<FileSystemWatcher> _watchers = new();
+    private Timer? _debounce;
+    private readonly object _watchLock = new();
+    private bool _disposed;
+
+    /// <inheritdoc />
+    public event EventHandler? LibraryChanged;
+
+    /// <inheritdoc />
+    public void Watch(IReadOnlyList<string> folders)
+    {
+        lock (_watchLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            foreach (var watcher in _watchers)
+            {
+                watcher.Dispose();
+            }
+            _watchers.Clear();
+
+            foreach (var folder in folders)
+            {
+                if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var watcher = new FileSystemWatcher(folder)
+                    {
+                        IncludeSubdirectories = true,
+                        NotifyFilter = NotifyFilters.FileName
+                                       | NotifyFilters.DirectoryName
+                                       | NotifyFilters.Size
+                                       | NotifyFilters.LastWrite,
+                        EnableRaisingEvents = true,
+                    };
+                    watcher.Created += OnWatcherEvent;
+                    watcher.Deleted += OnWatcherEvent;
+                    watcher.Changed += OnWatcherEvent;
+                    watcher.Renamed += OnWatcherEvent;
+                    watcher.Error += OnWatcherError;
+                    _watchers.Add(watcher);
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+    }
+
+    private void OnWatcherEvent(object? sender, FileSystemEventArgs e)
+    {
+        // Any change could matter; the debounce collapses the noise. A cheap name
+        // filter avoids raising for unrelated files, but metadata lives next to the
+        // eboot in sce_sys, so keep the filter permissive.
+        ScheduleDebouncedChange();
+    }
+
+    private void OnWatcherError(object? sender, ErrorEventArgs e)
+    {
+        // Watchers can drop (e.g. a watched folder is renamed/removed). Surface it
+        // so the UI re-scans rather than going stale; the next Watch() call rebuilds.
+        ScheduleDebouncedChange();
+    }
+
+    private void ScheduleDebouncedChange()
+    {
+        lock (_watchLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            // (Re)start a one-shot timer: only after filesystem activity settles for
+            // the full interval do we raise, collapsing bursts into one rescan.
+            if (_debounce is null)
+            {
+                _debounce = new Timer(_ => RaiseLibraryChanged(), null, LibraryChangedDebounceMs, Timeout.Infinite);
+            }
+            else
+            {
+                _debounce.Change(LibraryChangedDebounceMs, Timeout.Infinite);
+            }
+        }
+    }
+
+    private void RaiseLibraryChanged()
+    {
+        // Raised on a threadpool thread; subscribers marshal to the UI thread.
+        LibraryChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private const int LibraryChangedDebounceMs = 600;
 
     public IReadOnlyList<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
     {
@@ -265,5 +366,30 @@ internal sealed class GameLibraryService : IGameLibraryService
         var directory = Path.GetDirectoryName(ebootPath);
         var name = directory is not null ? Path.GetFileName(directory) : null;
         return string.IsNullOrEmpty(name) ? Path.GetFileName(ebootPath) : name;
+    }
+
+    /// <summary>
+    /// Stops watching and releases the watchers. The service is a DI singleton,
+    /// so this runs once at application shutdown; safe to call even if
+    /// <see cref="Watch"/> was never invoked.
+    /// </summary>
+    public void Dispose()
+    {
+        lock (_watchLock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _debounce?.Dispose();
+            _debounce = null;
+            foreach (var watcher in _watchers)
+            {
+                watcher.Dispose();
+            }
+            _watchers.Clear();
+        }
     }
 }

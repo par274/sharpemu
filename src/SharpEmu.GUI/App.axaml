@@ -119,10 +119,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="RenderTransform" Value="translateY(0px)" />
       <Setter Property="Opacity" Value="1" />
     </Style>
-    <Style Selector="Grid.launchBar">
-      <Setter Property="RenderTransform" Value="translateY(0px)" />
-      <Setter Property="Opacity" Value="1" />
-    </Style>
     <Style Selector="Grid.gameOptionsOverlay">
       <Setter Property="RenderTransform" Value="translateY(96px)" />
       <Setter Property="Opacity" Value="0" />
@@ -136,10 +132,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Style>
     <Style Selector="StackPanel.selectedDetailsHost.gameOptionsOpen">
       <Setter Property="RenderTransform" Value="translateY(-28px)" />
-      <Setter Property="Opacity" Value="0" />
-    </Style>
-    <Style Selector="Grid.launchBar.gameOptionsOpen">
-      <Setter Property="RenderTransform" Value="translateY(30px)" />
       <Setter Property="Opacity" Value="0" />
     </Style>
     <Style Selector="Grid.gameOptionsOverlay.gameOptionsOpen">
@@ -562,6 +554,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <BrushTransition Property="Foreground" Duration="0:0:0.18" Easing="CubicEaseOut" />
         </Transitions>
       </Setter>
+    </Style>
+    <!-- Optical compensation: the "add" Material Symbols glyph sits a hair below
+         its em-box center, so nudge it up to sit centered in the round badge. -->
+    <Style Selector="TextBlock.addFolderIconGlyph">
+      <Setter Property="RenderTransform" Value="translateY(-2px)" />
     </Style>
     <Style Selector="ListBox.tileGrid ListBoxItem:pointerover TextBlock.addFolderGlyph,
                      ListBox.tileGrid ListBoxItem:selected TextBlock.addFolderGlyph">

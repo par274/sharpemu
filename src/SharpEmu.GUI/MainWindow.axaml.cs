@@ -114,6 +114,7 @@ public partial class MainWindow : Window
     private readonly ViewModels.LibraryViewModel _library;
     private readonly Services.Abstractions.IEmulatorService _emulatorService;
     private readonly Services.Abstractions.ILogService _logService;
+    private readonly Services.Abstractions.IGameLibraryService _libraryService;
     private readonly ViewModels.SessionViewModel _session;
     private readonly Services.Abstractions.IGamepadInputService _gamepad;
 
@@ -138,12 +139,19 @@ public partial class MainWindow : Window
         // the same container-scoped singletons as the view-models.
         _emulatorService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IEmulatorService>();
         _logService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.ILogService>();
+        _libraryService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGameLibraryService>();
         _gamepad = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGamepadInputService>();
         _logService.SetEmulatorExePath(_emulatorService.EmulatorExePath);
 
         // Forward emulator process events to the window's UI reactions.
         _emulatorService.OutputReceived += OnEmulatorOutput;
         _emulatorService.Exited += code => OnEmulatorExited(code);
+
+        // The library watcher raises from a background thread when a game is
+        // added/removed on disk; re-scan on the UI thread so the carousel updates
+        // without a manual refresh.
+        _libraryService.LibraryChanged += (_, _) =>
+            Dispatcher.UIThread.Post(() => _ = RescanLibraryAsync());
 
         // Translate gamepad navigation intents into UI actions.
         _gamepad.PageRequested += page => Dispatcher.UIThread.Post(() => SetActivePage(page));
@@ -245,8 +253,22 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _library.SelectedGame = GameList.SelectedItem as GameEntry;
-            UpdateSelectedGame();
+            var current = GameList.SelectedItem as GameEntry;
+            // ListBox raises SelectionChanged asynchronously (on its layout pass)
+            // whenever its items collection is rebuilt — including the moment
+            // Games.Clear() runs during a rescan, when the selection is
+            // transiently null even though we have a chosen game. Do NOT mirror
+            // a null selection back into the view-model or the details panel;
+            // that echo would clobber the game we just picked and surface the
+            // welcome state. Only honor a null selection when the view-model
+            // agrees there really is no selected game.
+            if (current is null && _library.SelectedGame is not null)
+            {
+                return;
+            }
+
+            _library.SelectedGame = current;
+            UpdateSelectedGame(current);
         };
         GameList.DoubleTapped += (_, _) =>
         {
@@ -270,8 +292,6 @@ public partial class MainWindow : Window
             RefreshVisibleGames();
         };
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
-        RescanButton.Click += async (_, _) => await RescanLibraryAsync();
-        OpenFileButton.Click += async (_, _) => await OpenFileAsync();
         LaunchButton.Click += (_, _) => LaunchSelected();
         ClearLogButton.Click += (_, _) => _logService.Clear();
         SessionStopButton.Click += (_, _) => StopEmulator();
@@ -659,6 +679,7 @@ public partial class MainWindow : Window
         ApplySettingsToControls();
         LocateEmulator();
         UpdateDiscordPresence();
+        _libraryService.Watch(_settings.GameFolders);
         _ = LoadLatestCommitAsync();
 
         if (_settings.CheckForUpdatesOnStartup)
@@ -701,8 +722,6 @@ public partial class MainWindow : Window
         LibraryTabButton.Content = loc.Get("Page.Library");
         OptionsTabButton.Content = loc.Get("Page.Options");
         SearchBox.PlaceholderText = loc.Get("Library.SearchWatermark");
-        RescanButtonLabel.Text = loc.Get("Library.Rescan");
-        OpenFileButtonLabel.Text = loc.Get("Library.OpenFile");
 
         CtxLaunch.Header = loc.Get("Library.Context.Launch");
         CtxOpenFolder.Header = loc.Get("Library.Context.OpenFolder");
@@ -942,7 +961,6 @@ public partial class MainWindow : Window
                 MainContent.Margin = new Thickness(0);
                 ContentToolbar.IsVisible = !_isRunning;
                 ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
-                LaunchBar.IsVisible = true;
                 QueueGameSurfaceResize();
                 UpdateSessionBarVisibility();
             }
@@ -967,7 +985,6 @@ public partial class MainWindow : Window
                 MainContent.Margin = new Thickness(0);
                 ContentToolbar.IsVisible = false;
                 ConsolePanel.IsVisible = false;
-                LaunchBar.IsVisible = false;
                 QueueGameSurfaceResize();
                 UpdateSessionBarVisibility();
             }
@@ -1236,6 +1253,9 @@ public partial class MainWindow : Window
         if (changed)
         {
             _settings.Save();
+            // Keep the filesystem watcher aligned with the new folder set so
+            // future changes (games installed/removed on disk) are picked up.
+            _libraryService.Watch(_settings.GameFolders);
         }
 
         await RescanLibraryAsync();
@@ -1250,8 +1270,7 @@ public partial class MainWindow : Window
 
         // The scan runs in the injected library service; the view-model owns
         // the resulting collection and kicks off cover/size enrichment.
-        var library = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGameLibraryService>();
-        var games = await Task.Run(() => library.ScanFolders(folders, excluded));
+        var games = await Task.Run(() => _libraryService.ScanFolders(folders, excluded));
 
         _library.ApplyScannedGames(games);
         RefreshVisibleGames();
@@ -1319,13 +1338,11 @@ public partial class MainWindow : Window
         SetStateClass(BackdropLayer, "gameOptionsOpen", active: true);
         SetStateClass(CarouselHost, "gameOptionsOpen", active: true);
         SetStateClass(SelectedDetailsHost, "gameOptionsOpen", active: true);
-        SetStateClass(LaunchBar, "gameOptionsOpen", active: true);
         SetStateClass(GameOptionsOverlay, "gameOptionsOpen", active: true);
 
         _isGameSettingsOpen = true;
         ConsoleToggle.IsChecked = true;
         GameList.IsHitTestVisible = false;
-        LaunchBar.IsHitTestVisible = false;
         GameOptionsOverlay.IsHitTestVisible = true;
         GameOptionsGeneralNav.Focus();
     }
@@ -1341,11 +1358,9 @@ public partial class MainWindow : Window
         SetStateClass(BackdropLayer, "gameOptionsOpen", active: false);
         SetStateClass(CarouselHost, "gameOptionsOpen", active: false);
         SetStateClass(SelectedDetailsHost, "gameOptionsOpen", active: false);
-        SetStateClass(LaunchBar, "gameOptionsOpen", active: false);
         SetStateClass(GameOptionsOverlay, "gameOptionsOpen", active: false);
         GameOptionsOverlay.IsHitTestVisible = false;
         GameList.IsHitTestVisible = true;
-        LaunchBar.IsHitTestVisible = true;
         ConsoleToggle.IsChecked = false;
         GameList.Focus();
     }
@@ -1528,9 +1543,6 @@ public partial class MainWindow : Window
             _settings.Save();
         }
 
-        // The view-model drops the game from its collection and re-applies the
-        // search filter; mirror the legacy _allGames list for the few paths
-        // (page count, launch lookup) still keyed off it.
         _library.Remove(game);
         _allGames.RemoveAll(g => string.Equals(g.Path, game.Path, FilePathComparison));
         GameList.SelectedItem = null;
@@ -1539,36 +1551,61 @@ public partial class MainWindow : Window
 
     private void RefreshVisibleGames()
     {
-        // Filtering lives in the view-model; here we only sync the UI state that
-        // is still driven imperatively from the window (selection). The carousel
-        // always holds the trailing "add folder" tile, so the empty case is now
-        // expressed by the absence of selectable games rather than an overlay.
         _library.RefreshVisibleGames();
 
         var selectedPath = _library.SelectedGame?.Path;
+        GameEntry? toSelect;
         if (selectedPath is not null &&
             _visibleGames.OfType<GameEntry>().FirstOrDefault(g => g.Path.Equals(selectedPath, FilePathComparison))
                 is { } reselected)
         {
             GameList.SelectedItem = reselected;
+            toSelect = reselected;
         }
         else if (_visibleGames.OfType<GameEntry>().FirstOrDefault() is { } first)
         {
             GameList.SelectedItem = first;
             _library.SelectedGame = first;
+            toSelect = first;
         }
         else
         {
             GameList.SelectedItem = null;
             _library.SelectedGame = null;
+            toSelect = null;
         }
 
-        UpdateSelectedGame();
+        UpdateSelectedGame(toSelect);
+
+        var restore = toSelect;
+        if (restore is not null)
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (GameList.SelectedItem is null &&
+                    _library.SelectedGame?.Path == restore.Path)
+                {
+                    GameList.SelectedItem = restore;
+                }
+            }, DispatcherPriority.Background);
+        }
     }
 
     private void UpdateSelectedGame()
     {
-        var game = GameList.SelectedItem as GameEntry;
+        UpdateSelectedGame(GameList.SelectedItem as GameEntry);
+    }
+
+    /// <summary>
+    /// Applies the selected game to the details panel, backdrop and preview.
+    /// Takes the game explicitly (rather than re-reading <see cref="GameList"/>'s
+    /// <see cref="SelectingItemsControl.SelectedItem"/>) because ListBox applies
+    /// selection asynchronously on its next layout pass — reading it back right
+    /// after assigning it can return the stale value, leaving the initial load
+    /// showing the welcome state instead of the first game.
+    /// </summary>
+    private void UpdateSelectedGame(GameEntry? game)
+    {
         _ = AnimateSelectedGameDetailsAsync(game);
 
         if (game is not null)
@@ -1799,27 +1836,6 @@ public partial class MainWindow : Window
 
     // ---- Launching ----
 
-    private async Task OpenFileAsync()
-    {
-        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-        {
-            Title = Localization.Instance.Get("Dialog.OpenExecutable"),
-            AllowMultiple = false,
-            FileTypeFilter = new[]
-            {
-                new FilePickerFileType(Localization.Instance.Get("Dialog.PsExecutables"))
-                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf" } },
-                FilePickerFileTypes.All,
-            },
-        });
-
-        var path = files.FirstOrDefault()?.TryGetLocalPath();
-        if (!string.IsNullOrEmpty(path))
-        {
-            Launch(path, Path.GetFileName(path));
-        }
-    }
-
     private void LaunchSelected()
     {
         if (GameList.SelectedItem is GameEntry game)
@@ -1998,7 +2014,6 @@ public partial class MainWindow : Window
                 LibraryToolbar.IsVisible = false;
                 ContentToolbar.IsVisible = false;
                 ConsolePanel.IsVisible = false;
-                LaunchBar.IsVisible = false;
                 HideSessionLoading();
                 UpdateSessionBarVisibility();
 
@@ -2117,7 +2132,6 @@ public partial class MainWindow : Window
         MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
         ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
-        LaunchBar.IsVisible = true;
         LibraryPage.IsVisible = _activePageIndex == 0;
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
@@ -2229,7 +2243,6 @@ public partial class MainWindow : Window
         MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
         ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
-        LaunchBar.IsVisible = true;
         LibraryPage.IsVisible = _activePageIndex == 0;
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
@@ -2243,7 +2256,6 @@ public partial class MainWindow : Window
     {
         LaunchButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
         SessionStopButton.IsEnabled = _isRunning && !_isStopping;
-        OpenFileButton.IsEnabled = !_isRunning;
     }
 
     private void UpdateSessionBarVisibility()
