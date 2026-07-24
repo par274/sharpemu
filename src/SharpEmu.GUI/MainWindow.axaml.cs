@@ -437,6 +437,20 @@ public partial class MainWindow : Window
         SetActiveClass(LibraryTabButton, _activePageIndex == 0);
         SetActiveClass(OptionsTabButton, _activePageIndex == 1);
         SetActiveClass(ConsoleNavButton, _activePageIndex == 2);
+        if (_activePageIndex is 0 or 1)
+        {
+            if (TopNavigationIndicator.RenderTransform is TranslateTransform transform)
+            {
+                transform.X = _activePageIndex * 132;
+            }
+
+            TopNavigationIndicator.Opacity = 1;
+        }
+        else
+        {
+            TopNavigationIndicator.Opacity = 0;
+        }
+
         LibraryPage.IsVisible = _activePageIndex == 0;
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
@@ -1825,7 +1839,6 @@ public partial class MainWindow : Window
         _runningGameTitleId = resolvedTitleId;
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         _session.OnLaunchPrepared(displayName, resolvedTitleId);
-        StatusDot.Fill = SuccessLineBrush;
         StatusText.Text = Localization.Instance.Format("Launch.Running", displayName);
         StatusBarRight.Text = Localization.Instance.Format("Status.Running", displayName);
         UpdateRunButtons();
@@ -1913,7 +1926,6 @@ public partial class MainWindow : Window
             brush);
         CloseFileLogSoon();
 
-        StatusDot.Fill = exitCode == 0 || stoppedByUser ? (IBrush)SuccessLineBrush : ErrorLineBrush;
         StatusText.Text = stoppedByUser
             ? "Game closed by the user."
             : Localization.Instance.Format("Launch.Exited", exitCode, meaning);

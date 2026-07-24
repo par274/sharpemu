@@ -234,9 +234,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Style>
 
     <Style Selector="Button.segment">
-      <Setter Property="MinWidth" Value="112" />
-      <Setter Property="MinHeight" Value="42" />
-      <Setter Property="Padding" Value="20,10" />
+      <Setter Property="Width" Value="132" />
+      <Setter Property="Height" Value="42" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
       <Setter Property="CornerRadius" Value="999" />
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
@@ -244,13 +246,52 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="FontSize" Value="14" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
+    <Style Selector="Button.segment /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="#A6FFFFFF" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.14"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.segment:pressed">
+      <Setter Property="RenderTransform" Value="none" />
+    </Style>
+    <Style Selector="Button.segment:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="#A6FFFFFF" />
+    </Style>
     <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
       <Setter Property="Foreground" Value="White" />
     </Style>
     <Style Selector="Button.segment.active /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="#24FFFFFF" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
       <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Button.windowChrome /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.14"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.windowChrome:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#18FFFFFF" />
+    </Style>
+    <Style Selector="TextBlock.windowCloseGlyph">
+      <Setter Property="Margin" Value="0,-1,0,1" />
     </Style>
 
     <Style Selector="Button.gameOptionsNav">
@@ -264,17 +305,35 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="FontSize" Value="13" />
       <Setter Property="FontWeight" Value="Medium" />
     </Style>
+    <Style Selector="Button.gameOptionsNav /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="#B8FFFFFF" />
+    </Style>
+    <Style Selector="Button.gameOptionsNav:pressed">
+      <Setter Property="RenderTransform" Value="none" />
+    </Style>
+    <Style Selector="Button.gameOptionsNav:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="#B8FFFFFF" />
+    </Style>
     <Style Selector="Button.gameOptionsNav:pointerover /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
       <Setter Property="Foreground" Value="White" />
     </Style>
     <Style Selector="Button.gameOptionsNav.active /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
       <Setter Property="Foreground" Value="White" />
     </Style>
 
     <Style Selector="TextBlock.gameOptionsNavLabel">
       <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="TextBlock.gameOptionsNavIcon">
+      <Setter Property="RenderTransform" Value="translateY(-1px)" />
     </Style>
 
     <Style Selector="Button.gameOptionsLaunch">

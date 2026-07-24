@@ -402,7 +402,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         VerticalAlignment="Top"
                         BoxShadow="0 18 42 0 #A6000000" />
 
-                <Border Padding="300,18,64,14">
+                <Border Padding="300,18,64,30">
                   <Grid x:Name="GameOptionsIdentity"
                         x:DataType="local:GameEntry"
                         ColumnDefinitions="*,Auto"
@@ -503,7 +503,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <Button x:Name="GameOptionsGeneralNav"
                                 Classes="gameOptionsNav active">
                           <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Classes="materialSymbol" Text="tune" />
+                            <TextBlock Classes="materialSymbol gameOptionsNavIcon" Text="tune" />
                             <TextBlock x:Name="GameOptionsGeneralNavLabel"
                                        Classes="gameOptionsNavLabel"
                                        VerticalAlignment="Center"
@@ -513,7 +513,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <Button x:Name="GameOptionsLoggingNav"
                                 Classes="gameOptionsNav">
                           <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Classes="materialSymbol" Text="terminal" />
+                            <TextBlock Classes="materialSymbol gameOptionsNavIcon" Text="terminal" />
                             <TextBlock x:Name="GameOptionsLoggingNavLabel"
                                        Classes="gameOptionsNavLabel"
                                        VerticalAlignment="Center"
@@ -523,7 +523,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <Button x:Name="GameOptionsEnvironmentNav"
                                 Classes="gameOptionsNav">
                           <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Classes="materialSymbol" Text="deployed_code" />
+                            <TextBlock Classes="materialSymbol gameOptionsNavIcon" Text="deployed_code" />
                             <TextBlock x:Name="GameOptionsEnvironmentNavLabel"
                                        Classes="gameOptionsNavLabel"
                                        VerticalAlignment="Center"
@@ -533,7 +533,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <Button x:Name="GameOptionsBackNav"
                                 Classes="gameOptionsNav">
                           <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Classes="materialSymbol" Text="arrow_back" />
+                            <TextBlock Classes="materialSymbol gameOptionsNavIcon" Text="arrow_back" />
                             <TextBlock x:Name="GameOptionsBackNavLabel"
                                        Classes="gameOptionsNavLabel"
                                        VerticalAlignment="Center"
@@ -1064,12 +1064,46 @@ SPDX-License-Identifier: GPL-2.0-or-later
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center" />
           </Border>
-          <Button x:Name="LibraryTabButton"
-                  Classes="segment active"
-                  Content="{Binding [Page.Library], Source={x:Static loc:Localization.Instance}}" />
-          <Button x:Name="OptionsTabButton"
-                  Classes="segment"
-                  Content="{Binding [Page.Options], Source={x:Static loc:Localization.Instance}}" />
+          <Grid Width="264"
+                Height="42"
+                ColumnDefinitions="132,132">
+            <Border x:Name="TopNavigationIndicator"
+                    Grid.ColumnSpan="2"
+                    Width="132"
+                    Height="42"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center"
+                    Background="#24FFFFFF"
+                    CornerRadius="999"
+                    IsHitTestVisible="False">
+              <Border.RenderTransform>
+                <TranslateTransform>
+                  <TranslateTransform.Transitions>
+                    <Transitions>
+                      <DoubleTransition Property="X"
+                                        Duration="0:0:0.2"
+                                        Easing="CubicEaseOut" />
+                    </Transitions>
+                  </TranslateTransform.Transitions>
+                </TranslateTransform>
+              </Border.RenderTransform>
+              <Border.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity"
+                                    Duration="0:0:0.14"
+                                    Easing="CubicEaseOut" />
+                </Transitions>
+              </Border.Transitions>
+            </Border>
+            <Button x:Name="LibraryTabButton"
+                    Grid.Column="0"
+                    Classes="segment active"
+                    Content="{Binding [Page.Library], Source={x:Static loc:Localization.Instance}}" />
+            <Button x:Name="OptionsTabButton"
+                    Grid.Column="1"
+                    Classes="segment"
+                    Content="{Binding [Page.Options], Source={x:Static loc:Localization.Instance}}" />
+          </Grid>
           <Border Classes="padHint">
             <TextBlock Text="R1"
                        FontSize="9"
@@ -1099,12 +1133,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   ToolTip.Tip="Console">
             <TextBlock Classes="materialSymbol" Text="terminal" />
           </Button>
-          <Ellipse x:Name="StatusDot"
-                   Width="7"
-                   Height="7"
-                   Fill="{StaticResource FaintBrush}"
-                   Margin="9,0,7,0"
-                   VerticalAlignment="Center" />
           <TextBlock x:Name="ClockText"
                      Text="00:00"
                      Width="48"
@@ -1113,19 +1141,19 @@ SPDX-License-Identifier: GPL-2.0-or-later
                      Foreground="#D9FFFFFF"
                      VerticalAlignment="Center" />
           <Button x:Name="MinimizeButton"
-                  Classes="icon"
+                  Classes="icon windowChrome"
                   ToolTip.Tip="Minimize">
             <TextBlock Classes="materialSymbol compact" Text="minimize" />
           </Button>
           <Button x:Name="MaximizeButton"
-                  Classes="icon"
+                  Classes="icon windowChrome"
                   ToolTip.Tip="Maximize">
             <TextBlock Classes="materialSymbol compact" Text="crop_square" />
           </Button>
           <Button x:Name="CloseButton"
-                  Classes="icon"
+                  Classes="icon windowChrome"
                   ToolTip.Tip="Close">
-            <TextBlock Classes="materialSymbol" Text="close" />
+            <TextBlock Classes="materialSymbol windowCloseGlyph" Text="close" />
           </Button>
         </StackPanel>
       </Grid>
