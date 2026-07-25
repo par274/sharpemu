@@ -5493,21 +5493,49 @@ public static partial class KernelMemoryCompatExports
         }
 
         var max = limit == ulong.MaxValue ? 1_048_576UL : Math.Min(limit, 1_048_576UL);
-        Span<byte> leftByte = stackalloc byte[1];
-        Span<byte> rightByte = stackalloc byte[1];
-        for (ulong i = 0; i < max; i++)
+        // Compare in page-bounded chunks with a vectorized first-difference scan
+        // instead of a guest read per byte. Page-bounding keeps each read inside
+        // one guest page, so a chunk reads fully or faults at its first byte,
+        // matching the per-byte loop's fault point. Within the equal prefix the
+        // two strings share their bytes, so the shared NUL terminator is located
+        // there with a single IndexOf.
+        const int chunkCap = 256;
+        const int pageSize = 4096;
+        Span<byte> leftChunk = stackalloc byte[chunkCap];
+        Span<byte> rightChunk = stackalloc byte[chunkCap];
+        ulong offset = 0;
+        while (offset < max)
         {
-            if (!TryReadCompat(ctx, left + i, leftByte) ||
-                !TryReadCompat(ctx, right + i, rightByte))
+            var leftAddress = left + offset;
+            var rightAddress = right + offset;
+            var leftPageRemaining = pageSize - (int)(leftAddress & (pageSize - 1));
+            var rightPageRemaining = pageSize - (int)(rightAddress & (pageSize - 1));
+            var length = (int)Math.Min(
+                (ulong)Math.Min(chunkCap, Math.Min(leftPageRemaining, rightPageRemaining)),
+                max - offset);
+            var leftSpan = leftChunk[..length];
+            var rightSpan = rightChunk[..length];
+            if (!TryReadCompat(ctx, leftAddress, leftSpan) ||
+                !TryReadCompat(ctx, rightAddress, rightSpan))
             {
                 return false;
             }
 
-            compare = leftByte[0] - rightByte[0];
-            if (compare != 0 || leftByte[0] == 0 || rightByte[0] == 0)
+            var matched = leftSpan.CommonPrefixLength(rightSpan);
+            var terminator = leftSpan[..matched].IndexOf((byte)0);
+            if (terminator >= 0)
             {
+                compare = 0;
                 return true;
             }
+
+            if (matched < length)
+            {
+                compare = leftSpan[matched] - rightSpan[matched];
+                return true;
+            }
+
+            offset += (ulong)length;
         }
 
         compare = 0;
