@@ -223,10 +223,18 @@ public static class SaveDataExports
 
         var used = SafeDirectorySize(entry.SlotDir);
         var usedBlocks = (ulong)((used + DefaultBlockSize - 1) / DefaultBlockSize);
+        // OrbisSaveDataMountInfo.freeBlocks is genuinely free space (total - used),
+        // not the used amount — shadPS4's reference (savedata.cpp) computes it as
+        // `blocks - size / OrbisSaveDataBlockSize`. Writing usedBlocks directly into
+        // this slot (as the previous code did) made a fresh, empty save directory
+        // report zero free blocks, which is backwards: a title checking available
+        // space would see none free and could show a false "not enough space"
+        // warning even on an essentially-empty 1GiB quota.
+        var freeBlocks = usedBlocks >= DefaultTotalBlocks ? 0UL : DefaultTotalBlocks - usedBlocks;
         Span<byte> info = stackalloc byte[MountInfoSize];
         info.Clear();
         BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], DefaultTotalBlocks);       // blocks
-        BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], usedBlocks);               // freeBlocks slot reused as used
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], freeBlocks);               // freeBlocks
         return ctx.Memory.TryWrite(infoAddress, info)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
