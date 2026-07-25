@@ -41,11 +41,22 @@ public static class SaveDataDialogExports
         LibraryName = "libSceSaveDataDialog")]
     public static int SaveDataDialogInitialize(CpuContext ctx)
     {
-        if (Interlocked.CompareExchange(ref _status, StatusInitialized, StatusNone) != StatusNone)
+        // Finished is a fully-resolved prior session (its result has already been
+        // read via GetResult), not a live one — treating it the same as None here
+        // matches the reuse-without-Terminate pattern Open/Close already apply to
+        // Finished (see the comments there). Requiring strictly None made every
+        // Initialize after the very first successful dialog cycle permanently
+        // fail with AlreadyInitialized, since nothing in a single-shot
+        // system-message flow ever calls Terminate: verified live on Demon's
+        // Souls that with this fix, character creation completes and the title
+        // proceeds into real gameplay, which it never did before.
+        var current = Volatile.Read(ref _status);
+        if (current is not (StatusNone or StatusFinished))
         {
             return ctx.SetReturn(ErrorAlreadyInitialized);
         }
 
+        Volatile.Write(ref _status, StatusInitialized);
         return ctx.SetReturn(ErrorOk);
     }
 
