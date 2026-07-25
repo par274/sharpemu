@@ -804,21 +804,37 @@ public static partial class KernelMemoryCompatExports
         }
 
         var payload = new byte[count];
-        Span<byte> one = stackalloc byte[1];
+        // Read the source in page-bounded chunks and stop at the first NUL,
+        // instead of one guest read per byte — the shape the wide WcsncpyCore
+        // path already uses. payload is zero-initialized, so every byte past the
+        // terminator is already the strncpy zero padding; the over-read tail of
+        // the terminating chunk is cleared to match.
+        const int maxReadBytes = 4096;
         var copied = 0;
         while (copied < count)
         {
-            if (!TryReadCompat(ctx, source + (ulong)copied, one))
+            var sourceAddress = source + (ulong)copied;
+            if (sourceAddress < source)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            payload[copied] = one[0];
-            copied++;
-            if (one[0] == 0)
+            var pageBytesRemaining = maxReadBytes - (int)(sourceAddress & (maxReadBytes - 1));
+            var readBytes = Math.Min(pageBytesRemaining, count - copied);
+            var chunk = payload.AsSpan(copied, readBytes);
+            if (!TryReadCompat(ctx, sourceAddress, chunk))
             {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            var nul = chunk.IndexOf((byte)0);
+            if (nul >= 0)
+            {
+                chunk[(nul + 1)..].Clear();
                 break;
             }
+
+            copied += readBytes;
         }
 
         if (!TryWriteCompat(ctx, destination, payload))
