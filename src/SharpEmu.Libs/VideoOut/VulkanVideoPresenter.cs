@@ -2025,6 +2025,15 @@ internal static unsafe class VulkanVideoPresenter
     {
         var format = (dataFormat, numberType) switch
         {
+            // Early G-buffer / scene targets (R16 + RG32). GTA V Enhanced hits
+            // these as color targets; texture decode already knew them.
+            (2, 0) => Format.R16Unorm,
+            (2, 1) => Format.R16SNorm,
+            (2, 2) => Format.R16Uscaled,
+            (2, 3) => Format.R16Sscaled,
+            (2, 4) => Format.R16Uint,
+            (2, 5) => Format.R16Sint,
+            (2, 7) => Format.R16Sfloat,
             (4, 4) => Format.R32Uint,
             (4, 5) => Format.R32Sint,
             (4, 7) => Format.R32Sfloat,
@@ -2037,6 +2046,8 @@ internal static unsafe class VulkanVideoPresenter
             (10, 5) => Format.R8G8B8A8Sint,
             (10, 9) => Format.R8G8B8A8Srgb,
             (10, _) => Format.R8G8B8A8Unorm,
+            (11, 4) => Format.R32G32Uint,
+            (11, 5) => Format.R32G32Sint,
             (11, 7) => Format.R32G32Sfloat,
             (12, 4) => Format.R16G16B16A16Uint,
             (12, 5) => Format.R16G16B16A16Sint,
@@ -2065,10 +2076,11 @@ internal static unsafe class VulkanVideoPresenter
 
         var outputKind = format switch
         {
-            Format.R8Uint or Format.R32Uint or Format.R16G16Uint or
-                Format.R8G8B8A8Uint or Format.R16G16B16A16Uint => Gen5PixelOutputKind.Uint,
-            Format.R32Sint or Format.R16G16Sint or Format.R8G8B8A8Sint or
-                Format.R16G16B16A16Sint => Gen5PixelOutputKind.Sint,
+            Format.R8Uint or Format.R16Uint or Format.R32Uint or Format.R16G16Uint or
+                Format.R32G32Uint or Format.R8G8B8A8Uint or Format.R16G16B16A16Uint =>
+                Gen5PixelOutputKind.Uint,
+            Format.R16Sint or Format.R32Sint or Format.R16G16Sint or Format.R32G32Sint or
+                Format.R8G8B8A8Sint or Format.R16G16B16A16Sint => Gen5PixelOutputKind.Sint,
             _ => Gen5PixelOutputKind.Float,
         };
         result = new VulkanRenderTargetFormat(format, outputKind);
