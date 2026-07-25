@@ -1777,6 +1777,57 @@ internal static unsafe class VulkanVideoPresenter
         uint depth) =>
         checked(GetGuestImageByteCount(format, width, height) * Math.Max(depth, 1u));
 
+    /// <summary>
+    /// Upper bound on the backing extent that guest CPU-write tracking is
+    /// armed over. Deliberately equal to the presenter-side re-upload budget
+    /// used by the AGC flip/acquire sync path: arming a range larger than the
+    /// sync path is willing to read back would fault and dirty forever without
+    /// ever producing a re-upload, so it is pure cost.
+    /// </summary>
+    internal const ulong MaxTrackedGuestImageBytes = 128UL * 1024UL * 1024UL;
+
+    /// <summary>
+    /// Decides whether a guest surface is eligible for CPU-write tracking.
+    /// The predicate is byte-based on purpose: the cost that actually scales
+    /// with surface size is the dirty re-upload (one allocation plus a guest
+    /// memory read of the whole extent per dirty flip), not the arming itself
+    /// (one mprotect and, per write burst, one fault for the whole range).
+    /// A resolution cap was the wrong proxy — it ignored bytes-per-texel and
+    /// volume depth while excluding the 4K UI sheets that most need
+    /// invalidation.
+    /// </summary>
+    internal static bool ShouldTrackGuestImageWrites(ulong byteCount) =>
+        byteCount != 0 && byteCount <= MaxTrackedGuestImageBytes;
+
+    /// <summary>
+    /// Decides whether a sampled guest image whose backing memory the parse
+    /// thread just re-read should be re-uploaded from those bytes.
+    /// <para>
+    /// <paramref name="isCpuBacked"/> is a latch that flips false the first
+    /// time an address is used as a render target and never flips back, so it
+    /// cannot be the sole gate: a font atlas or UI sheet that was also
+    /// rendered into is permanently frozen at its first upload afterwards.
+    /// The write tracker answers the real question. A parse-time generation
+    /// above zero means a guest CPU store was observed on the backing range,
+    /// and a generation the last upload does not already cover means those
+    /// bytes are newer than the host image.
+    /// </para>
+    /// <para>
+    /// Requiring a positive generation keeps the pure GPU-feedback case
+    /// (render into an image, then sample it) safe: such a surface is tracked
+    /// but never CPU-written, so its generation stays zero and the live image
+    /// is preserved instead of being overwritten with guest memory.
+    /// </para>
+    /// </summary>
+    internal static bool ShouldRefreshGuestImageFromCpu(
+        bool isCpuBacked,
+        long textureWriteGeneration,
+        bool hasUploadedGeneration,
+        long uploadedGeneration) =>
+        isCpuBacked ||
+        (textureWriteGeneration > 0 &&
+            (!hasUploadedGeneration || uploadedGeneration != textureWriteGeneration));
+
     // Maps a UNORM swapchain format to the sRGB view of the same bit layout,
     // or Undefined when no counterpart exists. Used to encode linear-float
     // guest flips on their way into a UNORM swapchain.
@@ -8187,13 +8238,38 @@ internal static unsafe class VulkanVideoPresenter
             out TextureResource resource)
         {
             resource = default!;
-            if (!guestImage.IsCpuBacked ||
-                guestImage.Width != texture.Width ||
+            if (guestImage.Width != texture.Width ||
                 guestImage.Height != texture.Height ||
                 guestImage.Depth != GetGuestTextureDepth(texture.Type, texture.Depth) ||
                 IsGuestTexture3D(guestImage.Type) != IsGuestTexture3D(texture.Type) ||
                 guestImage.MipLevels != 1 ||
                 texture.RgbaPixels.Length == 0)
+            {
+                return false;
+            }
+
+            // IsCpuBacked alone used to gate this path, but it is a latch that
+            // flips false the first time the address is used as a render target
+            // and never flips back. On PS5 that address is unified memory: a
+            // surface that was rendered into once and is later rewritten by the
+            // guest CPU (glyph atlas rasterization, a 4K UI sheet redrawn on the
+            // brightness screen) must still be re-read. Fall back on the write
+            // tracker, which reports genuine CPU stores and leaves pure
+            // render-into-then-sample feedback untouched.
+            bool hasUploadedGeneration;
+            long uploadedGeneration;
+            lock (_gate)
+            {
+                hasUploadedGeneration = _cpuBackedUploadGenerations.TryGetValue(
+                    texture.Address,
+                    out uploadedGeneration);
+            }
+
+            if (!ShouldRefreshGuestImageFromCpu(
+                    guestImage.IsCpuBacked,
+                    texture.WriteGeneration,
+                    hasUploadedGeneration,
+                    uploadedGeneration))
             {
                 return false;
             }
@@ -13280,20 +13356,33 @@ internal static unsafe class VulkanVideoPresenter
                 retained.IsCpuBacked = false;
                 retained.CpuContentFingerprint = 0;
                 _guestImages.Add(target.Address, retained);
+                var retainedByteCount = GetTextureByteCount(
+                    target.Format,
+                    target.Width,
+                    target.Height,
+                    depth);
                 lock (_gate)
                 {
                     _cpuBackedUploadGenerations.Remove(target.Address);
                     _guestImageExtents[target.Address] = (
                         target.Width,
                         target.Height,
-                        GetTextureByteCount(
-                            target.Format,
-                            target.Width,
-                            target.Height,
-                            depth));
+                        retainedByteCount);
                 }
 
-                TrackCpuBackedGuestImage(retained);
+                // Arm the exact extent the flip/acquire sync path would read
+                // back, budgeted by bytes rather than by resolution: the old
+                // 1920x1080 cap left every 4K surface permanently
+                // un-invalidated, so a guest CPU rewrite of one was never
+                // reflected and the sample served stale bytes.
+                if (ShouldTrackGuestImageWrites(retainedByteCount))
+                {
+                    SharpEmu.HLE.GuestImageWriteTracker.Track(
+                        target.Address,
+                        retainedByteCount,
+                        CurrentGuestWorkSequenceForDiagnostics,
+                        "vulkan.render-target");
+                }
 
                 if (_traceGuestImageEvents)
                 {
@@ -13432,19 +13521,31 @@ internal static unsafe class VulkanVideoPresenter
                 SetDebugName(ObjectType.Framebuffer, framebuffer.Handle, $"{debugName} framebuffer");
             }
             _guestImages.Add(target.Address, resource);
+            var createdByteCount = GetTextureByteCount(
+                target.Format,
+                target.Width,
+                target.Height,
+                depth);
             lock (_gate)
             {
                 _guestImageExtents[target.Address] = (
                     target.Width,
                     target.Height,
-                    GetTextureByteCount(
-                        target.Format,
-                        target.Width,
-                        target.Height,
-                        depth));
+                    createdByteCount);
             }
 
-            TrackCpuBackedGuestImage(resource);
+            // See the retained-variant path above: track the full backing
+            // extent under a byte budget instead of a resolution cap so
+            // oversized render targets the guest later rewrites with the CPU
+            // are re-uploaded on the next sample.
+            if (ShouldTrackGuestImageWrites(createdByteCount))
+            {
+                SharpEmu.HLE.GuestImageWriteTracker.Track(
+                    target.Address,
+                    createdByteCount,
+                    CurrentGuestWorkSequenceForDiagnostics,
+                    "vulkan.render-target");
+            }
 
             if (_traceGuestImageEvents)
             {
@@ -13458,24 +13559,25 @@ internal static unsafe class VulkanVideoPresenter
 
         private void TrackCpuBackedGuestImage(GuestImageResource image)
         {
-            // Arm ≤1080p guest images so native CPU stores fault. Drain skips
-            // false overlap dirties with a 4 KiB zero probe unless IsCpuBacked.
-            if (image.Width == 0 ||
-                image.Height == 0 ||
-                image.Width > 1920 ||
-                image.Height > 1080)
+            if (image.Width == 0 || image.Height == 0)
             {
                 return;
             }
 
             var depth = Math.Max(image.Depth, 1u);
+            var byteCount = GetVulkanImageByteCount(
+                image.Format,
+                image.Width,
+                image.Height,
+                depth);
+            if (!ShouldTrackGuestImageWrites(byteCount))
+            {
+                return;
+            }
+
             SharpEmu.HLE.GuestImageWriteTracker.Track(
                 image.Address,
-                GetVulkanImageByteCount(
-                    image.Format,
-                    image.Width,
-                    image.Height,
-                    depth),
+                byteCount,
                 CurrentGuestWorkSequenceForDiagnostics,
                 "vulkan.render-target");
         }
