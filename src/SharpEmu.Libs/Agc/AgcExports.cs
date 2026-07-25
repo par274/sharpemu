@@ -8263,6 +8263,9 @@ public static partial class AgcExports
     private static bool IsGpuDetileBytesPerElement(int bytesPerElement) =>
         bytesPerElement is 4 or 8 or 16;
 
+    private static bool IsGpuDetileTextureType(uint type) =>
+        type != Gen5TextureType3D;
+
     private static bool TryGetTextureElementLayout(
         TextureDescriptor descriptor,
         uint sourceWidth,
@@ -8746,6 +8749,7 @@ public static partial class AgcExports
             // take this path.
             if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
                 IsGpuDetileBytesPerElement(bytesPerElement) &&
+                IsGpuDetileTextureType(descriptor.Type) &&
                 (long)physicalSourceByteCount * arrayLayers <= int.MaxValue)
             {
                 var gpuArrayParams = GnmTiling.GetDetileParams(
@@ -8789,6 +8793,12 @@ public static partial class AgcExports
                             WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
                             ArrayedView: true,
                             ArrayLayers: arrayLayers,
+                            // Must match the identity the CPU path below ships, or
+                            // the presenter caches this texture under a different
+                            // key than IsTextureContentCached queries above and the
+                            // texel-copy skip never hits for non-2D descriptors.
+                            Type: descriptor.Type,
+                            Depth: textureDepth,
                             TiledSource: tiledLayers,
                             Detile: gpuArrayParams);
                         return true;
@@ -8920,7 +8930,8 @@ public static partial class AgcExports
         // Arrayed textures are handled by the arrayed branch above (they package
         // every layer's tiled slice); this branch is the single-layer case.
         if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
-            IsGpuDetileBytesPerElement(bytesPerElement) && !isArrayed)
+            IsGpuDetileBytesPerElement(bytesPerElement) && !isArrayed &&
+            IsGpuDetileTextureType(descriptor.Type))
         {
             var gpuDetileParams = GnmTiling.GetDetileParams(
                 descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh);
@@ -8946,6 +8957,8 @@ public static partial class AgcExports
                     Sampler: ToGuestSampler(samplerDescriptor),
                     WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
                     ArrayedView: isArrayed,
+                    Type: descriptor.Type,
+                    Depth: textureDepth,
                     TiledSource: source,
                     Detile: gpuDetileParams);
                 return true;

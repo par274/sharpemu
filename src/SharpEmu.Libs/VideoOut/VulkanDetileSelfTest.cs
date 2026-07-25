@@ -261,23 +261,7 @@ internal static unsafe class VulkanDetileSelfTest
         {
             vk.DestroyFence(device, fence, null);
             vk.FreeCommandBuffers(device, commandPool, 1, &commandBuffer);
-            foreach (var (buffer, memory) in transients.Buffers)
-            {
-                if (buffer.Handle != 0)
-                {
-                    vk.DestroyBuffer(device, buffer, null);
-                }
-
-                if (memory.Handle != 0)
-                {
-                    vk.FreeMemory(device, memory, null);
-                }
-            }
-
-            if (transients.DescriptorPool.Handle != 0)
-            {
-                vk.DestroyDescriptorPool(device, transients.DescriptorPool, null);
-            }
+            pass.Retire(transients);
         }
 
         return true;

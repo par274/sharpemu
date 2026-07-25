@@ -2914,9 +2914,7 @@ internal static unsafe class VulkanVideoPresenter
         private readonly Stack<Fence> _recycledGuestFences = new();
         private readonly Stack<CommandBuffer> _recycledGuestCommandBuffers = new();
         private readonly List<(VkBuffer Buffer, DeviceMemory Memory)> _batchRetireBuffers = new();
-        // Descriptor pools from GPU-detile passes recorded into the batch; retired
-        // with the batch's fence, alongside _batchRetireBuffers.
-        private readonly List<DescriptorPool> _batchRetireDescriptorPools = new();
+        private readonly List<VulkanDetilePass.Transients> _batchRetireDetile = new();
         private const int MaxRecycledGuestFences = 32;
         private const int MaxRecycledGuestCommandBuffers = 32;
         private VkBuffer _stagingBuffer;
@@ -3288,7 +3286,7 @@ internal static unsafe class VulkanVideoPresenter
             IReadOnlyList<TranslatedDrawResources> Resources,
             IReadOnlyList<GuestImageResource> TraceImages,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)> RetireBuffers,
-            IReadOnlyList<DescriptorPool> RetirePools,
+            IReadOnlyList<VulkanDetilePass.Transients> RetireDetile,
             ulong Timeline,
             string DebugName,
             VulkanGuestQueueIdentity Queue,
@@ -4963,8 +4961,8 @@ internal static unsafe class VulkanVideoPresenter
                     _batchResources.ToArray(),
                     _batchTraceImages.ToArray(),
                     _batchRetireBuffers.Count > 0 ? _batchRetireBuffers.ToArray() : [],
-                    retirePools: _batchRetireDescriptorPools.Count > 0
-                        ? _batchRetireDescriptorPools.ToArray()
+                    retireDetile: _batchRetireDetile.Count > 0
+                        ? _batchRetireDetile.ToArray()
                         : []);
             }
             catch
@@ -4983,9 +4981,9 @@ internal static unsafe class VulkanVideoPresenter
                     _vk.FreeMemory(_device, memory, null);
                 }
 
-                foreach (var pool in _batchRetireDescriptorPools)
+                foreach (var transients in _batchRetireDetile)
                 {
-                    _vk.DestroyDescriptorPool(_device, pool, null);
+                    _detilePass?.Retire(transients);
                 }
 
                 ReleaseGuestCommandBuffer(_batchCommandBuffer);
@@ -4996,7 +4994,7 @@ internal static unsafe class VulkanVideoPresenter
                 _batchResources.Clear();
                 _batchTraceImages.Clear();
                 _batchRetireBuffers.Clear();
-                _batchRetireDescriptorPools.Clear();
+                _batchRetireDetile.Clear();
                 _batchCommandBuffer = default;
             }
         }
@@ -5007,7 +5005,7 @@ internal static unsafe class VulkanVideoPresenter
             IReadOnlyList<GuestImageResource> traceImages,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)>? retireBuffers = null,
             IReadOnlyList<TranslatedDrawResources>? referencedResources = null,
-            IReadOnlyList<DescriptorPool>? retirePools = null)
+            IReadOnlyList<VulkanDetilePass.Transients>? retireDetile = null)
         {
             var fence = AcquireGuestFence();
             try
@@ -5065,7 +5063,7 @@ internal static unsafe class VulkanVideoPresenter
                     resources,
                     traceImages,
                     retireBuffers ?? [],
-                    retirePools ?? [],
+                    retireDetile ?? [],
                     _submitTimeline,
                     resources.Count > 0 ? resources[0].DebugName : "batch",
                     _activeGuestQueue,
@@ -5237,9 +5235,11 @@ internal static unsafe class VulkanVideoPresenter
                     _vk.FreeMemory(_device, memory, null);
                 }
 
-                foreach (var pool in submission.RetirePools)
+                // The fence has signalled, so the detile dispatch that used these
+                // is done reading them; hand them back for the next texture.
+                foreach (var transients in submission.RetireDetile)
                 {
-                    _vk.DestroyDescriptorPool(_device, pool, null);
+                    _detilePass?.Retire(transients);
                 }
 
                 ReleaseGuestCommandBuffer(submission.CommandBuffer);
@@ -7855,7 +7855,8 @@ internal static unsafe class VulkanVideoPresenter
             // copy because this identity was marked cached; a miss here is
             // an invalidation race (eviction, cache clear). Self-heal by
             // reading the texels directly rather than rendering a fallback.
-            if (texture.RgbaPixels.Length == 0)
+            if (texture.RgbaPixels.Length == 0 &&
+                texture.TiledSource is not { Length: > 0 })
             {
                 var refreshed = TryReadGuestTexturePixels(texture);
                 if (refreshed is null)
@@ -8300,6 +8301,7 @@ internal static unsafe class VulkanVideoPresenter
                 texture.Detile is { } detileCandidate &&
                 texture.TiledSource is { Length: > 0 } tiledCandidate &&
                 VulkanDetilePass.Supports(detileCandidate) &&
+                !IsGuestTexture3D(texture.Type) &&
                 detileCandidate.ElementsWide > 0 &&
                 detileCandidate.ElementsHigh > 0 &&
                 (long)tiledCandidate.Length >=
@@ -8458,8 +8460,7 @@ internal static unsafe class VulkanVideoPresenter
                             detileParameters,
                             out var detileTransients))
                     {
-                        _batchRetireBuffers.AddRange(detileTransients.Buffers);
-                        _batchRetireDescriptorPools.Add(detileTransients.DescriptorPool);
+                        _batchRetireDetile.Add(detileTransients);
                         gpuDetiled = true;
                     }
                 }
