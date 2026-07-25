@@ -865,6 +865,14 @@ public static class SaveDataExports
         // RDI = 0xC0000, RSI = RDX + 8, RDX = resource output.
         // Writing integer handle 1 makes the title dereference [1 + 8],
         // causing the repeatable access violation at guest address 0x9.
+        // A null (0) handle avoids that crash too, but the title's own
+        // transaction logic reads the handle back and treats a null result
+        // as "resource allocation failed", which cascades into a fallback
+        // SaveDataDialog system message instead of proceeding with the
+        // save. Writing the resource address back into itself keeps
+        // [handle + 8] == desWorkAddress (the title's own already-mapped
+        // work buffer, so the dereference still lands in valid memory) while
+        // giving the title a non-null handle it can treat as a real resource.
         var desWorkSize = ctx[CpuRegister.Rdi];
         var desWorkAddress = ctx[CpuRegister.Rsi];
         var desResourceAddress = ctx[CpuRegister.Rdx];
@@ -874,7 +882,7 @@ public static class SaveDataExports
             desResourceAddress <= ulong.MaxValue - sizeof(ulong) &&
             desWorkAddress == desResourceAddress + sizeof(ulong))
         {
-            if (!ctx.TryWriteUInt64(desResourceAddress, 0))
+            if (!ctx.TryWriteUInt64(desResourceAddress, desResourceAddress))
             {
                 return SetReturn(
                     ctx,
@@ -885,7 +893,7 @@ public static class SaveDataExports
                 $"create_transaction_resource_des_guard " +
                 $"work_size=0x{desWorkSize:X} " +
                 $"work=0x{desWorkAddress:X} " +
-                $"resource_addr=0x{desResourceAddress:X} resource=0x0");
+                $"resource_addr=0x{desResourceAddress:X} resource=0x{desResourceAddress:X}");
 
             return SetReturn(ctx, 0);
         }
