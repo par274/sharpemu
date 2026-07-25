@@ -430,13 +430,23 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                 // Untracked host memory (runtime heaps, stacks, libraries) is
                 // reported as a free block reaching to the next tracked region
                 // so scanning callers keep advancing.
+                // Regions are sorted by Base, so binary-search the smallest Base
+                // above pageAddress instead of scanning the keys linearly.
                 var nextBase = ulong.MaxValue;
-                foreach (var regionBase in Regions.Keys)
+                var keys = Regions.Keys;
+                var low = 0;
+                var high = keys.Count - 1;
+                while (low <= high)
                 {
-                    if (regionBase > pageAddress)
+                    var middle = low + ((high - low) >> 1);
+                    if (keys[middle] > pageAddress)
                     {
-                        nextBase = regionBase;
-                        break;
+                        nextBase = keys[middle];
+                        high = middle - 1;
+                    }
+                    else
+                    {
+                        low = middle + 1;
                     }
                 }
 
@@ -453,16 +463,30 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
         private static bool OverlapsTrackedRegionLocked(ulong start, ulong size)
         {
+            // Regions are kept non-overlapping and sorted by Base, so only the
+            // region with the greatest Base < end can overlap [start, end): if it
+            // does not, no earlier region does either. Binary-search for it rather
+            // than scanning every tracked region.
             var end = start + size;
-            foreach (var region in Regions.Values)
+            var values = Regions.Values;
+            var low = 0;
+            var high = values.Count - 1;
+            Region? candidate = null;
+            while (low <= high)
             {
-                if (region.Base < end && start < region.End)
+                var middle = low + ((high - low) >> 1);
+                if (values[middle].Base < end)
                 {
-                    return true;
+                    candidate = values[middle];
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle - 1;
                 }
             }
 
-            return false;
+            return candidate is not null && start < candidate.End;
         }
 
         private static bool TryFindRegionLocked(ulong address, out Region region)
