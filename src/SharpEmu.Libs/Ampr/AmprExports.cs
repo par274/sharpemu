@@ -25,6 +25,9 @@ public static class AmprExports
     private const uint KernelEventQueueRecordType = 2;
     private const uint WriteAddressRecordType = 3;
     private static readonly ConcurrentDictionary<ulong, CommandBufferState> _commandBuffers = new();
+    private static readonly ConcurrentDictionary<uint, string> _discoveredFileMappings = new();
+    private static bool _app0ScanComplete;
+
     private static readonly ConcurrentDictionary<string, Lazy<CachedHostFile>> _hostFileCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly bool _traceAmpr =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AMPR"), "1", StringComparison.Ordinal);
@@ -40,21 +43,38 @@ public static class AmprExports
         public ulong CommandCount;
     }
 
-    private sealed class CachedHostFile
+    private sealed class CachedHostFile : IDisposable
     {
         public CachedHostFile(string path)
         {
-            Handle = File.OpenHandle(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete,
-                FileOptions.RandomAccess);
-            Length = RandomAccess.GetLength(Handle);
+            try
+            {
+                Handle = File.OpenHandle(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete,
+                    FileOptions.RandomAccess);
+                Length = RandomAccess.GetLength(Handle);
+            }
+            catch (Exception ex)
+            {
+                if (_traceAmpr)
+                {
+                    Console.Error.WriteLine($"[LOADER][ERROR] CachedHostFile ctor failed: path='{path}' error={ex.GetType().Name}: {ex.Message}");
+                }
+
+                throw;
+            }
         }
 
         public SafeFileHandle Handle { get; }
         public long Length { get; }
+
+        public void Dispose()
+        {
+            Handle?.Dispose();
+        }
     }
 
     [SysAbiExport(
@@ -271,8 +291,68 @@ public static class AmprExports
 
         if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath))
         {
-            TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0, hostPath, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            // Auto-discover: scan app0 for files matching this FNV-1a hash (one-time)
+            if (!_app0ScanComplete)
+            {
+                _app0ScanComplete = true;
+                var app0Root = KernelMemoryCompatExports.ResolveApp0Root();
+                if (!string.IsNullOrWhiteSpace(app0Root) && Directory.Exists(app0Root))
+                {
+                    foreach (var filePath in Directory.EnumerateFiles(app0Root, "*", SearchOption.AllDirectories))
+                    {
+                        var relativePath = Path.GetRelativePath(app0Root, filePath);
+
+                        // Register with multiple prefixes (games use various path formats)
+                        var guestPaths = new[]
+                        {
+                            "/app0/" + relativePath,
+                            "$//" + relativePath,
+                            "$/" + relativePath,
+                            relativePath,
+                        };
+
+                        foreach (var gp in guestPaths)
+                        {
+                            var id = AmprFileRegistry.ComputeFileId(gp);
+                            if (!_discoveredFileMappings.ContainsKey(id))
+                            {
+                                _discoveredFileMappings[id] = filePath;
+                                AmprFileRegistry.Register(gp, filePath);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check cache first, then registry
+            if (_discoveredFileMappings.TryGetValue(fileId, out var cachedHostPath))
+            {
+                hostPath = cachedHostPath;
+            }
+            else if (!AmprFileRegistry.TryGetHostPath(fileId, out hostPath))
+            {
+                // Neither the registry nor the app0 scan resolved this file ID — it genuinely
+                // does not exist on the host. Returning NOT_FOUND here is correct but crashes
+                // titles that probe optional/DLC assets without checking the result; report
+                // OK with zero bytes instead so the title's own missing-asset handling takes
+                // over. Known limitation: any title that treats a short read as fatal (rather
+                // than as "asset absent") will still misbehave.
+                if (_traceAmpr)
+                {
+                    Console.Error.WriteLine($"[LOADER][DEBUG] ampr.read_file fallback: id=0x{fileId:X8} returning OK");
+                }
+
+                TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0, hostPath: null, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+
+                // Append an empty read file record so the command buffer remains valid
+                if (!AppendReadFileRecord(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead: 0))
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                ctx[CpuRegister.Rax] = 0;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
         }
 
         var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out var bytesRead);
@@ -766,10 +846,11 @@ public static class AmprExports
 
         const int ChunkSize = 1024 * 1024;
         var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));
+        CachedHostFile? cachedFile = null;
 
         try
         {
-            if (!TryGetCachedHostFile(hostPath, out var cachedFile, out var openResult))
+            if (!TryGetCachedHostFile(hostPath, out cachedFile!, out var openResult))
             {
                 return openResult;
             }
@@ -821,6 +902,7 @@ public static class AmprExports
         }
         finally
         {
+            cachedFile?.Dispose();
             ArrayPool<byte>.Shared.Return(buffer);
         }
 
@@ -842,24 +924,24 @@ public static class AmprExports
             cachePath = hostPath;
         }
 
-        var lazy = _hostFileCache.GetOrAdd(
-            cachePath,
-            static path => new Lazy<CachedHostFile>(() => new CachedHostFile(path), isThreadSafe: true));
+        if (!System.IO.File.Exists(cachePath))
+        {
+            result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            return false;
+        }
 
         try
         {
-            file = lazy.Value;
+            file = new CachedHostFile(cachePath);
             return true;
         }
         catch (UnauthorizedAccessException)
         {
-            _hostFileCache.TryRemove(cachePath, out _);
             result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
             return false;
         }
         catch (IOException)
         {
-            _hostFileCache.TryRemove(cachePath, out _);
             result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             return false;
         }

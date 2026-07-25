@@ -5069,7 +5069,7 @@ public static partial class KernelMemoryCompatExports
         return true;
     }
 
-    private static string? ResolveApp0Root()
+    internal static string? ResolveApp0Root()
     {
         var cached = Volatile.Read(ref _cachedApp0Root);
         if (!string.IsNullOrWhiteSpace(cached))
