@@ -658,21 +658,31 @@ public static class JsonExports
         }
 
         var bytes = new byte[maximumLength];
-        Span<byte> current = stackalloc byte[1];
-        for (var index = 0; index < bytes.Length; index++)
+        // Read the key in page-bounded chunks and find the terminator with a
+        // vectorized IndexOf, instead of one guest read per byte. Page-bounding
+        // keeps each read inside a single guest page, so a chunk reads fully or
+        // faults at its first byte — the same point the per-byte loop faulted.
+        const int maxReadBytes = 4096;
+        var filled = 0;
+        while (filled < bytes.Length)
         {
-            if (!ctx.Memory.TryRead(address + (ulong)index, current))
+            var current = address + (ulong)filled;
+            var pageBytesRemaining = maxReadBytes - (int)(current & (maxReadBytes - 1));
+            var readBytes = Math.Min(pageBytesRemaining, bytes.Length - filled);
+            var chunk = bytes.AsSpan(filled, readBytes);
+            if (!ctx.Memory.TryRead(current, chunk))
             {
                 return false;
             }
 
-            if (current[0] == 0)
+            var nul = chunk.IndexOf((byte)0);
+            if (nul >= 0)
             {
-                value = Encoding.UTF8.GetString(bytes, 0, index);
+                value = Encoding.UTF8.GetString(bytes, 0, filled + nul);
                 return true;
             }
 
-            bytes[index] = current[0];
+            filled += readBytes;
         }
 
         return false;
