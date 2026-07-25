@@ -7675,18 +7675,43 @@ public static partial class KernelMemoryCompatExports
         var needle = unchecked((byte)ctx[CpuRegister.Rsi]);
         var count = ctx[CpuRegister.Rdx];
 
+        // The original scanned one guest byte at a time. Read the buffer in
+        // page-sized chunks (count is known, so there is no over-read) and locate
+        // the needle with a vectorized IndexOf. Only when a bulk read faults do we
+        // replay that chunk byte-by-byte, so a hit that precedes an unreadable byte
+        // is still returned ahead of the fault, exactly as the per-byte loop did.
+        const int chunkSize = 4096;
+        var bufferSize = (int)Math.Min(count, (ulong)chunkSize);
+        Span<byte> chunk = stackalloc byte[bufferSize];
         Span<byte> current = stackalloc byte[1];
-        for (ulong index = 0; index < count; index++)
+        for (ulong offset = 0; offset < count; offset += (ulong)chunkSize)
         {
-            if (!TryReadCompat(ctx, address + index, current))
+            var length = (int)Math.Min((ulong)chunkSize, count - offset);
+            var span = chunk[..length];
+            if (TryReadCompat(ctx, address + offset, span))
             {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                var hit = span.IndexOf(needle);
+                if (hit >= 0)
+                {
+                    ctx[CpuRegister.Rax] = address + offset + (ulong)hit;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
+
+                continue;
             }
 
-            if (current[0] == needle)
+            for (var i = 0; i < length; i++)
             {
-                ctx[CpuRegister.Rax] = address + index;
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                if (!TryReadCompat(ctx, address + offset + (ulong)i, current))
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                if (current[0] == needle)
+                {
+                    ctx[CpuRegister.Rax] = address + offset + (ulong)i;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
             }
         }
 
