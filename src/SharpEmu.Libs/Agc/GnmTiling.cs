@@ -498,34 +498,61 @@ internal static unsafe class GnmTiling
             var detileRow = (int y) =>
             {
                 var blockY = y / blockHeight;
-                var inBlockY = y & (blockHeight - 1);
                 var rowBlockBase = (long)blockY * blocksPerRow;
-                var tableRowBase = inBlockY * blockWidth;
                 var destRowBase = (long)y * elementsWide * bytesPerElement;
-                var yTerm = hasExactXorPattern
-                    ? patternTerms.Y[y & patternTerms.YMask]
-                    : 0;
-                for (var x = 0; x < elementsWide; x++)
+                if (hasExactXorPattern)
                 {
-                    var blockX = x >> blockWidthShift;
-                    var inBlockX = x & blockWidthMask;
-                    var blockIndex = rowBlockBase + blockX;
-                    var sourceByte = hasExactXorPattern
-                        ? blockIndex * blockBytes + (patternTerms.X[x & patternTerms.XMask] ^ yTerm)
-                        : (blockIndex * blockElements + blockTable[tableRowBase + inBlockX]) *
-                          (long)bytesPerElement;
-                    var destByte = destRowBase + (long)x * bytesPerElement;
-                    if (sourceByte < 0 ||
-                        sourceByte + bytesPerElement > sourceLength ||
-                        destByte + bytesPerElement > destinationLength)
+                    // The block's byte base advances by blockBytes every blockWidth
+                    // columns, so walk one block at a time and carry the base forward
+                    // instead of recomputing blockIndex * blockBytes for every texel.
+                    var xTerms = patternTerms.X;
+                    var xMask = patternTerms.XMask;
+                    var yTerm = patternTerms.Y[y & patternTerms.YMask];
+                    var blockByteBase = rowBlockBase * blockBytes;
+                    for (var blockStart = 0; blockStart < elementsWide; blockStart += blockWidth)
                     {
-                        continue;
-                    }
+                        var blockEnd = Math.Min(blockStart + blockWidth, elementsWide);
+                        for (var x = blockStart; x < blockEnd; x++)
+                        {
+                            var sourceByte = blockByteBase + (xTerms[x & xMask] ^ yTerm);
+                            var destByte = destRowBase + (long)x * bytesPerElement;
+                            if (sourceByte < 0 ||
+                                sourceByte + bytesPerElement > sourceLength ||
+                                destByte + bytesPerElement > destinationLength)
+                            {
+                                continue;
+                            }
 
-                    CopyElement(
-                        (byte*)sourceAddress + sourceByte,
-                        (byte*)destinationAddress + destByte,
-                        bytesPerElement);
+                            CopyElement(
+                                (byte*)sourceAddress + sourceByte,
+                                (byte*)destinationAddress + destByte,
+                                bytesPerElement);
+                        }
+
+                        blockByteBase += blockBytes;
+                    }
+                }
+                else
+                {
+                    var tableRowBase = (y & (blockHeight - 1)) * blockWidth;
+                    for (var x = 0; x < elementsWide; x++)
+                    {
+                        var blockIndex = rowBlockBase + (x >> blockWidthShift);
+                        var sourceByte = (blockIndex * blockElements + blockTable[tableRowBase + (x & blockWidthMask)]) *
+                            (long)bytesPerElement;
+                        var destByte = destRowBase + (long)x * bytesPerElement;
+                        if (sourceByte < 0 ||
+                            sourceByte + bytesPerElement > sourceLength ||
+                            destByte + bytesPerElement > destinationLength)
+                        {
+                            continue;
+                        }
+
+                        CopyElement(
+                            (byte*)sourceAddress + sourceByte,
+                            (byte*)destinationAddress + destByte,
+                            bytesPerElement);
+                    }
                 }
             };
 
