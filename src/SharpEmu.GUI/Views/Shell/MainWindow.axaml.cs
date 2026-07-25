@@ -57,7 +57,6 @@ public partial class MainWindow : Window
     private AvaloniaList<LogLine> _consoleLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
     private readonly DispatcherTimer _libraryBlurTimer;
-    private readonly DispatcherTimer _clockTimer;
     private BlurEffect? _libraryBlur;
     private double _libraryBlurStartRadius;
     private double _libraryBlurTargetRadius;
@@ -204,18 +203,7 @@ public partial class MainWindow : Window
         };
         _libraryBlurTimer.Tick += (_, _) => AdvanceLibraryBlur();
 
-        _clockTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(15),
-        };
-        _clockTimer.Tick += (_, _) => UpdateClock();
-        UpdateClock();
-        _clockTimer.Start();
-        Closed += (_, _) =>
-        {
-            _clockTimer.Stop();
-            _emulatorService.Stop();
-        };
+        Closed += (_, _) => _emulatorService.Stop();
 
         // Native popups float above every window on the desktop; they must
         // follow the launcher into the background or a minimized state.
@@ -310,13 +298,7 @@ public partial class MainWindow : Window
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
         ConsoleToggle.Click += (_, _) => OpenSelectedGameSettings();
-        var gameOptionsNavButtons = new[]
-        {
-            GameOptionsGeneralNav,
-            GameOptionsLoggingNav,
-            GameOptionsEnvironmentNav,
-            GameOptionsBackNav,
-        };
+        var gameOptionsNavButtons = GameOptionsNavButtons();
         for (var index = 0; index < gameOptionsNavButtons.Length; index++)
         {
             var section = index;
@@ -374,7 +356,6 @@ public partial class MainWindow : Window
             CloseGameSettings();
             RemoveSelectedFromLibrary();
         };
-        GameLogLevelBox.ItemsSource = ViewModels.PerGameSettingsViewModel.LogLevels;
         GameLogLevelBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameTraceBox.ValueChanged += (_, _) => PersistOpenGameSettings();
         GameStrictToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
@@ -396,17 +377,7 @@ public partial class MainWindow : Window
         LogLevelBox.SelectionChanged += (_, _) => _settings.LogLevel = SelectedLogLevel();
         TraceImportsBox.ValueChanged += (_, _) => _settings.ImportTraceLimit = (int)(TraceImportsBox.Value ?? 0);
         RenderResolutionBox.SelectionChanged += (_, _) =>
-        {
-            if (RenderResolutionBox.SelectedItem is ComboBoxItem { Tag: string tag } &&
-                double.TryParse(
-                    tag,
-                    System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    out var scale))
-            {
-                _settings.RenderResolutionScale = scale;
-            }
-        };
+            _settings.RenderResolutionScale = RenderResolutionScaleAt(RenderResolutionBox.SelectedIndex);
         StrictToggle.IsCheckedChanged += (_, _) => _settings.StrictDynlibResolution = StrictToggle.IsChecked == true;
         LogToFileToggle.IsCheckedChanged += (_, _) => _settings.LogToFile = LogToFileToggle.IsChecked == true;
         OverrideLogFileToggle.IsCheckedChanged += (_, _) =>
@@ -523,11 +494,6 @@ public partial class MainWindow : Window
                 () => OptionsNavButtons()[_optionsSectionIndex].Focus(NavigationMethod.Directional),
                 DispatcherPriority.Input);
         }
-    }
-
-    private void UpdateClock()
-    {
-        ClockText.Text = DateTime.Now.ToString("HH:mm");
     }
 
     // ---- Github http client config ----
@@ -866,7 +832,6 @@ public partial class MainWindow : Window
         GameOptionsLoggingNavLabel.Text = loc.Get("Options.Logging");
         GameOptionsEnvironmentNavLabel.Text = loc.Get("Options.Env.Tab");
         GameOptionsBackNavLabel.Text = loc.Get("Common.Back");
-        GameOptionsEnvironmentDescription.Text = loc.Get("Options.Env.Desc");
         GameOptionsLaunchLabel.Text = loc.Get("Library.Context.Launch");
         GameOptionsOpenFolderLabel.Text = loc.Get("Library.Context.OpenFolder");
         GameOptionsCopyPathLabel.Text = loc.Get("Library.Context.CopyPath");
@@ -889,29 +854,53 @@ public partial class MainWindow : Window
         GameLogToFileRow.Label = loc.Get("Options.LogToFile.Label");
         GameLogToFileRow.Description = loc.Get("Options.LogToFile.Desc");
 
-        EnvBthidRow.Description = loc.Get("Options.Env.Bthid.Desc");
-        EnvLoopGuardRow.Description = loc.Get("Options.Env.LoopGuard.Desc");
-        EnvWritableApp0Row.Description = loc.Get("Options.Env.WritableApp0.Desc");
-        EnvVkValidationRow.Description = loc.Get("Options.Env.VkValidation.Desc");
-        EnvDumpSpirvRow.Description = loc.Get("Options.Env.DumpSpirv.Desc");
-        EnvLogDirectMemoryRow.Description = loc.Get("Options.Env.LogDirectMemory.Desc");
-        EnvLogIoRow.Description = loc.Get("Options.Env.LogIo.Desc");
-        EnvLogNpRow.Description = loc.Get("Options.Env.LogNp.Desc");
+        ApplyEnvironmentDescription(EnvBthidRow, GameEnvBthidRow, "Options.Env.Bthid.Desc");
+        ApplyEnvironmentDescription(EnvLoopGuardRow, GameEnvLoopGuardRow, "Options.Env.LoopGuard.Desc");
+        ApplyEnvironmentDescription(EnvWritableApp0Row, GameEnvWritableApp0Row, "Options.Env.WritableApp0.Desc");
+        ApplyEnvironmentDescription(EnvVkValidationRow, GameEnvVkValidationRow, "Options.Env.VkValidation.Desc");
+        ApplyEnvironmentDescription(EnvDumpSpirvRow, GameEnvDumpSpirvRow, "Options.Env.DumpSpirv.Desc");
+        ApplyEnvironmentDescription(
+            EnvLogDirectMemoryRow,
+            GameEnvLogDirectMemoryRow,
+            "Options.Env.LogDirectMemory.Desc");
+        ApplyEnvironmentDescription(EnvLogIoRow, GameEnvLogIoRow, "Options.Env.LogIo.Desc");
+        ApplyEnvironmentDescription(EnvLogNpRow, GameEnvLogNpRow, "Options.Env.LogNp.Desc");
         CpuEngineRow.Label = loc.Get("Options.CpuEngine.Label");
         CpuEngineRow.Description = loc.Get("Options.CpuEngine.Desc");
-        CpuEngineNativeItem.Content = loc.Get("Options.CpuEngine.Native");
+        CpuEngineBox.ItemsSource = new[] { loc.Get("Options.CpuEngine.Native") };
+        CpuEngineBox.SelectedIndex = 0;
 
         StrictRow.Label = loc.Get("Options.Strict.Label");
         StrictRow.Description = loc.Get("Options.Strict.Desc");
 
         LogLevelRow.Label = loc.Get("Options.LogLevel.Label");
         LogLevelRow.Description = loc.Get("Options.LogLevel.Desc");
-        LogLevelTraceItem.Content = loc.Get("Options.LogLevel.Trace");
-        LogLevelDebugItem.Content = loc.Get("Options.LogLevel.Debug");
-        LogLevelInfoItem.Content = loc.Get("Options.LogLevel.Info");
-        LogLevelWarningItem.Content = loc.Get("Options.LogLevel.Warning");
-        LogLevelErrorItem.Content = loc.Get("Options.LogLevel.Error");
-        LogLevelCriticalItem.Content = loc.Get("Options.LogLevel.Critical");
+        var globalLogLevel = _settings.LogLevel;
+        var gameLogLevel = _gameSettingsViewModel?.SelectedLogLevel ?? globalLogLevel;
+        var localizedLogLevels = new[]
+        {
+            loc.Get("Options.LogLevel.Trace"),
+            loc.Get("Options.LogLevel.Debug"),
+            loc.Get("Options.LogLevel.Info"),
+            loc.Get("Options.LogLevel.Warning"),
+            loc.Get("Options.LogLevel.Error"),
+            loc.Get("Options.LogLevel.Critical"),
+        };
+
+        LogLevelBox.ItemsSource = localizedLogLevels;
+        LogLevelBox.SelectedIndex = LogLevelIndex(globalLogLevel);
+
+        var wasLoadingGameSettings = _isLoadingGameSettings;
+        _isLoadingGameSettings = true;
+        try
+        {
+            GameLogLevelBox.ItemsSource = localizedLogLevels;
+            GameLogLevelBox.SelectedIndex = LogLevelIndex(gameLogLevel);
+        }
+        finally
+        {
+            _isLoadingGameSettings = wasLoadingGameSettings;
+        }
 
         TraceImportsRow.Label = loc.Get("Options.TraceImports.Label");
         TraceImportsRow.Description = loc.Get("Options.TraceImports.Desc");
@@ -931,6 +920,15 @@ public partial class MainWindow : Window
 
         RenderResolutionRow.Label = loc.Get("Options.RenderResolution.Label");
         RenderResolutionRow.Description = loc.Get("Options.RenderResolution.Desc");
+        var renderResolutionScale = _settings.RenderResolutionScale;
+        RenderResolutionBox.ItemsSource = new[]
+        {
+            loc.Get("Options.RenderResolution.Native"),
+            "75%",
+            "50%",
+            "25%",
+        };
+        RenderResolutionBox.SelectedIndex = RenderResolutionIndex(renderResolutionScale);
 
         TitleMusicRow.Label = loc.Get("Options.TitleMusic.Label");
         TitleMusicRow.Description = loc.Get("Options.TitleMusic.Desc");
@@ -984,6 +982,16 @@ public partial class MainWindow : Window
 
         var lower = value.ToLowerInvariant();
         return char.ToUpperInvariant(lower[0]) + lower[1..];
+    }
+
+    private static void ApplyEnvironmentDescription(
+        SettingRow globalRow,
+        SettingRow perGameRow,
+        string localizationKey)
+    {
+        var description = Localization.Instance.Get(localizationKey);
+        globalRow.Description = description;
+        perGameRow.Description = description;
     }
 
     // ---- Discord Rich Presence ----
@@ -1180,13 +1188,7 @@ public partial class MainWindow : Window
             _ => 2,
         };
         TraceImportsBox.Value = Math.Clamp(_settings.ImportTraceLimit, 0, 4096);
-        RenderResolutionBox.SelectedIndex = _settings.RenderResolutionScale switch
-        {
-            >= 0.875 => 0,
-            >= 0.625 => 1,
-            >= 0.375 => 2,
-            _ => 3,
-        };
+        RenderResolutionBox.SelectedIndex = RenderResolutionIndex(_settings.RenderResolutionScale);
         StrictToggle.IsChecked = _settings.StrictDynlibResolution;
         LogToFileToggle.IsChecked = _settings.LogToFile;
         OverrideLogFileToggle.IsChecked = _settings.OverrideLogFile;
@@ -1295,7 +1297,12 @@ public partial class MainWindow : Window
 
     private string SelectedLogLevel()
     {
-        return LogLevelBox.SelectedIndex switch
+        return LogLevelAt(LogLevelBox.SelectedIndex);
+    }
+
+    private static string LogLevelAt(int index)
+    {
+        return index switch
         {
             0 => "Trace",
             1 => "Debug",
@@ -1304,6 +1311,41 @@ public partial class MainWindow : Window
             4 => "Error",
             5 => "Critical",
             _ => "Info",
+        };
+    }
+
+    private static int LogLevelIndex(string? logLevel)
+    {
+        return logLevel?.ToLowerInvariant() switch
+        {
+            "trace" => 0,
+            "debug" => 1,
+            "warning" or "warn" => 3,
+            "error" => 4,
+            "critical" or "fatal" => 5,
+            _ => 2,
+        };
+    }
+
+    private static int RenderResolutionIndex(double scale)
+    {
+        return scale switch
+        {
+            >= 0.875 => 0,
+            >= 0.625 => 1,
+            >= 0.375 => 2,
+            _ => 3,
+        };
+    }
+
+    private static double RenderResolutionScaleAt(int index)
+    {
+        return index switch
+        {
+            1 => 0.75,
+            2 => 0.5,
+            3 => 0.25,
+            _ => 1.0,
         };
     }
 
@@ -1498,7 +1540,7 @@ public partial class MainWindow : Window
         _isLoadingGameSettings = true;
         try
         {
-            GameLogLevelBox.SelectedItem = vm.SelectedLogLevel;
+            GameLogLevelBox.SelectedIndex = LogLevelIndex(vm.SelectedLogLevel);
             GameTraceBox.Value = vm.ImportTraceLimit;
             GameStrictToggle.IsChecked = vm.IsStrictDynlibResolution;
             GameLogToFileToggle.IsChecked = vm.IsLogToFile;
@@ -1526,7 +1568,7 @@ public partial class MainWindow : Window
 
     private void PersistGameSettings(ViewModels.PerGameSettingsViewModel vm)
     {
-        vm.SelectedLogLevel = (string?)GameLogLevelBox.SelectedItem ?? "Info";
+        vm.SelectedLogLevel = LogLevelAt(GameLogLevelBox.SelectedIndex);
         vm.IsLogLevelOverridden =
             !string.Equals(vm.SelectedLogLevel, _settings.LogLevel, StringComparison.Ordinal);
         vm.ImportTraceLimit = (int)(GameTraceBox.Value ?? 0);
@@ -1555,35 +1597,49 @@ public partial class MainWindow : Window
 
     private void SetGameOptionsSection(int section)
     {
-        var buttons = new[]
-        {
-            GameOptionsGeneralNav,
-            GameOptionsLoggingNav,
-            GameOptionsEnvironmentNav,
-        };
-        var panels = new Control[]
-        {
-            GameOptionsGeneralPanel,
-            GameOptionsLoggingPanel,
-            GameOptionsEnvironmentPanel,
-        };
+        var buttons = GameOptionsNavButtons();
+        var panels = GameOptionsSectionPanels();
 
+        section = Math.Clamp(section, 0, panels.Length - 1);
         _gameOptionsSectionIndex = section;
         SetGameOptionsNavIndicator(section);
-        for (var index = 0; index < buttons.Length; index++)
+        for (var index = 0; index < panels.Length; index++)
         {
             SetStateClass(buttons[index], "active", index == section);
-            panels[index].IsVisible = index == section;
+            SetStateClass(panels[index], "active", index == section);
+            panels[index].IsEnabled = index == section;
+            panels[index].IsHitTestVisible = index == section;
         }
+
+        SetStateClass(GameOptionsBackNav, "active", active: false);
     }
 
     private void SetGameOptionsNavIndicator(int section)
     {
         if (GameOptionsNavIndicator.RenderTransform is TranslateTransform transform)
         {
-            transform.Y = Math.Clamp(section, 0, 3) * 53;
+            var buttons = GameOptionsNavButtons();
+            var index = Math.Clamp(section, 0, buttons.Length - 1);
+            var button = buttons[index];
+            transform.Y = button.TranslatePoint(default, GameOptionsNavHost)?.Y
+                ?? index * button.Bounds.Height;
         }
     }
+
+    private Button[] GameOptionsNavButtons() =>
+    [
+        GameOptionsGeneralNav,
+        GameOptionsLoggingNav,
+        GameOptionsEnvironmentNav,
+        GameOptionsBackNav,
+    ];
+
+    private Control[] GameOptionsSectionPanels() =>
+    [
+        GameOptionsGeneralPanel,
+        GameOptionsLoggingPanel,
+        GameOptionsEnvironmentPanel,
+    ];
 
     private Button[] OptionsNavButtons() =>
     [

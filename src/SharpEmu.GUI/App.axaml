@@ -50,13 +50,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
                 <TextBlock x:Name="PART_Label"
                            Text="{TemplateBinding Label}"
-                           FontFamily="{TemplateBinding LabelFontFamily}"
+                           FontFamily="{StaticResource GoogleSans}"
                            FontSize="14"
                            FontWeight="Medium"
                            TextWrapping="Wrap"
                            Foreground="{StaticResource TextBrush}" />
                 <TextBlock Text="{TemplateBinding Description}"
                            FontSize="11"
+                           FontWeight="Normal"
                            Foreground="{StaticResource SettingsDescriptionBrush}"
                            LineHeight="16"
                            MaxWidth="690"
@@ -381,41 +382,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Margin" Value="0,-1,0,1" />
     </Style>
 
-    <Style Selector="Button.gameOptionsNav">
-      <Setter Property="Height" Value="46" />
-      <Setter Property="Padding" Value="14,0" />
-      <Setter Property="HorizontalContentAlignment" Value="Left" />
-      <Setter Property="CornerRadius" Value="8" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderThickness" Value="0" />
-      <Setter Property="Foreground" Value="#B8FFFFFF" />
-      <Setter Property="FontSize" Value="13" />
-      <Setter Property="FontWeight" Value="Medium" />
-    </Style>
-    <Style Selector="Button.gameOptionsNav /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="Foreground" Value="#B8FFFFFF" />
-    </Style>
-    <Style Selector="Button.gameOptionsNav:pressed">
-      <Setter Property="RenderTransform" Value="none" />
-    </Style>
-    <Style Selector="Button.gameOptionsNav:pressed /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="Foreground" Value="#B8FFFFFF" />
-    </Style>
-    <Style Selector="Button.gameOptionsNav:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="Foreground" Value="White" />
-    </Style>
-    <Style Selector="Button.gameOptionsNav.active /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="Transparent" />
-      <Setter Property="Foreground" Value="White" />
-    </Style>
-
     <Style Selector="Border.optionsNavSurface">
       <Setter Property="Width" Value="244" />
       <Setter Property="Padding" Value="0" />
@@ -463,12 +429,36 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Style Selector="TextBlock.optionsNavIcon">
       <Setter Property="FontSize" Value="20" />
       <Setter Property="VerticalAlignment" Value="Center" />
-      <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+      <Setter Property="Foreground" Value="#8FFFFFFF" />
+      <Setter Property="RenderTransform" Value="translateY(-2px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
     </Style>
     <Style Selector="TextBlock.optionsNavLabel">
       <Setter Property="FontSize" Value="14" />
       <Setter Property="FontWeight" Value="Medium" />
       <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Foreground" Value="#8FFFFFFF" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.optionsNav:pointerover TextBlock.optionsNavIcon,
+                     Button.optionsNav:focus-visible TextBlock.optionsNavIcon,
+                     Button.optionsNav.active TextBlock.optionsNavIcon,
+                     Button.optionsNav:pointerover TextBlock.optionsNavLabel,
+                     Button.optionsNav:focus-visible TextBlock.optionsNavLabel,
+                     Button.optionsNav.active TextBlock.optionsNavLabel">
+      <Setter Property="Foreground" Value="White" />
     </Style>
 
     <Style Selector="Border.optionsContentSurface">
@@ -523,9 +513,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Style Selector="ComboBox.optionValue, NumericUpDown.optionValue">
       <Setter Property="Width" Value="190" />
       <Setter Property="MinHeight" Value="44" />
-      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="CornerRadius" Value="14" />
       <Setter Property="Background" Value="#12FFFFFF" />
-      <Setter Property="BorderBrush" Value="#1FFFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
     </Style>
     <Style Selector="ToggleSwitch.optionToggle">
       <Setter Property="MinHeight" Value="44" />
@@ -546,13 +537,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Background" Value="#20FFFFFF" />
       <Setter Property="BorderBrush" Value="#42FFFFFF" />
     </Style>
-    <Style Selector="TextBlock.gameOptionsNavLabel">
-      <Setter Property="FontWeight" Value="Medium" />
-    </Style>
-    <Style Selector="TextBlock.gameOptionsNavIcon">
-      <Setter Property="RenderTransform" Value="translateY(-1px)" />
-    </Style>
-
     <Style Selector="Button.gameOptionsLaunch">
       <Setter Property="Width" Value="220" />
       <Setter Property="Height" Value="46" />
@@ -637,6 +621,130 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
       <Setter Property="BorderBrush" Value="#14FFFFFF" />
       <Setter Property="BorderThickness" Value="1" />
+    </Style>
+
+    <!-- Rounded selectors used by both global and per-game settings. The native
+         ComboBox template remains intact for keyboard, focus, and XY/gamepad navigation. -->
+    <Style Selector="ComboBox">
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Padding" Value="17,0,48,0" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#E8FFFFFF" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="MaxDropDownHeight" Value="360" />
+    </Style>
+    <Style Selector="ComboBox /template/ Border#Background">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ComboBox:pointerover /template/ Border#Background,
+                     ComboBox:focus-visible /template/ Border#Background,
+                     ComboBox:dropdownopen /template/ Border#Background">
+      <Setter Property="Background" Value="#20FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+    </Style>
+    <Style Selector="ComboBox /template/ PathIcon#DropDownGlyph">
+      <!-- Material Icons Rounded: expand_more. -->
+      <Setter Property="Data" Value="M7.41,8.59 L12,13.17 L16.59,8.59 L18,10 L12,16 L6,10 Z" />
+      <Setter Property="Width" Value="14" />
+      <Setter Property="Height" Value="14" />
+      <Setter Property="Margin" Value="0,0,22,0" />
+      <Setter Property="Foreground" Value="#B8FFFFFF" />
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="rotate(0deg)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.22"
+                                         Easing="CubicEaseOut" />
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ComboBox:pointerover /template/ PathIcon#DropDownGlyph,
+                     ComboBox:focus-visible /template/ PathIcon#DropDownGlyph,
+                     ComboBox:dropdownopen /template/ PathIcon#DropDownGlyph">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ComboBox:dropdownopen /template/ PathIcon#DropDownGlyph">
+      <Setter Property="RenderTransform" Value="rotate(180deg)" />
+    </Style>
+
+    <Style Selector="Border.animatedComboPopup">
+      <Setter Property="Padding" Value="6" />
+      <Setter Property="Margin" Value="0" />
+      <Setter Property="CornerRadius" Value="18" />
+      <Setter Property="Background" Value="#FC2A2A2A" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="BoxShadow" Value="0 18 44 0 #78000000" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="RenderTransformOrigin" Value="50%,0%" />
+      <Setter Property="RenderTransform" Value="translateY(-7px) scale(0.975)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.15"
+                            Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.18"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.animatedComboPopup.open">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    </Style>
+
+    <Style Selector="ComboBoxItem">
+      <Setter Property="MinHeight" Value="40" />
+      <Setter Property="Margin" Value="0,1" />
+      <Setter Property="Padding" Value="13,0" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#C8FFFFFF" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="ComboBoxItem /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.16"
+                           Easing="CubicEaseOut" />
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.16"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     ComboBoxItem:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ComboBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#22FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ComboBox.languageValue /template/ ContentControl#ContentPresenter">
+      <Setter Property="VerticalContentAlignment" Value="Center" />
     </Style>
 
     <Style Selector="ContextMenu">

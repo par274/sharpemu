@@ -18,7 +18,32 @@ public sealed class Localization : INotifyPropertyChanged
 {
     public static Localization Instance { get; } = new();
 
-    public sealed record LanguageInfo(string Code, string NativeName);
+    public sealed record LanguageInfo(string Code, string NativeName)
+    {
+        public string FlagAssetPath =>
+            $"avares://SharpEmu.GUI/Assets/Flags/{CountryCodeForFlag(Code)}.svg";
+
+        private static string CountryCodeForFlag(string languageCode) =>
+            languageCode.ToLowerInvariant() switch
+            {
+                "ar" => "SA",
+                "br" => "BR",
+                "de" => "DE",
+                "dk" => "DK",
+                "en" => "GB",
+                "es" => "ES",
+                "fr" => "FR",
+                "hu" => "HU",
+                "it" => "IT",
+                "ja" => "JP",
+                "ko" => "KR",
+                "nl" => "NL",
+                "pt" => "PT",
+                "ru" => "RU",
+                "tr" => "TR",
+                _ => "UN",
+            };
+    }
 
     private const string EmbeddedResourcePrefix = "Languages.";
     private const string EmbeddedResourceSuffix = ".json";

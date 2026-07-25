@@ -10,6 +10,7 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
         xmlns:loc="clr-namespace:SharpEmu.GUI"
         xmlns:navigation="using:SharpEmu.GUI.Navigation"
         xmlns:navigationControls="using:SharpEmu.GUI.Controls.Navigation"
+        xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings"
         xmlns:viewModels="using:SharpEmu.GUI.ViewModels"
         xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
@@ -469,13 +470,9 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                           Background="Transparent"
                           VerticalAlignment="Top">
                       <Border x:Name="GameOptionsNavIndicator"
-                              Classes="gameOptionsNavIndicator"
-                              Height="46"
+                              Classes="optionsNavIndicator"
                               IsHitTestVisible="False"
-                              VerticalAlignment="Top"
-                              BorderBrush="White"
-                              BorderThickness="2"
-                              CornerRadius="8">
+                              VerticalAlignment="Top">
                         <Border.RenderTransform>
                           <TranslateTransform>
                             <TranslateTransform.Transitions>
@@ -489,59 +486,70 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                         </Border.RenderTransform>
                       </Border>
 
-                      <StackPanel Spacing="7">
+                      <StackPanel>
                         <Button x:Name="GameOptionsGeneralNav"
-                                Classes="gameOptionsNav active">
-                          <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Classes="materialSymbol gameOptionsNavIcon" Text="tune" />
+                                Classes="optionsNav active">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="tune" />
                             <TextBlock x:Name="GameOptionsGeneralNavLabel"
-                                       Classes="gameOptionsNavLabel"
-                                       VerticalAlignment="Center"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
                                        Text="General" />
-                          </StackPanel>
+                          </Grid>
                         </Button>
                         <Button x:Name="GameOptionsLoggingNav"
-                                Classes="gameOptionsNav">
-                          <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Classes="materialSymbol gameOptionsNavIcon" Text="terminal" />
+                                Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="terminal" />
                             <TextBlock x:Name="GameOptionsLoggingNavLabel"
-                                       Classes="gameOptionsNavLabel"
-                                       VerticalAlignment="Center"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
                                        Text="Logging" />
-                          </StackPanel>
+                          </Grid>
                         </Button>
                         <Button x:Name="GameOptionsEnvironmentNav"
-                                Classes="gameOptionsNav">
-                          <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Classes="materialSymbol gameOptionsNavIcon" Text="deployed_code" />
+                                Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="deployed_code" />
                             <TextBlock x:Name="GameOptionsEnvironmentNavLabel"
-                                       Classes="gameOptionsNavLabel"
-                                       VerticalAlignment="Center"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
                                        Text="Environment" />
-                          </StackPanel>
+                          </Grid>
                         </Button>
                         <Button x:Name="GameOptionsBackNav"
-                                Classes="gameOptionsNav">
-                          <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Classes="materialSymbol gameOptionsNavIcon" Text="arrow_back" />
+                                Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="arrow_back" />
                             <TextBlock x:Name="GameOptionsBackNavLabel"
-                                       Classes="gameOptionsNavLabel"
-                                       VerticalAlignment="Center"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
                                        Text="Back" />
-                          </StackPanel>
+                          </Grid>
                         </Button>
                       </StackPanel>
                     </Grid>
                   </StackPanel>
 
-                  <Grid Grid.Column="1">
+                  <Grid Grid.Column="1"
+                        Margin="0,36,0,0">
                     <ScrollViewer x:Name="GameOptionsGeneralPanel"
-                                  HorizontalScrollBarVisibility="Disabled">
+                                  Classes="optionsSectionPanel active">
                       <StackPanel Spacing="12">
                         <local:SettingRow x:Name="GameStrictRow"
+                                          Classes="optionRow"
                                           Label="Strict dynlib resolution"
                                           Description="Fail the launch when an imported symbol cannot be resolved.">
-                          <ToggleSwitch x:Name="GameStrictToggle" />
+                          <ToggleSwitch x:Name="GameStrictToggle"
+                                        Classes="optionToggle" />
                         </local:SettingRow>
 
                         <WrapPanel Margin="0,12,0,0"
@@ -593,19 +601,23 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                     </ScrollViewer>
 
                     <ScrollViewer x:Name="GameOptionsLoggingPanel"
-                                  IsVisible="False"
-                                  HorizontalScrollBarVisibility="Disabled">
+                                  Classes="optionsSectionPanel">
                       <StackPanel Spacing="12">
                         <local:SettingRow x:Name="GameLogLevelRow"
+                                          Classes="optionRow"
                                           Label="Log level"
                                           Description="Verbosity of the emulator console output.">
-                          <ComboBox x:Name="GameLogLevelBox" Width="170" />
+                          <settingsControls:AnimatedComboBox x:Name="GameLogLevelBox"
+                                                            Classes="optionValue"
+                                                            Width="170" />
                         </local:SettingRow>
 
                         <local:SettingRow x:Name="GameTraceRow"
+                                          Classes="optionRow"
                                           Label="Import trace limit"
                                           Description="Trace the first N imports per module.">
                           <NumericUpDown x:Name="GameTraceBox"
+                                         Classes="optionValue"
                                          Width="170"
                                          Minimum="0"
                                          Maximum="4096"
@@ -614,68 +626,69 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                         </local:SettingRow>
 
                         <local:SettingRow x:Name="GameLogToFileRow"
+                                          Classes="optionRow"
                                           Label="Log to file"
                                           Description="Mirror emulator output to a log file.">
-                          <ToggleSwitch x:Name="GameLogToFileToggle" />
+                          <ToggleSwitch x:Name="GameLogToFileToggle"
+                                        Classes="optionToggle" />
                         </local:SettingRow>
                       </StackPanel>
                     </ScrollViewer>
 
                     <ScrollViewer x:Name="GameOptionsEnvironmentPanel"
-                                  IsVisible="False"
-                                  HorizontalScrollBarVisibility="Disabled">
+                                  Classes="optionsSectionPanel">
                       <StackPanel Spacing="12">
-                        <TextBlock x:Name="GameOptionsEnvironmentDescription"
-                                   MaxWidth="760"
-                                   HorizontalAlignment="Left"
-                                   FontSize="11"
-                                   Foreground="{StaticResource MutedBrush}"
-                                   Text="Environment switches passed to the emulator for this game."
-                                   TextWrapping="Wrap" />
-
-                        <Grid x:Name="GameEnvironmentList"
-                              Margin="0,8,0,0"
-                              ColumnDefinitions="*,*"
-                              RowDefinitions="Auto,Auto,Auto,Auto"
-                              ColumnSpacing="24"
-                              RowSpacing="8">
-                          <ToggleSwitch x:Name="GameEnvBthidToggle"
-                                        Grid.Row="0"
-                                        OnContent="SHARPEMU_BTHID_UNAVAILABLE"
-                                        OffContent="SHARPEMU_BTHID_UNAVAILABLE" />
-                          <ToggleSwitch x:Name="GameEnvLoopGuardToggle"
-                                        Grid.Row="1"
-                                        OnContent="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
-                                        OffContent="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD" />
-                          <ToggleSwitch x:Name="GameEnvWritableApp0Toggle"
-                                        Grid.Row="2"
-                                        OnContent="SHARPEMU_WRITABLE_APP0"
-                                        OffContent="SHARPEMU_WRITABLE_APP0" />
-                          <ToggleSwitch x:Name="GameEnvVkValidationToggle"
-                                        Grid.Row="3"
-                                        OnContent="SHARPEMU_VK_VALIDATION"
-                                        OffContent="SHARPEMU_VK_VALIDATION" />
-                          <ToggleSwitch x:Name="GameEnvDumpSpirvToggle"
-                                        Grid.Column="1"
-                                        Grid.Row="0"
-                                        OnContent="SHARPEMU_DUMP_SPIRV"
-                                        OffContent="SHARPEMU_DUMP_SPIRV" />
-                          <ToggleSwitch x:Name="GameEnvLogDirectMemoryToggle"
-                                        Grid.Column="1"
-                                        Grid.Row="1"
-                                        OnContent="SHARPEMU_LOG_DIRECT_MEMORY"
-                                        OffContent="SHARPEMU_LOG_DIRECT_MEMORY" />
-                          <ToggleSwitch x:Name="GameEnvLogIoToggle"
-                                        Grid.Column="1"
-                                        Grid.Row="2"
-                                        OnContent="SHARPEMU_LOG_IO"
-                                        OffContent="SHARPEMU_LOG_IO" />
-                          <ToggleSwitch x:Name="GameEnvLogNpToggle"
-                                        Grid.Column="1"
-                                        Grid.Row="3"
-                                        OnContent="SHARPEMU_LOG_NP"
-                                        OffContent="SHARPEMU_LOG_NP" />
-                        </Grid>
+                        <StackPanel x:Name="GameEnvironmentList"
+                                    Spacing="8">
+                          <local:SettingRow x:Name="GameEnvBthidRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_BTHID_UNAVAILABLE">
+                            <ToggleSwitch x:Name="GameEnvBthidToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvLoopGuardRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD">
+                            <ToggleSwitch x:Name="GameEnvLoopGuardToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvWritableApp0Row"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_WRITABLE_APP0">
+                            <ToggleSwitch x:Name="GameEnvWritableApp0Toggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvVkValidationRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_VK_VALIDATION">
+                            <ToggleSwitch x:Name="GameEnvVkValidationToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvDumpSpirvRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_DUMP_SPIRV">
+                            <ToggleSwitch x:Name="GameEnvDumpSpirvToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvLogDirectMemoryRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_LOG_DIRECT_MEMORY">
+                            <ToggleSwitch x:Name="GameEnvLogDirectMemoryToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvLogIoRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_LOG_IO">
+                            <ToggleSwitch x:Name="GameEnvLogIoToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvLogNpRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_LOG_NP">
+                            <ToggleSwitch x:Name="GameEnvLogNpToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                        </StackPanel>
                       </StackPanel>
                     </ScrollViewer>
 
@@ -799,12 +812,9 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Classes="optionRow"
                                               Label="CPU engine"
                                               Description="Execution engine used to run game code.">
-                              <ComboBox x:Name="CpuEngineBox"
-                                        Classes="optionValue"
-                                        Width="190"
-                                        SelectedIndex="0">
-                                <ComboBoxItem x:Name="CpuEngineNativeItem" Content="Native" />
-                              </ComboBox>
+                              <settingsControls:AnimatedComboBox x:Name="CpuEngineBox"
+                                                                 Classes="optionValue"
+                                                                 Width="190" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="StrictRow"
                                               Classes="optionRow"
@@ -829,17 +839,9 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Classes="optionRow"
                                               Label="Log level"
                                               Description="Verbosity of the emulator console output.">
-                              <ComboBox x:Name="LogLevelBox"
-                                        Classes="optionValue"
-                                        Width="190"
-                                        SelectedIndex="2">
-                                <ComboBoxItem x:Name="LogLevelTraceItem" Content="Trace" />
-                                <ComboBoxItem x:Name="LogLevelDebugItem" Content="Debug" />
-                                <ComboBoxItem x:Name="LogLevelInfoItem" Content="Info" />
-                                <ComboBoxItem x:Name="LogLevelWarningItem" Content="Warning" />
-                                <ComboBoxItem x:Name="LogLevelErrorItem" Content="Error" />
-                                <ComboBoxItem x:Name="LogLevelCriticalItem" Content="Critical" />
-                              </ComboBox>
+                              <settingsControls:AnimatedComboBox x:Name="LogLevelBox"
+                                                                 Classes="optionValue"
+                                                                 Width="190" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="TraceImportsRow"
                                               Classes="optionRow"
@@ -894,15 +896,30 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Classes="optionRow"
                                               Label="Emulator language"
                                               Description="Language used throughout the launcher. Applies immediately.">
-                              <ComboBox x:Name="LanguageBox"
-                                        Classes="optionValue"
-                                        Width="190">
-                                <ComboBox.ItemTemplate>
+                              <settingsControls:AnimatedComboBox x:Name="LanguageBox"
+                                                                 Classes="optionValue languageValue"
+                                                                 Width="210">
+                                <settingsControls:AnimatedComboBox.ItemTemplate>
                                   <DataTemplate x:DataType="local:Localization+LanguageInfo">
-                                    <TextBlock Text="{Binding NativeName}" />
+                                    <Grid ColumnDefinitions="26,*"
+                                          ColumnSpacing="10">
+                                      <Border Width="24"
+                                              Height="16"
+                                              CornerRadius="3"
+                                              ClipToBounds="True"
+                                              VerticalAlignment="Center">
+                                        <svg:Svg Path="{Binding FlagAssetPath}"
+                                                 Stretch="UniformToFill"
+                                                 OpacityMask="White" />
+                                      </Border>
+                                      <TextBlock Grid.Column="1"
+                                                 Text="{Binding NativeName}"
+                                                 TextTrimming="CharacterEllipsis"
+                                                 VerticalAlignment="Center" />
+                                    </Grid>
                                   </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                              </ComboBox>
+                                </settingsControls:AnimatedComboBox.ItemTemplate>
+                              </settingsControls:AnimatedComboBox>
                             </local:SettingRow>
                             <local:SettingRow x:Name="TitleMusicRow"
                                               Classes="optionRow"
@@ -947,15 +964,9 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Classes="optionRow"
                                               Label="Internal resolution"
                                               Description="Render below native resolution and upscale on present. Takes effect on next launch.">
-                              <ComboBox x:Name="RenderResolutionBox"
-                                        Classes="optionValue"
-                                        Width="190"
-                                        SelectedIndex="0">
-                                <ComboBoxItem x:Name="RenderResolution100Item" Content="100% (native)" Tag="1.0" />
-                                <ComboBoxItem x:Name="RenderResolution75Item" Content="75%" Tag="0.75" />
-                                <ComboBoxItem x:Name="RenderResolution50Item" Content="50%" Tag="0.5" />
-                                <ComboBoxItem x:Name="RenderResolution25Item" Content="25%" Tag="0.25" />
-                              </ComboBox>
+                              <settingsControls:AnimatedComboBox x:Name="RenderResolutionBox"
+                                                                 Classes="optionValue"
+                                                                 Width="190" />
                             </local:SettingRow>
                           </StackPanel>
                         </Border>
@@ -969,49 +980,41 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                           <StackPanel Spacing="8">
                             <local:SettingRow x:Name="EnvBthidRow"
                                               Classes="optionRow"
-                                              LabelFontFamily="Cascadia Mono,Consolas,monospace"
                                               Label="SHARPEMU_BTHID_UNAVAILABLE">
                               <ToggleSwitch x:Name="EnvBthidToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvLoopGuardRow"
                                               Classes="optionRow"
-                                              LabelFontFamily="Cascadia Mono,Consolas,monospace"
                                               Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD">
                               <ToggleSwitch x:Name="EnvLoopGuardToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvWritableApp0Row"
                                               Classes="optionRow"
-                                              LabelFontFamily="Cascadia Mono,Consolas,monospace"
                                               Label="SHARPEMU_WRITABLE_APP0">
                               <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvVkValidationRow"
                                               Classes="optionRow"
-                                              LabelFontFamily="Cascadia Mono,Consolas,monospace"
                                               Label="SHARPEMU_VK_VALIDATION">
                               <ToggleSwitch x:Name="EnvVkValidationToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvDumpSpirvRow"
                                               Classes="optionRow"
-                                              LabelFontFamily="Cascadia Mono,Consolas,monospace"
                                               Label="SHARPEMU_DUMP_SPIRV">
                               <ToggleSwitch x:Name="EnvDumpSpirvToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvLogDirectMemoryRow"
                                               Classes="optionRow"
-                                              LabelFontFamily="Cascadia Mono,Consolas,monospace"
                                               Label="SHARPEMU_LOG_DIRECT_MEMORY">
                               <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvLogIoRow"
                                               Classes="optionRow"
-                                              LabelFontFamily="Cascadia Mono,Consolas,monospace"
                                               Label="SHARPEMU_LOG_IO">
                               <ToggleSwitch x:Name="EnvLogIoToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvLogNpRow"
                                               Classes="optionRow"
-                                              LabelFontFamily="Cascadia Mono,Consolas,monospace"
                                               Label="SHARPEMU_LOG_NP">
                               <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
                             </local:SettingRow>
@@ -1032,7 +1035,8 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                   <TextBlock x:Name="LatestCommitDescription"
                                              Text="Latest commit on the main branch"
                                              FontSize="11"
-                                             Foreground="{StaticResource MutedBrush}" />
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}" />
                                 </StackPanel>
                                 <Button x:Name="LatestCommitHashText"
                                         Grid.Column="1"
@@ -1049,7 +1053,8 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                   <TextBlock x:Name="UpdateStatusText"
                                              Text="Current build: dev"
                                              FontSize="11"
-                                             Foreground="{StaticResource MutedBrush}" />
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}" />
                                 </StackPanel>
                                 <Button x:Name="UpdateButton"
                                         Grid.Column="1"
@@ -1064,7 +1069,8 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                   <TextBlock x:Name="GithubDesc"
                                              Text="Source code, issues and project development."
                                              FontSize="11"
-                                             Foreground="{StaticResource MutedBrush}" />
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}" />
                                 </StackPanel>
                                 <Button x:Name="GithubButton"
                                         Grid.Column="1"
@@ -1079,7 +1085,8 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                   <TextBlock x:Name="DiscordServerDesc"
                                              Text="Join the community, get support and follow development."
                                              FontSize="11"
-                                             Foreground="{StaticResource MutedBrush}" />
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}" />
                                 </StackPanel>
                                 <Button x:Name="DiscordButton"
                                         Grid.Column="1"
@@ -1289,13 +1296,6 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                    FontSize="12"
                    CornerRadius="20"
                    Padding="15,0" />
-          <TextBlock x:Name="ClockText"
-                     Text="00:00"
-                     Width="48"
-                     TextAlignment="Right"
-                     FontSize="13"
-                     Foreground="#D9FFFFFF"
-                     VerticalAlignment="Center" />
           <Button x:Name="MinimizeButton"
                   Classes="icon windowChrome"
                   ToolTip.Tip="Minimize">

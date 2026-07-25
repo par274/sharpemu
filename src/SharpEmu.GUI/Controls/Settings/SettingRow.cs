@@ -6,7 +6,6 @@ using Avalonia.Controls;
 using Avalonia.Controls.Presenters;
 using Avalonia.Controls.Primitives;
 using Avalonia.Data;
-using Avalonia.Media;
 
 namespace SharpEmu.GUI;
 
@@ -29,11 +28,7 @@ public sealed class SettingRow : ContentControl
         AvaloniaProperty.Register<SettingRow, string?>(
             nameof(OverrideText), "Override");
 
-    public static readonly StyledProperty<FontFamily?> LabelFontFamilyProperty =
-        AvaloniaProperty.Register<SettingRow, FontFamily?>(nameof(LabelFontFamily));
-
     private ContentPresenter? _slot;
-    private TextBlock? _label;
 
     public string? Label
     {
@@ -65,19 +60,11 @@ public sealed class SettingRow : ContentControl
         set => SetValue(OverrideTextProperty, value);
     }
 
-    public FontFamily? LabelFontFamily
-    {
-        get => GetValue(LabelFontFamilyProperty);
-        set => SetValue(LabelFontFamilyProperty, value);
-    }
-
     protected override void OnApplyTemplate(TemplateAppliedEventArgs e)
     {
         base.OnApplyTemplate(e);
         _slot = e.NameScope.Find<ContentPresenter>("PART_Slot");
-        _label = e.NameScope.Find<TextBlock>("PART_Label");
         UpdateSlotEnabled();
-        UpdateLabelFont();
     }
 
     protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
@@ -86,18 +73,6 @@ public sealed class SettingRow : ContentControl
         if (change.Property == ShowOverrideProperty || change.Property == IsOverriddenProperty)
         {
             UpdateSlotEnabled();
-        }
-        else if (change.Property == LabelFontFamilyProperty)
-        {
-            UpdateLabelFont();
-        }
-    }
-
-    private void UpdateLabelFont()
-    {
-        if (_label is not null && LabelFontFamily is { } family)
-        {
-            _label.FontFamily = family;
         }
     }
 
