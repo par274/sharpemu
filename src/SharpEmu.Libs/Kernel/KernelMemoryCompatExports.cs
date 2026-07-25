@@ -3559,19 +3559,23 @@ public static partial class KernelMemoryCompatExports
 
         lock (_memoryGate)
         {
-            var candidates = _directAllocations.Values
-                .Where(block => findNext
-                    ? block.Start + block.Length > offset
-                    : offset >= block.Start && offset < block.Start + block.Length)
-                .OrderBy(block => block.Start);
-
-            foreach (var block in candidates)
+            // Pick the matching block with the smallest Start in a single pass
+            // rather than materializing a filtered-and-sorted LINQ pipeline just
+            // to take its first element.
+            foreach (var block in _directAllocations.Values)
             {
+                var matches = findNext
+                    ? block.Start + block.Length > offset
+                    : offset >= block.Start && offset < block.Start + block.Length;
+                if (!matches || (found && block.Start >= matchStart))
+                {
+                    continue;
+                }
+
                 found = true;
                 matchStart = block.Start;
                 matchEnd = block.Start + block.Length;
                 matchMemoryType = block.MemoryType;
-                break;
             }
         }
 
