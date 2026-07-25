@@ -660,18 +660,30 @@ internal static unsafe class GnmTiling
         }
 
         var isExactXor = parameters.Equation == DetileEquation.ExactXor;
+        // Block dimensions are powers of two (SquareBlockDimensions), so the
+        // per-texel block index and in-block column are a shift and a mask rather
+        // than an integer divide/modulo — the same lowering TryDetile already uses.
+        var blockWidth = parameters.BlockWidth;
+        var blockWidthShift = BitLog2((uint)blockWidth);
+        var blockWidthMask = blockWidth - 1;
+        var blockHeightShift = BitLog2((uint)parameters.BlockHeight);
+        var blockHeightMask = parameters.BlockHeight - 1;
+        var blocksPerRow = parameters.BlocksPerRow;
+        var blockBytes = parameters.BlockBytes;
         for (var y = 0; y < height; y++)
         {
-            var blockY = y / parameters.BlockHeight;
-            var inY = y % parameters.BlockHeight;
+            var blockY = y >> blockHeightShift;
+            var inY = y & blockHeightMask;
+            var rowBlockBase = (long)blockY * blocksPerRow;
+            var tableRowBase = inY * blockWidth;
             var yTerm = isExactXor ? parameters.YByteTerm[y & parameters.YMask] : 0;
             for (var x = 0; x < width; x++)
             {
-                var blockX = x / parameters.BlockWidth;
+                var blockX = x >> blockWidthShift;
                 var inBlockByte = isExactXor
                     ? parameters.XByteTerm[x & parameters.XMask] ^ yTerm
-                    : parameters.BlockTable[inY * parameters.BlockWidth + (x % parameters.BlockWidth)] * bpp;
-                var srcByte = ((long)blockY * parameters.BlocksPerRow + blockX) * parameters.BlockBytes + inBlockByte;
+                    : parameters.BlockTable[tableRowBase + (x & blockWidthMask)] * bpp;
+                var srcByte = (rowBlockBase + blockX) * blockBytes + inBlockByte;
                 var dstByte = ((long)y * width + x) * bpp;
                 if (srcByte < 0 || srcByte + bpp > tiled.Length)
                 {
