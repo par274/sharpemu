@@ -273,7 +273,10 @@ public sealed class ModuleManager : IModuleManager
         ArgumentException.ThrowIfNullOrWhiteSpace(nid);
         ArgumentNullException.ThrowIfNull(context);
 
-        if (!_dispatchTable.TryGetValue(nid, out var function) || !_exportTable.TryGetValue(nid, out var export))
+        // _dispatchTable and _exportTable are populated together in RegisterExports
+        // over the same key set, and export.Function is the dispatch delegate, so a
+        // single lookup resolves both metadata and handler on this per-call path.
+        if (!_exportTable.TryGetValue(nid, out var export))
         {
             Console.Error.WriteLine($"[HLE] NID '{nid}' not found in dispatch table.");
             context[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
@@ -291,7 +294,7 @@ public sealed class ModuleManager : IModuleManager
 
 
         context.ClearRaxWriteFlag();
-        int ret = ((SysAbiFunction)function).Invoke(context);
+        int ret = export.Function.Invoke(context);
 
         if (!context.WasRaxWritten)
         {
