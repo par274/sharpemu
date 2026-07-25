@@ -392,6 +392,10 @@ public static partial class Gen5MslTranslator
                         if (input.ComponentCount is >= 1 and <= 4)
                         {
                             _vertexInputsByPc.TryAdd(input.Pc, input);
+                            foreach (var aliasPc in input.AliasPcs ?? [])
+                            {
+                                _vertexInputsByPc.TryAdd(aliasPc, input);
+                            }
                         }
                     }
                 }
