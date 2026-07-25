@@ -22,6 +22,14 @@ public static class SaveDataDialogExports
 
     private const int ResultSize = 0x48;
     private const int ButtonIdAffirmative = 1;
+
+    // OrbisSaveDataDialogParam offsets (0x98-byte struct): mode and userData
+    // were previously read from the wrong offsets (0x00 and 0xC8) — 0x00 is
+    // actually the leading CommonDialog::BaseParam.size field, and 0xC8 is
+    // past the end of the struct entirely.
+    private const int ParamModeOffset = 0x34;
+    private const int ParamUserDataOffset = 0x70;
+
     private static int _status;
     private static int _lastMode;
     private static ulong _lastUserData;
@@ -59,8 +67,8 @@ public static class SaveDataDialogExports
             return ctx.SetReturn(ErrorNotInitialized);
         }
 
-        _lastMode = TryReadInt32(ctx, paramAddress, out var mode) ? mode : 0;
-        _lastUserData = ctx.TryReadUInt64(paramAddress + 0xC8, out var userData) ? userData : 0;
+        _lastMode = TryReadInt32(ctx, paramAddress + ParamModeOffset, out var mode) ? mode : 0;
+        _lastUserData = ctx.TryReadUInt64(paramAddress + ParamUserDataOffset, out var userData) ? userData : 0;
 
         // There is no host save dialog yet. Enter RUNNING so the close path sees a live
         // dialog; the guest's next status poll auto-dismisses it (see PollStatus).
@@ -142,11 +150,21 @@ public static class SaveDataDialogExports
         LibraryName = "libSceSaveDataDialog")]
     public static int SaveDataDialogClose(CpuContext ctx)
     {
-        if (Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning) != StatusRunning)
+        // The auto-dismiss design above (PollStatus) means a title's status poll has
+        // almost always already advanced Running -> Finished by the time it calls
+        // Close — Finished is the same "session over, ready for the next Open" state
+        // Open itself already accepts (see the StatusInitialized-or-StatusFinished
+        // guard there). Requiring strictly Running here made every real Open -> poll
+        // -> GetResult -> Close sequence fail with NotRunning, leaving _status stuck
+        // at Finished forever: the title's next Initialize call then permanently saw
+        // AlreadyInitialized instead of succeeding.
+        var current = Volatile.Read(ref _status);
+        if (current is not (StatusRunning or StatusFinished))
         {
             return ctx.SetReturn(ErrorNotRunning);
         }
 
+        Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning);
         return ctx.SetReturn(ErrorOk);
     }
 
