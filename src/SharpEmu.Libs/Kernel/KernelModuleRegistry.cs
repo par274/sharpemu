@@ -377,7 +377,9 @@ public static class KernelModuleRegistry
                 return false;
             }
 
-            var first = _modulesByHandle.Values.OrderBy(entry => entry.Handle).First();
+            // Smallest handle only — a single MinBy pass instead of sorting the
+            // whole module set (and allocating the sort buffer) just to take the first.
+            var first = _modulesByHandle.Values.MinBy(entry => entry.Handle);
             module = first;
             return true;
         }
