@@ -7600,24 +7600,34 @@ public static partial class KernelMemoryCompatExports
 
         // The terminator counts as part of the scanned range, so strchr(s, '\0')
         // returns a pointer to the string's null byte just like a native libc.
-        Span<byte> current = stackalloc byte[1];
-        for (ulong index = 0; index < 1_048_576; index++)
+        // Scan in page-bounded chunks with a vectorized IndexOfAny instead of a
+        // guest read per byte; a chunk reads fully or faults at its first byte,
+        // matching the per-byte loop's fault point.
+        const int chunkCap = 256;
+        const int pageSize = 4096;
+        Span<byte> chunk = stackalloc byte[chunkCap];
+        ulong offset = 0;
+        while (offset < 1_048_576)
         {
-            if (!TryReadCompat(ctx, address + index, current))
+            var current = address + offset;
+            var pageRemaining = pageSize - (int)(current & (pageSize - 1));
+            var length = (int)Math.Min((ulong)Math.Min(chunkCap, pageRemaining), 1_048_576UL - offset);
+            var span = chunk[..length];
+            if (!TryReadCompat(ctx, current, span))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            if (current[0] == needle)
+            // The scan stops at the first byte that is the needle or the NUL; the
+            // needle is checked first, so at a tie (needle == 0) it is a hit.
+            var stop = span.IndexOfAny(needle, (byte)0);
+            if (stop >= 0)
             {
-                ctx[CpuRegister.Rax] = address + index;
+                ctx[CpuRegister.Rax] = span[stop] == needle ? address + offset + (ulong)stop : 0;
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
 
-            if (current[0] == 0)
-            {
-                break;
-            }
+            offset += (ulong)length;
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -7640,24 +7650,45 @@ public static partial class KernelMemoryCompatExports
 
         ulong match = 0;
         var found = false;
-        Span<byte> current = stackalloc byte[1];
-        for (ulong index = 0; index < 1_048_576; index++)
+        // Scan in page-bounded chunks, tracking the last needle before the NUL
+        // with a vectorized LastIndexOf, instead of a guest read per byte.
+        const int chunkCap = 256;
+        const int pageSize = 4096;
+        Span<byte> chunk = stackalloc byte[chunkCap];
+        ulong offset = 0;
+        while (offset < 1_048_576)
         {
-            if (!TryReadCompat(ctx, address + index, current))
+            var current = address + offset;
+            var pageRemaining = pageSize - (int)(current & (pageSize - 1));
+            var length = (int)Math.Min((ulong)Math.Min(chunkCap, pageRemaining), 1_048_576UL - offset);
+            var span = chunk[..length];
+            if (!TryReadCompat(ctx, current, span))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            if (current[0] == needle)
+            var terminator = span.IndexOf((byte)0);
+            var scanEnd = terminator >= 0 ? terminator : length;
+            var last = span[..scanEnd].LastIndexOf(needle);
+            if (last >= 0)
             {
-                match = address + index;
+                match = address + offset + (ulong)last;
                 found = true;
             }
 
-            if (current[0] == 0)
+            if (terminator >= 0)
             {
+                // strrchr(s, '\0') returns a pointer to the terminator itself.
+                if (needle == 0)
+                {
+                    match = address + offset + (ulong)terminator;
+                    found = true;
+                }
+
                 break;
             }
+
+            offset += (ulong)length;
         }
 
         ctx[CpuRegister.Rax] = found ? match : 0;
@@ -7838,30 +7869,52 @@ public static partial class KernelMemoryCompatExports
         out int compare)
     {
         compare = 0;
-        Span<byte> leftBuffer = stackalloc byte[1];
-        Span<byte> rightBuffer = stackalloc byte[1];
-        for (ulong index = 0; index < limit; index++)
+        // Read both operands in page-bounded chunks, ASCII-lowercase them in the
+        // scratch buffers, then find the first case-insensitive difference with a
+        // vectorized CommonPrefixLength and the shared NUL with IndexOf, instead of
+        // a guest read per byte. Page-bounding matches the per-byte fault point.
+        const int chunkCap = 256;
+        const int pageSize = 4096;
+        Span<byte> leftChunk = stackalloc byte[chunkCap];
+        Span<byte> rightChunk = stackalloc byte[chunkCap];
+        ulong offset = 0;
+        while (offset < limit)
         {
-            if (!TryReadCompat(ctx, left + index, leftBuffer) ||
-                !TryReadCompat(ctx, right + index, rightBuffer))
+            var leftAddress = left + offset;
+            var rightAddress = right + offset;
+            var leftPageRemaining = pageSize - (int)(leftAddress & (pageSize - 1));
+            var rightPageRemaining = pageSize - (int)(rightAddress & (pageSize - 1));
+            var length = (int)Math.Min(
+                (ulong)Math.Min(chunkCap, Math.Min(leftPageRemaining, rightPageRemaining)),
+                limit - offset);
+            var leftSpan = leftChunk[..length];
+            var rightSpan = rightChunk[..length];
+            if (!TryReadCompat(ctx, leftAddress, leftSpan) ||
+                !TryReadCompat(ctx, rightAddress, rightSpan))
             {
                 return false;
             }
 
-            var leftValue = leftBuffer[0];
-            var rightValue = rightBuffer[0];
-            var leftLower = ToAsciiLower(leftValue);
-            var rightLower = ToAsciiLower(rightValue);
-            if (leftLower != rightLower)
+            for (var i = 0; i < length; i++)
             {
-                compare = leftLower - rightLower;
+                leftSpan[i] = ToAsciiLower(leftSpan[i]);
+                rightSpan[i] = ToAsciiLower(rightSpan[i]);
+            }
+
+            var matched = leftSpan.CommonPrefixLength(rightSpan);
+            if (leftSpan[..matched].IndexOf((byte)0) >= 0)
+            {
+                compare = 0;
                 return true;
             }
 
-            if (leftValue == 0)
+            if (matched < length)
             {
+                compare = leftSpan[matched] - rightSpan[matched];
                 return true;
             }
+
+            offset += (ulong)length;
         }
 
         return true;
