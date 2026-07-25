@@ -1616,12 +1616,16 @@ public sealed class SelfLoader : ISelfLoader
             addedAny = true;
         }
 
-        if (symbolName.Length > 1 &&
-            symbolName[0] == '_' &&
-            !runtimeSymbols.ContainsKey(symbolName[1..]))
+        // Slice the '_'-stripped alias once; it was being materialized twice
+        // (probe + insert) for every underscore symbol in the table.
+        if (symbolName.Length > 1 && symbolName[0] == '_')
         {
-            runtimeSymbols[symbolName[1..]] = symbolAddress;
-            addedAny = true;
+            var unprefixed = symbolName[1..];
+            if (!runtimeSymbols.ContainsKey(unprefixed))
+            {
+                runtimeSymbols[unprefixed] = symbolAddress;
+                addedAny = true;
+            }
         }
 
         if (string.Equals(symbolName, "kernel_dynlib_dlsym", StringComparison.Ordinal))
