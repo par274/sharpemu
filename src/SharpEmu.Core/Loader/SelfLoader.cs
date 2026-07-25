@@ -744,25 +744,6 @@ public sealed class SelfLoader : ISelfLoader
         var stubsByAddress = CreateImportStubMapping(virtualMemory, stubImportNids);
         Console.WriteLine($"[LOADER] Created {stubsByAddress.Count} import stubs");
 
-        int printCount = Math.Min(10, stubImportNids.Length);
-        for (int i = 0; i < printCount; i++)
-        {
-            var nid = stubImportNids[i];
-            var addr = stubsByAddress.First(x => x.Value == nid).Key;
-        }
-
-        var nidNames = Aerolib.Instance.GetAllNidNames();
-
-        var nidCounts = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var descriptor in descriptors)
-        {
-            if (descriptor.ImportNid is not null)
-            {
-                nidCounts.TryGetValue(descriptor.ImportNid, out var count);
-                nidCounts[descriptor.ImportNid] = count + 1;
-            }
-        }
-
         var addressesByNid = new Dictionary<string, ulong>(orderedImportNids.Count, StringComparer.Ordinal);
         foreach (var entry in stubsByAddress)
         {
