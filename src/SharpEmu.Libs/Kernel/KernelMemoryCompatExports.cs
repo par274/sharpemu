@@ -1374,21 +1374,50 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        // The original compared one guest byte at a time — two guest reads per
+        // byte. Read both operands in page-sized chunks and locate the first
+        // difference with a vectorized CommonPrefixLength. Only when a bulk read
+        // faults do we replay that chunk byte-by-byte, so a difference that
+        // precedes an unreadable byte is still reported ahead of the fault, which
+        // is exactly what the per-byte loop produced.
+        const int chunkSize = 4096;
+        var bufferSize = Math.Min(count, chunkSize);
+        Span<byte> leftChunk = stackalloc byte[bufferSize];
+        Span<byte> rightChunk = stackalloc byte[bufferSize];
         Span<byte> leftByte = stackalloc byte[1];
         Span<byte> rightByte = stackalloc byte[1];
-        for (var i = 0; i < count; i++)
+        for (var offset = 0; offset < count; offset += chunkSize)
         {
-            if (!TryReadCompat(ctx, left + (ulong)i, leftByte) ||
-                !TryReadCompat(ctx, right + (ulong)i, rightByte))
+            var length = Math.Min(chunkSize, count - offset);
+            var leftSpan = leftChunk[..length];
+            var rightSpan = rightChunk[..length];
+            if (TryReadCompat(ctx, left + (ulong)offset, leftSpan) &&
+                TryReadCompat(ctx, right + (ulong)offset, rightSpan))
             {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                var matched = leftSpan.CommonPrefixLength(rightSpan);
+                if (matched < length)
+                {
+                    ctx[CpuRegister.Rax] = unchecked((ulong)(leftSpan[matched] - rightSpan[matched]));
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
+
+                continue;
             }
 
-            var diff = leftByte[0] - rightByte[0];
-            if (diff != 0)
+            for (var i = offset; i < offset + length; i++)
             {
-                ctx[CpuRegister.Rax] = unchecked((ulong)diff);
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                if (!TryReadCompat(ctx, left + (ulong)i, leftByte) ||
+                    !TryReadCompat(ctx, right + (ulong)i, rightByte))
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                var diff = leftByte[0] - rightByte[0];
+                if (diff != 0)
+                {
+                    ctx[CpuRegister.Rax] = unchecked((ulong)diff);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
             }
         }
 
