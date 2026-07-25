@@ -22,6 +22,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SolidColorBrush x:Key="TextBrush" Color="#F7F8FB" />
     <SolidColorBrush x:Key="SecondaryTextBrush" Color="#C0C5CF" />
     <SolidColorBrush x:Key="MutedBrush" Color="#777F8E" />
+    <SolidColorBrush x:Key="SettingsDescriptionBrush" Color="#8A8A8A" />
     <SolidColorBrush x:Key="FaintBrush" Color="#4D5461" />
     <SolidColorBrush x:Key="AccentBrush" Color="#64A7FF" />
     <SolidColorBrush x:Key="AccentHoverBrush" Color="#82B8FF" />
@@ -35,35 +36,51 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
 
     <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
-      <Setter Property="MinHeight" Value="52" />
+      <Setter Property="MinHeight" Value="70" />
       <Setter Property="Template">
         <ControlTemplate>
-          <Grid ColumnDefinitions="*,Auto" Margin="0,2">
-            <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,24,0">
-              <TextBlock x:Name="PART_Label"
-                         Text="{TemplateBinding Label}"
-                         FontFamily="{TemplateBinding LabelFontFamily}"
-                         FontSize="13"
-                         Foreground="{StaticResource TextBrush}" />
-              <TextBlock Text="{TemplateBinding Description}"
-                         FontSize="11"
-                         Foreground="{StaticResource MutedBrush}"
-                         LineHeight="15"
-                         TextWrapping="Wrap"
-                         IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
-                                     Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
-            </StackPanel>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-              <ToggleSwitch OnContent="{TemplateBinding OverrideText}"
-                            OffContent="{TemplateBinding OverrideText}"
-                            MinWidth="0"
-                            IsVisible="{TemplateBinding ShowOverride}"
-                            IsChecked="{Binding IsOverridden, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" />
-              <ContentPresenter x:Name="PART_Slot"
-                                Content="{TemplateBinding Content}"
-                                VerticalAlignment="Center" />
-            </StackPanel>
-          </Grid>
+          <Border x:Name="PART_RowSurface"
+                  Classes="settingRowSurface"
+                  Background="#06FFFFFF"
+                  BorderBrush="#0AFFFFFF"
+                  BorderThickness="1"
+                  CornerRadius="14"
+                  Padding="18,12">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
+                <TextBlock x:Name="PART_Label"
+                           Text="{TemplateBinding Label}"
+                           FontFamily="{TemplateBinding LabelFontFamily}"
+                           FontSize="14"
+                           FontWeight="Medium"
+                           TextWrapping="Wrap"
+                           Foreground="{StaticResource TextBrush}" />
+                <TextBlock Text="{TemplateBinding Description}"
+                           FontSize="11"
+                           Foreground="{StaticResource SettingsDescriptionBrush}"
+                           LineHeight="16"
+                           MaxWidth="690"
+                           HorizontalAlignment="Left"
+                           TextAlignment="Left"
+                           TextWrapping="Wrap"
+                           IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
+                                       Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+              </StackPanel>
+              <StackPanel Grid.Column="1"
+                          Orientation="Horizontal"
+                          Spacing="12"
+                          VerticalAlignment="Center">
+                <ToggleSwitch OnContent="{TemplateBinding OverrideText}"
+                              OffContent="{TemplateBinding OverrideText}"
+                              MinWidth="0"
+                              IsVisible="{TemplateBinding ShowOverride}"
+                              IsChecked="{Binding IsOverridden, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" />
+                <ContentPresenter x:Name="PART_Slot"
+                                  Content="{TemplateBinding Content}"
+                                  VerticalAlignment="Center" />
+              </StackPanel>
+            </Grid>
+          </Border>
         </ControlTemplate>
       </Setter>
     </ControlTheme>
@@ -115,17 +132,48 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
       <Setter Property="Opacity" Value="1" />
     </Style>
-    <!-- Top-level pages (Library/Options/Console) cross-fade with a slight slide
-         on transitions between them. Each page carries its own transitions so a
-         visibility flip animates rather than snaps. -->
+    <!-- Top-level page roots remain pinned to their arranged rectangle. Only
+         opacity changes at this level, so independently composed descendants
+         cannot produce a diagonal jump when a page becomes active. -->
     <Style Selector="Grid.appPage">
-      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+
+    <!-- Page navigation follows the same layered reveal as per-game options:
+         the compact lead and the large body travel independently while the
+         root page remains stationary. Transform animation is render-only and
+         therefore does not trigger a new measure/arrange pass. -->
+    <Style Selector="Panel.pageMotionLead, StackPanel.pageMotionLead">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
       <Setter Property="Transitions">
         <Transitions>
-          <DoubleTransition Property="Opacity" Duration="0:0:0.28" Easing="CubicEaseOut" />
-          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.28" Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.32"
+                                         Easing="CubicEaseOut" />
         </Transitions>
       </Setter>
+    </Style>
+    <Style Selector="Grid.pageMotionBody, Border.pageMotionBody">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.38"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Panel.pageMotionLead.pageBefore, StackPanel.pageMotionLead.pageBefore">
+      <Setter Property="RenderTransform" Value="translateY(-16px)" />
+    </Style>
+    <Style Selector="Grid.pageMotionBody.pageBefore, Border.pageMotionBody.pageBefore">
+      <Setter Property="RenderTransform" Value="translateY(-28px)" />
+    </Style>
+    <Style Selector="Panel.pageMotionLead.pageAfter, StackPanel.pageMotionLead.pageAfter">
+      <Setter Property="RenderTransform" Value="translateY(38px)" />
+    </Style>
+    <Style Selector="Grid.pageMotionBody.pageAfter, Border.pageMotionBody.pageAfter">
+      <Setter Property="RenderTransform" Value="translateY(58px)" />
     </Style>
     <Style Selector="StackPanel.selectedDetailsHost">
       <Setter Property="RenderTransform" Value="translateY(0px)" />
@@ -368,6 +416,136 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Foreground" Value="White" />
     </Style>
 
+    <Style Selector="Border.optionsNavSurface">
+      <Setter Property="Width" Value="244" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="VerticalAlignment" Value="Top" />
+    </Style>
+    <Style Selector="Border.optionsNavIndicator">
+      <Setter Property="Height" Value="54" />
+      <Setter Property="Margin" Value="0,3,0,0" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Background" Value="#13FFFFFF" />
+      <Setter Property="BorderBrush" Value="#E6FFFFFF" />
+      <Setter Property="BorderThickness" Value="2" />
+      <Setter Property="BoxShadow" Value="0 8 24 0 #24000000" />
+    </Style>
+    <Style Selector="Button.optionsNav">
+      <Setter Property="Height" Value="61" />
+      <Setter Property="Padding" Value="16,0" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#8FFFFFFF" />
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+      <Setter Property="RenderTransform" Value="none" />
+    </Style>
+    <Style Selector="Button.optionsNav /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="#8FFFFFFF" />
+    </Style>
+    <Style Selector="Button.optionsNav:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.optionsNav:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.optionsNav.active /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.optionsNav:pressed">
+      <Setter Property="RenderTransform" Value="none" />
+    </Style>
+    <Style Selector="TextBlock.optionsNavIcon">
+      <Setter Property="FontSize" Value="20" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+    </Style>
+    <Style Selector="TextBlock.optionsNavLabel">
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="Border.optionsContentSurface">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="ScrollViewer.optionsSectionPanel">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="RenderTransform" Value="translateY(22px)" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
+      <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.18"
+                            Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.28"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ScrollViewer.optionsSectionPanel.active">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+    </Style>
+    <Style Selector="Border.optionsGroup">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+    </Style>
+    <Style Selector="Border.optionsInfoRow">
+      <Setter Property="MinHeight" Value="70" />
+      <Setter Property="Padding" Value="18,12" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Background" Value="#06FFFFFF" />
+      <Setter Property="BorderBrush" Value="#0AFFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style Selector="Border.optionsInfoRow:pointerover,
+                     Border.optionsInfoRow:focus-within">
+      <Setter Property="Background" Value="#0DFFFFFF" />
+      <Setter Property="BorderBrush" Value="#22FFFFFF" />
+    </Style>
+    <Style Selector="ContentControl.optionRow:pointerover /template/ Border#PART_RowSurface,
+                     ContentControl.optionRow:focus-within /template/ Border#PART_RowSurface">
+      <Setter Property="Background" Value="#0DFFFFFF" />
+      <Setter Property="BorderBrush" Value="#22FFFFFF" />
+    </Style>
+    <Style Selector="ComboBox.optionValue, NumericUpDown.optionValue">
+      <Setter Property="Width" Value="190" />
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="#1FFFFFFF" />
+    </Style>
+    <Style Selector="ToggleSwitch.optionToggle">
+      <Setter Property="MinHeight" Value="44" />
+    </Style>
+    <Style Selector="Button.optionAction">
+      <Setter Property="MinWidth" Value="156" />
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Padding" Value="18,0" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="#1FFFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.optionAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.optionAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#20FFFFFF" />
+      <Setter Property="BorderBrush" Value="#42FFFFFF" />
+    </Style>
     <Style Selector="TextBlock.gameOptionsNavLabel">
       <Setter Property="FontWeight" Value="Medium" />
     </Style>

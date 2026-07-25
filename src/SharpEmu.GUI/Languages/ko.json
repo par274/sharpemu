@@ -3,6 +3,7 @@
 
   "Page.Library": "라이브러리",
   "Page.Options": "옵션",
+  "Page.Console": "콘솔",
   "Page.GameCount.One": "게임 1개",
   "Page.GameCount.Other": "게임 {0}개",
 
@@ -75,6 +76,7 @@
 
   "Options.Language.Label": "에뮬레이터 언어",
   "Options.Language.Desc": "런처 전체에 사용되는 언어입니다. 변경 사항은 즉시 적용됩니다.",
+  "Options.Graphics.Rendering": "렌더링",
 
   "Common.On": "켬",
   "Common.Off": "끔",

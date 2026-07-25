@@ -3,6 +3,7 @@
 
   "Page.Library": "المكتبة",
   "Page.Options": "الخيارات",
+  "Page.Console": "وحدة التحكم",
   "Page.GameCount.One": "لعبة واحدة",
   "Page.GameCount.Other": "{0} لعبة",
 
@@ -75,6 +76,7 @@
 
   "Options.Language.Label": "لغة المحاكي",
   "Options.Language.Desc": "اللغة المستخدمة في جميع أنحاء المشغل. تُطبق فوراً.",
+  "Options.Graphics.Rendering": "العرض",
 
   "Common.On": "تشغيل",
   "Common.Off": "إيقاف",

@@ -3,6 +3,7 @@
 
   "Page.Library": "Bibliotheek",
   "Page.Options": "Opties",
+  "Page.Console": "Console",
   "Page.GameCount.One": "1 game",
   "Page.GameCount.Other": "{0} games",
 
@@ -75,6 +76,7 @@
 
   "Options.Language.Label": "Taal van de emulator",
   "Options.Language.Desc": "Taal die in de hele launcher wordt gebruikt. Wordt direct toegepast.",
+  "Options.Graphics.Rendering": "Rendering",
 
   "Common.On": "Aan",
   "Common.Off": "Uit",

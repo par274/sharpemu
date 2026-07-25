@@ -11,7 +11,7 @@ using SharpEmu.GUI.Services;
 using SharpEmu.GUI.Services.Abstractions;
 
 /// <summary>
-/// Backs the game library grid: the full collection of scanned games, the
+/// Backs the game library page: the full collection of scanned games, the
 /// search filter, and the currently selected tile. The scan itself runs in
 /// <see cref="IGameLibraryService"/>; this view-model owns the observable
 /// state that the ListBox, search box and launch bar bind to.

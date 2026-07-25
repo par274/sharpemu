@@ -3,6 +3,7 @@
 
   "Page.Library": "Kütüphane",
   "Page.Options": "Ayarlar",
+  "Page.Console": "Konsol",
   "Page.GameCount.One": "1 oyun",
   "Page.GameCount.Other": "{0} oyun",
 
@@ -75,6 +76,7 @@
 
   "Options.Language.Label": "Emülatör dili",
   "Options.Language.Desc": "Başlatıcı genelinde kullanılan dil. Hemen uygulanır.",
+  "Options.Graphics.Rendering": "Görüntüleme",
 
   "Common.On": "Açık",
   "Common.Off": "Kapalı",

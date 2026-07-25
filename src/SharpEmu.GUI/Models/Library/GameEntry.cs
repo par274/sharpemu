@@ -10,6 +10,7 @@ namespace SharpEmu.GUI;
 
 public class GameEntry : LibraryTile, INotifyPropertyChanged
 {
+    // Presentation model shared by the library view-model and its data templates.
     // Placeholder gradients for games without cover art, picked
     // deterministically from the game name so a game keeps its color.
     private static readonly (Color Start, Color End)[] PlaceholderPalette =

@@ -14,14 +14,13 @@ internal interface IGamepadInputService
     /// <summary>Raised on a horizontal navigation intent; -1 = left, +1 = right.</summary>
     event Action<int>? MoveHorizontal;
 
-    /// <summary>Raised on a vertical navigation intent; -1 = up, +1 = down. The
-    /// window multiplies by the current tiles-per-row.</summary>
+    /// <summary>Raised on a vertical navigation intent; -1 = up, +1 = down.</summary>
     event Action<int>? MoveVertical;
 
     /// <summary>Raised when the user activates the selected item (Cross).</summary>
     event Action? Activate;
 
-    /// <summary>Raised when the user asks for the Library (L1) or Options (R1) page.</summary>
+    /// <summary>Raised when L1/R1 requests the previous or next shell page.</summary>
     event Action<int>? PageRequested;
 
     /// <summary>
@@ -31,6 +30,6 @@ internal interface IGamepadInputService
     /// </summary>
     /// <param name="isActive">Whether the launcher window is foreground.</param>
     /// <param name="isRunning">Whether a game session is active (controller goes to the game).</param>
-    /// <param name="activePage">0 = Library, 1 = Options.</param>
+    /// <param name="activePage">0 = Library, 1 = Options, 2 = Console.</param>
     bool Poll(bool isActive, bool isRunning, int activePage);
 }

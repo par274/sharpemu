@@ -8,8 +8,8 @@ using ReactiveUI.SourceGenerators;
 using SharpEmu.GUI.Services.Abstractions;
 
 /// <summary>
-/// Tracks the running emulation session: whether a game is running or stopping,
-/// its title, and its exit status. Subscribes to <see cref="IEmulatorService"/>
+/// Tracks the running emulation session independently of the shell view:
+/// running/stopping state, title, and exit status. Subscribes to <see cref="IEmulatorService"/>
 /// so the window (session bar popup, run buttons, Discord presence) binds to a
 /// single source of truth instead of scattered bool flags.
 /// </summary>

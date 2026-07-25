@@ -3,6 +3,7 @@
 
   "Page.Library": "Könyvtár",
   "Page.Options": "Beállítások",
+  "Page.Console": "Konzol",
   "Page.GameCount.One": "1 játék",
   "Page.GameCount.Other": "{0} játékok",
 
@@ -84,6 +85,7 @@
 
   "Options.Language.Label": "Emulátor nyelve",
   "Options.Language.Desc": "Az indítóban használt nyelv. Azonnal érvénybe lép.",
+  "Options.Graphics.Rendering": "Megjelenítés",
 
   "Common.On": "Be",
   "Common.Off": "Ki",

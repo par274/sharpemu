@@ -3,6 +3,7 @@
 
   "Page.Library": "ライブラリ",
   "Page.Options": "オプション",
+  "Page.Console": "コンソール",
   "Page.GameCount.One": "ゲーム 1本",
   "Page.GameCount.Other": "ゲーム {0}本",
 
@@ -75,6 +76,7 @@
 
   "Options.Language.Label": "エミュレータの言語",
   "Options.Language.Desc": "ランチャー全体で使用される言語。変更はすぐに適用されます。",
+  "Options.Graphics.Rendering": "レンダリング",
 
   "Common.On": "オン",
   "Common.Off": "オフ",

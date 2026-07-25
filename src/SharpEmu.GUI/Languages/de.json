@@ -3,6 +3,7 @@
 
   "Page.Library": "Bibliothek",
   "Page.Options": "Optionen",
+  "Page.Console": "Konsole",
   "Page.GameCount.One": "1 Spiel",
   "Page.GameCount.Other": "{0} Spiele",
 
@@ -75,6 +76,7 @@
 
   "Options.Language.Label": "Emulator-Sprache",
   "Options.Language.Desc": "Sprache der Benutzeroberfläche. Wird sofort angewendet.",
+  "Options.Graphics.Rendering": "Darstellung",
 
   "Common.On": "An",
   "Common.Off": "Aus",

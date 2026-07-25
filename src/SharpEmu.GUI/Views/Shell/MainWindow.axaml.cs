@@ -11,6 +11,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Platform.Storage;
+using Avalonia.Styling;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Microsoft.Extensions.DependencyInjection;
@@ -31,6 +32,8 @@ namespace SharpEmu.GUI;
 
 public partial class MainWindow : Window
 {
+    // Shell navigation is ViewModel-owned. Remaining feature-specific event
+    // handlers are kept here only until their corresponding view is extracted.
     private const double LaunchBlurRadius = 12;
     private const double BlurTransitionSeconds = 0.24;
 
@@ -74,7 +77,6 @@ public partial class MainWindow : Window
     private bool _isStopping;
     private bool _awaitingFirstFrame;
     private int _autoScrollTicks;
-    private int _activePageIndex;
     private Updater.UpdateInfo? _availableUpdate;
     private string _updateStatusKey = "Updater.Status.Ready";
     private object?[] _updateStatusArgs = [BuildInfo.CommitSha ?? "dev"];
@@ -100,6 +102,7 @@ public partial class MainWindow : Window
     private bool _addFolderInProgress;
     private bool _suppressSelectionChanged;
     private int _gameOptionsSectionIndex;
+    private int _optionsSectionIndex;
     private int _selectedDetailsAnimationGeneration;
     private ViewModels.PerGameSettingsViewModel? _gameSettingsViewModel;
 
@@ -132,6 +135,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _main = main;
+        DataContext = main;
         _library = main.Library;
         _session = main.Session;
         _visibleGames = _library.Games;
@@ -155,9 +159,16 @@ public partial class MainWindow : Window
 
         // Translate gamepad navigation intents into UI actions.
         _gamepad.PageRequested += page => Dispatcher.UIThread.Post(() => SetActivePage(page));
-        _gamepad.MoveHorizontal += delta => Dispatcher.UIThread.Post(() => MoveSelection(delta));
-        _gamepad.MoveVertical += dir => Dispatcher.UIThread.Post(() => MoveSelection(dir * TilesPerRow()));
-        _gamepad.Activate += () => Dispatcher.UIThread.Post(LaunchSelected);
+        _gamepad.MoveHorizontal += delta => Dispatcher.UIThread.Post(() => HandleGamepadHorizontal(delta));
+        _gamepad.MoveVertical += direction => Dispatcher.UIThread.Post(() => HandleGamepadVertical(direction));
+        _gamepad.Activate += () => Dispatcher.UIThread.Post(HandleGamepadActivate);
+        _main.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(ViewModels.MainViewModel.ActivePage))
+            {
+                OnActivePageChanged();
+            }
+        };
 
         try
         {
@@ -298,9 +309,6 @@ public partial class MainWindow : Window
         SessionConsoleButton.Click += (_, _) => ShowConsoleWindow();
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
-        LibraryTabButton.Click += (_, _) => SetActivePage(0);
-        OptionsTabButton.Click += (_, _) => SetActivePage(1);
-        ConsoleNavButton.Click += (_, _) => SetActivePage(2);
         ConsoleToggle.Click += (_, _) => OpenSelectedGameSettings();
         var gameOptionsNavButtons = new[]
         {
@@ -338,6 +346,19 @@ public partial class MainWindow : Window
                 SetGameOptionsNavIndicator(_gameOptionsSectionIndex);
             }
         };
+
+        var optionsNavButtons = OptionsNavButtons();
+        for (var index = 0; index < optionsNavButtons.Length; index++)
+        {
+            var section = index;
+            var button = optionsNavButtons[index];
+            button.Click += (_, _) => SetOptionsSection(section);
+            button.PointerEntered += (_, _) => SetOptionsNavIndicator(section);
+            button.GotFocus += (_, _) => SetOptionsNavIndicator(section);
+        }
+        OptionsNavHost.PointerExited += (_, _) => SetOptionsNavIndicator(_optionsSectionIndex);
+        SetOptionsSection(0);
+
         GameOptionsLaunchButton.Click += (_, _) =>
         {
             CloseGameSettings();
@@ -480,134 +501,27 @@ public partial class MainWindow : Window
         };
     }
 
-    /// <summary>
-    /// Switches between the Library, Options and Console pages. Library and
-    /// Options are also reachable via
-    /// the gamepad's shoulder buttons (LB/RB, L1/R1) from <see cref="PollGamepad"/>.
-    /// </summary>
+    /// <summary>Compatibility adapter for controller and keyboard navigation.</summary>
     private void SetActivePage(int index)
     {
-        if (index != 0 && _isGameSettingsOpen)
+        _main.NavigateTo(index);
+    }
+
+    private void OnActivePageChanged()
+    {
+        if (_main.ActivePage != Navigation.ShellPage.Library && _isGameSettingsOpen)
         {
             CloseGameSettings();
-        }
-
-        // The shell view-model owns the active-page state (and the save-on-leave
-        // side effect); the window only mirrors it into control visibility.
-        _main.NavigateTo(index);
-        var previousIndex = _activePageIndex;
-        _activePageIndex = _main.ActivePage;
-
-        SetActiveClass(LibraryTabButton, _activePageIndex == 0);
-        SetActiveClass(OptionsTabButton, _activePageIndex == 1);
-        SetActiveClass(ConsoleNavButton, _activePageIndex == 2);
-        if (_activePageIndex is 0 or 1)
-        {
-            if (TopNavigationIndicator.RenderTransform is TranslateTransform transform)
-            {
-                transform.X = _activePageIndex * 132;
-            }
-
-            TopNavigationIndicator.Opacity = 1;
-        }
-        else
-        {
-            TopNavigationIndicator.Opacity = 0;
         }
 
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
 
-        AnimatePageTransition(previousIndex, _activePageIndex);
-    }
-
-    /// <summary>
-    /// Cross-fades the top-level pages with a slight horizontal slide: the page
-    /// being entered slides in from the direction of travel while the page being
-    /// left slides out the opposite way. Pages live in a shared Panel so both
-    /// can overlap for the duration of the transition.
-    /// </summary>
-    private async void AnimatePageTransition(int previousIndex, int nextIndex)
-    {
-        if (previousIndex == nextIndex)
+        if (_main.ActivePage == Navigation.ShellPage.Options)
         {
-            // No transition, but still ensure the active page is shown.
-            EnsurePageVisible(nextIndex);
-            return;
-        }
-
-        var entering = GetAppPage(nextIndex);
-        var leaving = GetAppPage(previousIndex);
-        if (entering is null)
-        {
-            return;
-        }
-
-        if (nextIndex == 2 && _consoleWindow is not null)
-        {
-            return;
-        }
-
-        const double slide = 48;
-        var direction = nextIndex > previousIndex ? 1 : -1;
-
-        entering.Opacity = 0;
-        entering.RenderTransform = new TranslateTransform(direction * slide, 0);
-        entering.IsVisible = true;
-
-        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
-
-        entering.Opacity = 1;
-        entering.RenderTransform = new TranslateTransform(0, 0);
-
-        if (leaving is not null && leaving != entering)
-        {
-            leaving.Opacity = 0;
-            leaving.RenderTransform = new TranslateTransform(-direction * slide, 0);
-
-            _ = DispatcherTimer.RunOnce(() =>
-            {
-                if (_activePageIndex != GetPageIndex(leaving))
-                {
-                    leaving.IsVisible = false;
-                    leaving.Opacity = 1;
-                    leaving.RenderTransform = new TranslateTransform(0, 0);
-                }
-            }, TimeSpan.FromMilliseconds(PageTransitionMs + 40));
-        }
-    }
-
-    private void EnsurePageVisible(int index)
-    {
-        LibraryPage.IsVisible = index == 0;
-        OptionsPage.IsVisible = index == 1;
-        ConsolePanel.IsVisible = index == 2 && _consoleWindow is null;
-    }
-
-    private Grid? GetAppPage(int index) => index switch
-    {
-        0 => LibraryPage,
-        1 => OptionsPage,
-        2 => ConsolePanel,
-        _ => null,
-    };
-
-    private int GetPageIndex(Grid page) => page == LibraryPage ? 0 : page == OptionsPage ? 1 : 2;
-
-    private const int PageTransitionMs = 300;
-
-    private static void SetActiveClass(Button button, bool active)
-    {
-        if (active)
-        {
-            if (!button.Classes.Contains("active"))
-            {
-                button.Classes.Add("active");
-            }
-        }
-        else
-        {
-            button.Classes.Remove("active");
+            Dispatcher.UIThread.Post(
+                () => OptionsNavButtons()[_optionsSectionIndex].Focus(NavigationMethod.Directional),
+                DispatcherPriority.Input);
         }
     }
 
@@ -709,7 +623,7 @@ public partial class MainWindow : Window
         // intents; the window only feeds it the current UI context. Intents
         // are marshalled to the UI thread via the event subscriptions set up
         // in the constructor.
-        _gamepad.Poll(IsActive, _isRunning || _isStopping, _activePageIndex);
+        _gamepad.Poll(IsActive, _isRunning || _isStopping, _main.ActivePageIndex);
     }
 
     private void MoveSelection(int delta)
@@ -725,6 +639,135 @@ public partial class MainWindow : Window
         GameList.SelectedIndex = index;
         GameList.ScrollIntoView(index);
     }
+
+    private void HandleGamepadHorizontal(int direction)
+    {
+        if (_main.ActivePage == Navigation.ShellPage.Library)
+        {
+            MoveSelection(direction);
+            return;
+        }
+
+        if (_main.ActivePage != Navigation.ShellPage.Options)
+        {
+            return;
+        }
+
+        if (OptionsNavButtons().Any(button => button.IsKeyboardFocusWithin))
+        {
+            if (direction > 0)
+            {
+                FocusOptionsControl(0);
+            }
+
+            return;
+        }
+
+        if (!AdjustFocusedOption(direction) && direction < 0)
+        {
+            OptionsNavButtons()[_optionsSectionIndex].Focus(NavigationMethod.Directional);
+        }
+    }
+
+    private void HandleGamepadVertical(int direction)
+    {
+        if (_main.ActivePage == Navigation.ShellPage.Library)
+        {
+            MoveSelection(direction * TilesPerRow());
+            return;
+        }
+
+        if (_main.ActivePage != Navigation.ShellPage.Options)
+        {
+            return;
+        }
+
+        if (OptionsNavButtons().Any(button => button.IsKeyboardFocusWithin))
+        {
+            SetOptionsSection(_optionsSectionIndex + direction, focusNavigation: true);
+            return;
+        }
+
+        var controls = FocusableOptionsControls();
+        var currentIndex = Array.FindIndex(controls, control => control.IsKeyboardFocusWithin);
+        FocusOptionsControl(currentIndex < 0 ? 0 : currentIndex + direction);
+    }
+
+    private void HandleGamepadActivate()
+    {
+        if (_main.ActivePage == Navigation.ShellPage.Library)
+        {
+            LaunchSelected();
+            return;
+        }
+
+        if (_main.ActivePage != Navigation.ShellPage.Options)
+        {
+            return;
+        }
+
+        if (OptionsNavButtons().Any(button => button.IsKeyboardFocusWithin))
+        {
+            FocusOptionsControl(0);
+            return;
+        }
+
+        var focused = ActiveOptionsControls().FirstOrDefault(control => control.IsKeyboardFocusWithin);
+        switch (focused)
+        {
+            case ToggleSwitch toggle:
+                toggle.IsChecked = toggle.IsChecked != true;
+                break;
+            case ComboBox combo:
+                combo.IsDropDownOpen = !combo.IsDropDownOpen;
+                break;
+            case Button button:
+                button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                break;
+        }
+    }
+
+    private bool AdjustFocusedOption(int direction)
+    {
+        var focused = ActiveOptionsControls().FirstOrDefault(control => control.IsKeyboardFocusWithin);
+        switch (focused)
+        {
+            case ToggleSwitch toggle:
+                toggle.IsChecked = direction > 0;
+                return true;
+            case ComboBox combo when combo.ItemCount > 0:
+                combo.SelectedIndex = Math.Clamp(combo.SelectedIndex + direction, 0, combo.ItemCount - 1);
+                return true;
+            case NumericUpDown number:
+                var current = number.Value ?? number.Minimum;
+                number.Value = Math.Clamp(
+                    current + (number.Increment * direction),
+                    number.Minimum,
+                    number.Maximum);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void FocusOptionsControl(int requestedIndex)
+    {
+        var controls = FocusableOptionsControls();
+        if (controls.Length == 0)
+        {
+            OptionsNavButtons()[_optionsSectionIndex].Focus(NavigationMethod.Directional);
+            return;
+        }
+
+        var index = Math.Clamp(requestedIndex, 0, controls.Length - 1);
+        controls[index].Focus(NavigationMethod.Directional);
+        controls[index].BringIntoView();
+    }
+
+    private Control[] FocusableOptionsControls() =>
+        ActiveOptionsControls()
+            .Where(control => control.IsEnabled && control.IsVisible)
+            .ToArray();
 
     private int TilesPerRow()
     {
@@ -761,6 +804,7 @@ public partial class MainWindow : Window
         {
             _ = CheckForUpdatesAsync();
         }
+
         await RescanLibraryAsync();
     }
 
@@ -796,6 +840,7 @@ public partial class MainWindow : Window
 
         LibraryTabButton.Content = loc.Get("Page.Library");
         OptionsTabButton.Content = loc.Get("Page.Options");
+        ConsoleTabButton.Content = loc.Get("Page.Console");
         SearchBox.PlaceholderText = loc.Get("Library.SearchWatermark");
 
         CtxLaunch.Header = loc.Get("Library.Context.Launch");
@@ -828,6 +873,13 @@ public partial class MainWindow : Window
         GameOptionsCopyTitleIdLabel.Text = loc.Get("Library.Context.CopyTitleId");
         GameOptionsRemoveLabel.Text = loc.Get("Library.Context.Remove");
 
+        OptionsGeneralNavLabel.Text = SectionNavigationLabel(loc.Get("Options.General"));
+        OptionsLoggingNavLabel.Text = SectionNavigationLabel(loc.Get("Options.Logging"));
+        OptionsLauncherNavLabel.Text = SectionNavigationLabel(loc.Get("Options.Section.Launcher"));
+        OptionsRenderingNavLabel.Text = SectionNavigationLabel(loc.Get("Options.Graphics.Rendering"));
+        OptionsEnvironmentNavLabel.Text = SectionNavigationLabel(loc.Get("Options.Env.Tab"));
+        OptionsAboutNavLabel.Text = SectionNavigationLabel(loc.Get("Options.About"));
+
         GameStrictRow.Label = loc.Get("Options.Strict.Label");
         GameStrictRow.Description = loc.Get("Options.Strict.Desc");
         GameLogLevelRow.Label = loc.Get("Options.LogLevel.Label");
@@ -837,8 +889,6 @@ public partial class MainWindow : Window
         GameLogToFileRow.Label = loc.Get("Options.LogToFile.Label");
         GameLogToFileRow.Description = loc.Get("Options.LogToFile.Desc");
 
-        EnvSectionTitle.Text = loc.Get("Options.Section.Environment");
-        EnvDesc.Text = loc.Get("Options.Env.Desc");
         EnvBthidRow.Description = loc.Get("Options.Env.Bthid.Desc");
         EnvLoopGuardRow.Description = loc.Get("Options.Env.LoopGuard.Desc");
         EnvWritableApp0Row.Description = loc.Get("Options.Env.WritableApp0.Desc");
@@ -847,10 +897,6 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryRow.Description = loc.Get("Options.Env.LogDirectMemory.Desc");
         EnvLogIoRow.Description = loc.Get("Options.Env.LogIo.Desc");
         EnvLogNpRow.Description = loc.Get("Options.Env.LogNp.Desc");
-        EmulationSectionTitle.Text = loc.Get("Options.Section.Emulation");
-        LoggingSectionTitle.Text = loc.Get("Options.Section.Logging");
-        LauncherSectionTitle.Text = loc.Get("Options.Section.Launcher");
-
         CpuEngineRow.Label = loc.Get("Options.CpuEngine.Label");
         CpuEngineRow.Description = loc.Get("Options.CpuEngine.Desc");
         CpuEngineNativeItem.Content = loc.Get("Options.CpuEngine.Native");
@@ -883,7 +929,6 @@ public partial class MainWindow : Window
         LanguageRow.Label = loc.Get("Options.Language.Label");
         LanguageRow.Description = loc.Get("Options.Language.Desc");
 
-        RenderingSectionTitle.Text = loc.Get("Options.Graphics.Rendering");
         RenderResolutionRow.Label = loc.Get("Options.RenderResolution.Label");
         RenderResolutionRow.Description = loc.Get("Options.RenderResolution.Desc");
 
@@ -916,7 +961,6 @@ public partial class MainWindow : Window
         SessionConsoleButtonLabel.Text = loc.Get("Launch.Console");
         SessionStopButtonLabel.Text = loc.Get("Launch.Stop");
 
-        AboutSectionTitle.Text = loc.Get("Options.About");
         GithubLabel.Text = loc.Get("About.Github.Label");
         GithubDesc.Text = loc.Get("About.Github.Desc");
         DiscordServerLabel.Text = loc.Get("About.Discord.Label");
@@ -929,6 +973,17 @@ public partial class MainWindow : Window
         RefreshUpdateText();
 
         UpdateSelectedGameTexts();
+    }
+
+    private static string SectionNavigationLabel(string value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Any(char.IsLower))
+        {
+            return value;
+        }
+
+        var lower = value.ToLowerInvariant();
+        return char.ToUpperInvariant(lower[0]) + lower[1..];
     }
 
     // ---- Discord Rich Presence ----
@@ -993,7 +1048,7 @@ public partial class MainWindow : Window
         }
 
         if (!_isRunning &&
-            _activePageIndex == 0 &&
+            _main.ActivePage == Navigation.ShellPage.Library &&
             !_isGameSettingsOpen &&
             !SearchBox.IsKeyboardFocusWithin &&
             args.Key is Key.Left or Key.Right)
@@ -1035,7 +1090,6 @@ public partial class MainWindow : Window
                 Grid.SetRowSpan(MainContent, 2);
                 MainContent.Margin = new Thickness(0);
                 ContentToolbar.IsVisible = !_isRunning;
-                ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
                 QueueGameSurfaceResize();
                 UpdateSessionBarVisibility();
             }
@@ -1059,7 +1113,6 @@ public partial class MainWindow : Window
                 Grid.SetRowSpan(MainContent, 3);
                 MainContent.Margin = new Thickness(0);
                 ContentToolbar.IsVisible = false;
-                ConsolePanel.IsVisible = false;
                 QueueGameSurfaceResize();
                 UpdateSessionBarVisibility();
             }
@@ -1519,7 +1572,7 @@ public partial class MainWindow : Window
         SetGameOptionsNavIndicator(section);
         for (var index = 0; index < buttons.Length; index++)
         {
-            SetActiveClass(buttons[index], index == section);
+            SetStateClass(buttons[index], "active", index == section);
             panels[index].IsVisible = index == section;
         }
     }
@@ -1531,6 +1584,88 @@ public partial class MainWindow : Window
             transform.Y = Math.Clamp(section, 0, 3) * 53;
         }
     }
+
+    private Button[] OptionsNavButtons() =>
+    [
+        OptionsGeneralNav,
+        OptionsLoggingNav,
+        OptionsLauncherNav,
+        OptionsRenderingNav,
+        OptionsEnvironmentNav,
+        OptionsAboutNav,
+    ];
+
+    private Control[] OptionsSectionPanels() =>
+    [
+        OptionsGeneralPanel,
+        OptionsLoggingPanel,
+        OptionsLauncherPanel,
+        OptionsRenderingPanel,
+        OptionsEnvironmentPanel,
+        OptionsAboutPanel,
+    ];
+
+    private void SetOptionsSection(int section, bool focusNavigation = false)
+    {
+        var buttons = OptionsNavButtons();
+        var panels = OptionsSectionPanels();
+        section = Math.Clamp(section, 0, buttons.Length - 1);
+        _optionsSectionIndex = section;
+        SetOptionsNavIndicator(section);
+
+        for (var index = 0; index < buttons.Length; index++)
+        {
+            var active = index == section;
+            SetStateClass(buttons[index], "active", active);
+            SetStateClass(panels[index], "active", active);
+            panels[index].IsEnabled = active;
+            panels[index].IsHitTestVisible = active;
+        }
+
+        if (focusNavigation)
+        {
+            buttons[section].BringIntoView();
+            buttons[section].Focus(NavigationMethod.Directional);
+        }
+    }
+
+    private void SetOptionsNavIndicator(int section)
+    {
+        if (OptionsNavIndicator.RenderTransform is TranslateTransform transform)
+        {
+            var buttons = OptionsNavButtons();
+            var index = Math.Clamp(section, 0, buttons.Length - 1);
+            var button = buttons[index];
+
+            // The navigation rows are contiguous hit targets. The 7 px visual
+            // gap lives inside each 61 px row, so pointer traversal never
+            // enters an ownerless area. Resolve the indicator position from
+            // the arranged button instead of duplicating the row pitch here.
+            transform.Y = button.TranslatePoint(default, OptionsNavHost)?.Y
+                ?? index * button.Bounds.Height;
+        }
+    }
+
+    private Control[] ActiveOptionsControls() => _optionsSectionIndex switch
+    {
+        0 => [CpuEngineBox, StrictToggle],
+        1 => [LogLevelBox, TraceImportsBox, LogToFileToggle, SelectLogFilePathButton, OverrideLogFileToggle],
+        2 => [LanguageBox, TitleMusicToggle, DiscordToggle, AutoUpdateToggle],
+        3 => [RenderResolutionBox],
+        4 =>
+        [
+            EnvBthidToggle,
+            EnvLoopGuardToggle,
+            EnvWritableApp0Toggle,
+            EnvVkValidationToggle,
+            EnvDumpSpirvToggle,
+            EnvLogDirectMemoryToggle,
+            EnvLogIoToggle,
+            EnvLogNpToggle,
+        ],
+        5 => [LatestCommitHashText, UpdateButton, GithubButton, DiscordButton],
+        _ => [],
+    };
 
     private (string Name, ToggleSwitch Toggle)[] GameEnvironmentToggles() =>
     [
@@ -2084,11 +2219,9 @@ public partial class MainWindow : Window
                 RestoreGameViewToFull();
                 GameView.Background = Brushes.Black;
                 GameView.IsHitTestVisible = true;
-                LibraryPage.IsVisible = false;
-                OptionsPage.IsVisible = false;
+                PagesHost.IsVisible = false;
                 LibraryToolbar.IsVisible = false;
                 ContentToolbar.IsVisible = false;
-                ConsolePanel.IsVisible = false;
                 HideSessionLoading();
                 UpdateSessionBarVisibility();
 
@@ -2206,11 +2339,9 @@ public partial class MainWindow : Window
         AnimateLibraryBlur(0, clearWhenComplete: true);
         MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
-        ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
-        LibraryPage.IsVisible = _activePageIndex == 0;
+        PagesHost.IsVisible = true;
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
-        OptionsPage.IsVisible = _activePageIndex == 1;
         // Game art when the source still holds it, otherwise the bundled
         // default; a bare color only when neither is available.
         BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
@@ -2317,11 +2448,9 @@ public partial class MainWindow : Window
         AnimateLibraryBlur(LaunchBlurRadius);
         MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
-        ConsolePanel.IsVisible = _activePageIndex == 2 && _consoleWindow is null;
-        LibraryPage.IsVisible = _activePageIndex == 0;
+        PagesHost.IsVisible = true;
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
-        OptionsPage.IsVisible = _activePageIndex == 1;
         BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
         UpdateRunButtons();
         Console.Error.WriteLine("[GUI][INFO] Library restored while embedded session is closing.");
@@ -2395,7 +2524,6 @@ public partial class MainWindow : Window
         }
 
         ConsoleSearchBox.Text = string.Empty;
-        ConsolePanel.IsVisible = false;
         // The detached window shares the same log buffer as the inline panel,
         // owned by ILogService; clearing it clears both views.
         _consoleWindow = new ConsoleWindow(
@@ -2405,7 +2533,6 @@ public partial class MainWindow : Window
         _consoleWindow.Closed += (_, _) =>
         {
             _consoleWindow = null;
-            ConsolePanel.IsVisible = _activePageIndex == 2;
         };
         _consoleWindow.Show(this);
     }

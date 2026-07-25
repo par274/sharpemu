@@ -3,6 +3,7 @@
 
   "Page.Library": "Библиотека",
   "Page.Options": "Настройки",
+  "Page.Console": "Консоль",
   "Page.GameCount.One": "1 игра",
   "Page.GameCount.Other": "Игр: {0}",
 
@@ -87,6 +88,7 @@
 
   "Options.Language.Label": "Язык эмулятора",
   "Options.Language.Desc": "Язык интерфейса лаунчера. Изменение применяется сразу.",
+  "Options.Graphics.Rendering": "Рендеринг",
 
   "Common.On": "Включено",
   "Common.Off": "Выключено",

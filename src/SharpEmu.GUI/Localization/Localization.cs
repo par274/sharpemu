@@ -119,48 +119,36 @@ public sealed class Localization : INotifyPropertyChanged
     /// english is the fallback language
     public void Load(string code)
     {
-        if (_fallbackStrings.Count == 0 && !string.Equals(code, "en", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!TryLoadLooseFile("en", out var fallback) && !TryLoadEmbedded("en", out fallback))
-            {
-                fallback = new Dictionary<string, string>();
-            }
-            _fallbackStrings = fallback;
-        }
-        else if (string.Equals(code, "en", StringComparison.OrdinalIgnoreCase))
-        {
-            if (TryLoadLooseFile("en", out var enDict) || TryLoadEmbedded("en", out enDict))
-            {
-                _strings = enDict;
-                _fallbackStrings = enDict;
-            }
-            else
-            {
-                _strings = new Dictionary<string, string>();
-                _fallbackStrings = new Dictionary<string, string>();
-            }
-        }
-        else
-        {
-            // Load the requested language
-            if (TryLoadLooseFile(code, out var loaded) || TryLoadEmbedded(code, out loaded))
-            {
-                _strings = loaded;
-            }
-            else
-            {
-                if (_fallbackStrings.Count > 0)
-                    _strings = new Dictionary<string, string>(_fallbackStrings);
-                else
-                    _strings = new Dictionary<string, string>();
-            }
-        }
+        // A loose file is an overlay, not a replacement. Keeping the embedded
+        // dictionary underneath means a stale user override still receives new
+        // keys added by a later application version.
+        _fallbackStrings = LoadMergedLanguage("en");
+        _strings = string.Equals(code, "en", StringComparison.OrdinalIgnoreCase)
+            ? _fallbackStrings
+            : LoadMergedLanguage(code);
 
         CurrentCode = code;
         // Bumping the revision and notifying Item[] lets any XAML binding of the
         // form "{Binding [Key], Source=Localization.Instance}" refresh.
         _revision++;
         OnPropertyChanged(BindableIndexerName);
+    }
+
+    private Dictionary<string, string> LoadMergedLanguage(string code)
+    {
+        var merged = TryLoadEmbedded(code, out var embedded)
+            ? embedded
+            : new Dictionary<string, string>();
+
+        if (TryLoadLooseFile(code, out var loose))
+        {
+            foreach (var (key, value) in loose)
+            {
+                merged[key] = value;
+            }
+        }
+
+        return merged;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)

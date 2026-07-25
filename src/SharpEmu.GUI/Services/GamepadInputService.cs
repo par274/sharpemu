@@ -31,7 +31,7 @@ internal sealed class GamepadInputService : IGamepadInputService
     /// </summary>
     /// <param name="isActive">Whether the launcher window is foreground.</param>
     /// <param name="isRunning">Whether a game session is active (controller goes to the game).</param>
-    /// <param name="activePage">0 = Library, 1 = Options.</param>
+    /// <param name="activePage">0 = Library, 1 = Options, 2 = Console.</param>
     public bool Poll(bool isActive, bool isRunning, int activePage)
     {
         // DualSense wins when both are connected; XInput covers Xbox pads.
@@ -43,17 +43,12 @@ internal sealed class GamepadInputService : IGamepadInputService
 
         if (!isActive)
         {
-            // Ignore input while the launcher is in the background, e.g. the
-            // game window is focused and using the same controller.
             _previousButtons = pad.Buttons;
             return false;
         }
 
         if (isRunning)
         {
-            // The game renders inside the launcher window, so the launcher
-            // stays active while playing. The controller belongs to the game
-            // then: no navigation.
             _previousButtons = pad.Buttons;
             return false;
         }
@@ -61,19 +56,12 @@ internal sealed class GamepadInputService : IGamepadInputService
         var shoulderPressed = pad.Buttons & ~_previousButtons;
         if ((shoulderPressed & HostGamepadButtons.L1) != 0)
         {
-            PageRequested?.Invoke(0);
+            PageRequested?.Invoke(Math.Max(activePage - 1, 0));
         }
 
         if ((shoulderPressed & HostGamepadButtons.R1) != 0)
         {
-            PageRequested?.Invoke(1);
-        }
-
-        // D-pad/stick navigation only applies on the library grid.
-        if (activePage != 0)
-        {
-            _previousButtons = pad.Buttons;
-            return true;
+            PageRequested?.Invoke(Math.Min(activePage + 1, 2));
         }
 
         var now = Environment.TickCount64;

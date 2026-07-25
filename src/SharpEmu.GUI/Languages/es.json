@@ -3,6 +3,7 @@
 
   "Page.Library": "Biblioteca",
   "Page.Options": "Opciones",
+  "Page.Console": "Consola",
   "Page.GameCount.One": "1 juego",
   "Page.GameCount.Other": "{0} juegos",
 
@@ -75,6 +76,7 @@
 
   "Options.Language.Label": "Idioma del emulador",
   "Options.Language.Desc": "Idioma utilizado en todo el launcher. Se aplica inmediatamente.",
+  "Options.Graphics.Rendering": "Renderizado",
 
   "Common.On": "Encendido",
   "Common.Off": "Apagado",

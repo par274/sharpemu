@@ -10,7 +10,7 @@ using ReactiveUI.SourceGenerators;
 using SharpEmu.GUI.Services.Abstractions;
 
 /// <summary>
-/// Backs the console panel: the visible log buffer (owned by
+/// Backs the console page: the visible log buffer (owned by
 /// <see cref="ILogService"/>), the search filter and the autoscroll flag.
 /// The heavy lifting (ring buffer, file mirroring, brush mapping) lives in the
 /// service; this view-model only exposes what the XAML binds to.
