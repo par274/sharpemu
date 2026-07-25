@@ -34,13 +34,18 @@ public static class ImeDialogOverlay
     private static volatile bool _isOpen;
     private static string _title = string.Empty;
     private static int _maxLength = 1;
+    private static bool _isPassword;
     private static long _lastCaretToggleTicks;
     private static bool _caretVisible = true;
 
     public static bool IsOpen => _isOpen;
 
     /// <summary>Opens the panel with the guest-supplied title and initial text.</summary>
-    public static void Open(string title, string initialText, int maxLength)
+    /// <param name="isPassword">
+    /// Mirrors OrbisImeOption.PASSWORD: displayed characters are masked, but
+    /// <see cref="CurrentText"/> still returns the real typed content.
+    /// </param>
+    public static void Open(string title, string initialText, int maxLength, bool isPassword = false)
     {
         lock (_gate)
         {
@@ -48,6 +53,7 @@ public static class ImeDialogOverlay
             _text.Clear();
             _text.Append(initialText ?? string.Empty);
             _maxLength = Math.Max(1, maxLength);
+            _isPassword = isPassword;
             _isOpen = true;
             _caretVisible = true;
             _lastCaretToggleTicks = Stopwatch.GetTimestamp();
@@ -108,10 +114,17 @@ public static class ImeDialogOverlay
     {
         string title;
         string text;
+        bool isPassword;
         lock (_gate)
         {
             title = _title;
             text = _text.ToString();
+            isPassword = _isPassword;
+        }
+
+        if (isPassword)
+        {
+            text = new string('*', text.Length);
         }
 
         var now = Stopwatch.GetTimestamp();

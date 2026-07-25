@@ -32,6 +32,9 @@ public static class ImeDialogExports
     private const int OffsetPlaceholder = 64;
     private const int OffsetTitle = 72;
 
+    // OrbisImeOption.PASSWORD, per the public SDK header.
+    private const uint OptionPasswordBit = 4;
+
     private const int ResultSize = 16;
     private const uint MaxTextLengthLimit = 2048; // ORBIS_IME_DIALOG_MAX_TEXT_LENGTH
 
@@ -90,10 +93,12 @@ public static class ImeDialogExports
             return Return(ctx, ImeDialogError.InvalidAddress);
         }
 
+        var option = BinaryPrimitives.ReadUInt32LittleEndian(raw.Slice(OffsetOption, 4));
         var maxTextLength = BinaryPrimitives.ReadUInt32LittleEndian(raw.Slice(OffsetMaxTextLength, 4));
         var inputTextBuffer = BinaryPrimitives.ReadUInt64LittleEndian(raw.Slice(OffsetInputTextBuffer, 8));
         var placeholderAddress = BinaryPrimitives.ReadUInt64LittleEndian(raw.Slice(OffsetPlaceholder, 8));
         var titleAddress = BinaryPrimitives.ReadUInt64LittleEndian(raw.Slice(OffsetTitle, 8));
+        var isPassword = (option & OptionPasswordBit) != 0;
 
         if (maxTextLength == 0 || maxTextLength > MaxTextLengthLimit)
         {
@@ -136,7 +141,7 @@ public static class ImeDialogExports
             _endStatus = OrbisImeDialogEndStatus.Ok;
         }
 
-        ImeDialogOverlay.Open(title, initialText, (int)maxTextLength);
+        ImeDialogOverlay.Open(title, initialText, (int)maxTextLength, isPassword);
         Trace($"init title='{title}' initial='{initialText}' maxLen={maxTextLength} buffer=0x{inputTextBuffer:X16}");
         return Return(ctx, ImeDialogError.Ok);
     }
