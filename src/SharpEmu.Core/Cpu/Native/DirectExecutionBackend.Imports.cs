@@ -2074,10 +2074,17 @@ public sealed partial class DirectExecutionBackend
 			0x51, 0x8D, 0x64, 0xA6, 0x35, 0xDE, 0xD8, 0xC1,
 			0xE6, 0xB0, 0x39, 0xB1, 0xC3, 0xE5, 0x52, 0x30,
 		];
-		var nameBytes = Encoding.UTF8.GetBytes(symbolName);
-		var input = new byte[nameBytes.Length + salt.Length];
-		nameBytes.CopyTo(input, 0);
-		salt.CopyTo(input.AsSpan(nameBytes.Length));
+		// Symbol names come from a 512-byte-capped read and are almost always short,
+		// so hash them on the stack, falling back to the heap only for an oversized
+		// name. Avoids the two per-call arrays the previous concat-then-hash used.
+		var nameByteCount = Encoding.UTF8.GetByteCount(symbolName);
+		var inputLength = nameByteCount + salt.Length;
+		Span<byte> input = inputLength <= 256
+			? stackalloc byte[256]
+			: new byte[inputLength];
+		input = input[..inputLength];
+		Encoding.UTF8.GetBytes(symbolName, input[..nameByteCount]);
+		salt.CopyTo(input[nameByteCount..]);
 		Span<byte> digest = stackalloc byte[20];
 		SHA1.HashData(input, digest);
 		var value = BinaryPrimitives.ReadUInt64LittleEndian(digest);
