@@ -29,6 +29,10 @@ internal static class AudioPcmConversion
         // rather than per sample inside the loop (this runs on every real-time
         // audio buffer, hundreds of frames at a time).
         var clampedVolume = Math.Clamp(volume, 0.0f, 1.0f);
+        // Unity volume scales a 16-bit sample to itself, so skip the per-sample
+        // multiply/round entirely at full volume — the common case for real-time
+        // playback. Only walk the attenuation path when the submission is quieter.
+        var attenuate = clampedVolume < 1.0f;
         for (var frame = 0; frame < frames; frame++)
         {
             var sourceFrame = source.Slice(frame * sourceFrameSize, sourceFrameSize);
@@ -36,8 +40,11 @@ internal static class AudioPcmConversion
             var right = channels == 1
                 ? left
                 : ReadSample(sourceFrame, 1, bytesPerSample, isFloat);
-            left = ApplyVolume(left, clampedVolume);
-            right = ApplyVolume(right, clampedVolume);
+            if (attenuate)
+            {
+                left = ApplyVolume(left, clampedVolume);
+                right = ApplyVolume(right, clampedVolume);
+            }
             BinaryPrimitives.WriteInt16LittleEndian(destination[(frame * OutputFrameSize)..], left);
             BinaryPrimitives.WriteInt16LittleEndian(destination[((frame * OutputFrameSize) + 2)..], right);
         }
