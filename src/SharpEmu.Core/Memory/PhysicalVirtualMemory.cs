@@ -238,15 +238,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var alignedSize = (size + 0xFFF) & ~0xFFFUL;
         var protection = executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
         var hostProtection = executable ? HostPageProtection.ReadWriteExecute : HostPageProtection.ReadWrite;
-
-        // Reserve address space only for very large non-executable regions; commit is done lazily later.
-        var reservedOnly = !executable &&
-            alignedSize >= LargeDataReserveThreshold &&
-            alignedSize > FullCommitRegionLimit;
-
-        var result = reservedOnly
-            ? _hostMemory.Reserve(desiredAddress, alignedSize, HostPageProtection.ReadWrite)
-            : _hostMemory.Allocate(desiredAddress, alignedSize, hostProtection);
+        var result = _hostMemory.Allocate(desiredAddress, alignedSize, hostProtection);
         if (result == 0)
         {
             return false;
@@ -260,8 +252,6 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        var state = reservedOnly ? ReserveRegion(actualAddress, alignedSize) : "n/a";
-
         _gate.EnterWriteLock();
         try
         {
@@ -270,7 +260,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 VirtualAddress = actualAddress,
                 Size = alignedSize,
                 IsExecutable = executable,
-                IsReservedOnly = reservedOnly,
+                IsReservedOnly = false,
                 Protection = protection
             });
         }
@@ -278,7 +268,6 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             _gate.ExitWriteLock();
         }
-
 
         var allocationKind = executable ? "executable memory" : "data memory";
         TraceVmem($"Allocated exact {allocationKind}: 0x{actualAddress:X16} - 0x{actualAddress + alignedSize:X16} ({alignedSize} bytes)");
@@ -372,7 +361,44 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         var actualAddress = result;
 
-        var lazyPrimeState = reservedOnly ? ReserveRegion(actualAddress, alignedSize) : "n/a";
+        var lazyPrimeState = "n/a";
+        if (reservedOnly)
+        {
+            var primeBytes = Math.Min(alignedSize, LazyReservePrimeBytes);
+            if (primeBytes != 0)
+            {
+                ulong committedBytes = 0;
+                while (committedBytes < primeBytes)
+                {
+                    var remaining = primeBytes - committedBytes;
+                    var chunkBytes = Math.Min(remaining, LazyReservePrimeChunkBytes);
+                    var commitAddress = actualAddress + committedBytes;
+                    if (!_hostMemory.Commit(commitAddress, chunkBytes, HostPageProtection.ReadWrite))
+                    {
+                        break;
+                    }
+
+                    committedBytes += chunkBytes;
+                }
+
+                if (committedBytes != 0)
+                {
+                    lazyPrimeState = committedBytes == primeBytes
+                        ? $"ok:{committedBytes:X}"
+                        : $"partial:{committedBytes:X}/{primeBytes:X}";
+                    TraceVmem($"Primed lazy region: 0x{actualAddress:X16} - 0x{actualAddress + committedBytes:X16} ({committedBytes} bytes)");
+                }
+                else
+                {
+                    lazyPrimeState = $"fail:{primeBytes:X}";
+                    TraceVmem($"Failed to prime lazy region at 0x{actualAddress:X16} ({primeBytes} bytes), continuing with on-demand commit");
+                }
+            }
+            else
+            {
+                lazyPrimeState = "skip:0";
+            }
+        }
 
         _gate.EnterWriteLock();
         try
@@ -397,41 +423,6 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         TraceVmem($"Allocated {allocationKind}: 0x{actualAddress:X16} - 0x{actualAddress + alignedSize:X16} ({alignedSize} bytes) lazy_prime={lazyPrimeState}");
 
         return actualAddress;
-    }
-
-    private string ReserveRegion(ulong actualAddress, ulong alignedSize)
-    {
-        var primeBytes = Math.Min(alignedSize, LazyReservePrimeBytes);
-        if (primeBytes == 0)
-        {
-            return "skip:0";
-        }
-
-        ulong committedBytes = 0;
-        while (committedBytes < primeBytes)
-        {
-            var remaining = primeBytes - committedBytes;
-            var chunkBytes = Math.Min(remaining, LazyReservePrimeChunkBytes);
-            var commitAddress = actualAddress + committedBytes;
-            if (!_hostMemory.Commit(commitAddress, chunkBytes, HostPageProtection.ReadWrite))
-            {
-                break;
-            }
-
-            committedBytes += chunkBytes;
-        }
-
-        if (committedBytes != 0)
-        {
-            var state = committedBytes == primeBytes
-                ? $"ok:{committedBytes:X}"
-                : $"partial:{committedBytes:X}/{primeBytes:X}";
-            TraceVmem($"region: 0x{actualAddress:X16} - 0x{actualAddress + committedBytes:X16} ({committedBytes} bytes)");
-            return state;
-        }
-
-        TraceVmem($"Failed to reserve region at 0x{actualAddress:X16} ({primeBytes} bytes)!");
-        return $"fail:{primeBytes:X}";
     }
 
     public bool TryBackFixedRange(ulong address, ulong size, bool executable)
