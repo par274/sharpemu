@@ -398,10 +398,23 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                     // Win32 VirtualQuery reports a run of pages sharing the
                     // same protection, so stop the run where it changes.
                     var protect = region.ProtectAt(pageAddress);
-                    var runEnd = pageAddress + PageSize;
-                    while (runEnd < region.End && region.ProtectAt(runEnd) == protect)
+
+                    // A region with no per-page overrides is uniformly
+                    // DefaultProtect, so the protection run reaches the region end
+                    // without probing each page one dictionary lookup at a time —
+                    // the common case, and O(1) instead of O(pages) for large maps.
+                    ulong runEnd;
+                    if (region.PageProtects is null)
                     {
-                        runEnd += PageSize;
+                        runEnd = region.End;
+                    }
+                    else
+                    {
+                        runEnd = pageAddress + PageSize;
+                        while (runEnd < region.End && region.ProtectAt(runEnd) == protect)
+                        {
+                            runEnd += PageSize;
+                        }
                     }
 
                     info.BaseAddress = pageAddress;
