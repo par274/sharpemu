@@ -512,13 +512,24 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         Check(_vk.CreateBuffer(_device, &bufferInfo, null, out var buffer), "vkCreateBuffer(detile)");
 
         _vk.GetBufferMemoryRequirements(_device, buffer, out var requirements);
+        // The kernel's per-element addressing is XOR-scattered rather than sequential,
+        // so prefer a heap that is both host-visible (for the CPU upload/CPU-side
+        // output copy below) AND device-local (e.g. a resizable-BAR window) — that
+        // keeps the scattered reads/writes in VRAM instead of a small host-only heap
+        // reached over PCIe, whose latency dominates as buffer size grows with
+        // resolution. Not every device exposes such a heap, so fall back to the
+        // plain host-visible/coherent requirement (see #618).
+        var memoryTypeIndex = TryFindMemoryType(
+            requirements.MemoryTypeBits,
+            MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.DeviceLocalBit,
+            out var preferredIndex)
+            ? preferredIndex
+            : FindMemoryType(requirements.MemoryTypeBits, MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit);
         var allocateInfo = new MemoryAllocateInfo
         {
             SType = StructureType.MemoryAllocateInfo,
             AllocationSize = requirements.Size,
-            MemoryTypeIndex = FindMemoryType(
-                requirements.MemoryTypeBits,
-                MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit),
+            MemoryTypeIndex = memoryTypeIndex,
         };
         Check(_vk.AllocateMemory(_device, &allocateInfo, null, out memory), "vkAllocateMemory(detile)");
         Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory(detile)");
@@ -527,6 +538,16 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
     private uint FindMemoryType(uint typeBits, MemoryPropertyFlags requiredFlags)
     {
+        if (TryFindMemoryType(typeBits, requiredFlags, out var memoryTypeIndex))
+        {
+            return memoryTypeIndex;
+        }
+
+        throw new InvalidOperationException("No compatible Vulkan host-visible memory type for detile.");
+    }
+
+    private bool TryFindMemoryType(uint typeBits, MemoryPropertyFlags requiredFlags, out uint memoryTypeIndex)
+    {
         _vk.GetPhysicalDeviceMemoryProperties(_physicalDevice, out var properties);
         var memoryTypes = &properties.MemoryTypes.Element0;
         for (uint index = 0; index < properties.MemoryTypeCount; index++)
@@ -534,11 +555,13 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             if ((typeBits & (1u << (int)index)) != 0 &&
                 (memoryTypes[index].PropertyFlags & requiredFlags) == requiredFlags)
             {
-                return index;
+                memoryTypeIndex = index;
+                return true;
             }
         }
 
-        throw new InvalidOperationException("No compatible Vulkan host-visible memory type for detile.");
+        memoryTypeIndex = 0;
+        return false;
     }
 
     private void UploadBytes(DeviceMemory memory, ReadOnlySpan<byte> data)
