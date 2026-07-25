@@ -7,6 +7,7 @@ using Silk.NET.Maths;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Bink;
+using SharpEmu.Libs.Ime;
 using Silk.NET.Input;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
@@ -2964,6 +2965,19 @@ internal static unsafe class VulkanVideoPresenter
         private VkBuffer[] _overlayStagingBuffers = [];
         private DeviceMemory[] _overlayStagingMemory = [];
         private nint[] _overlayStagingMapped = [];
+        // IME dialog overlay: same technique as the perf overlay above, but
+        // only created/blitted while ImeDialogOverlay.IsOpen, and centered
+        // instead of anchored top-left.
+        private Image _imeOverlayImage;
+        private DeviceMemory _imeOverlayImageMemory;
+        private bool _imeOverlayImageInitialized;
+        private VkBuffer[] _imeOverlayStagingBuffers = [];
+        private DeviceMemory[] _imeOverlayStagingMemory = [];
+        private nint[] _imeOverlayStagingMapped = [];
+        private bool _imeEnterWasDown;
+        private bool _imeEscapeWasDown;
+        private bool _imeBackspaceWasDown;
+        private readonly bool[] _imeCharKeyWasDown = new bool[128];
         private long _presentedSequence;
         private long _presentNotTakenLoggedSequence = long.MinValue;
         private bool _vulkanReady;
@@ -4618,6 +4632,179 @@ internal static unsafe class VulkanVideoPresenter
             CreateStagingBuffer((ulong)_extent.Width * _extent.Height * 4);
             CreateFrameUploadBuffers(_stagingSize);
             CreateOverlayResources();
+            CreateImeOverlayResources();
+        }
+
+        private void CreateImeOverlayResources()
+        {
+            const ulong overlayBytes = ImeDialogOverlay.PanelWidth * ImeDialogOverlay.PanelHeight * 4;
+            var imageInfo = new ImageCreateInfo
+            {
+                SType = StructureType.ImageCreateInfo,
+                ImageType = ImageType.Type2D,
+                Format = Format.B8G8R8A8Unorm,
+                Extent = new Extent3D(ImeDialogOverlay.PanelWidth, ImeDialogOverlay.PanelHeight, 1),
+                MipLevels = 1,
+                ArrayLayers = 1,
+                Samples = SampleCountFlags.Count1Bit,
+                Tiling = ImageTiling.Optimal,
+                Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.TransferSrcBit,
+                SharingMode = SharingMode.Exclusive,
+                InitialLayout = ImageLayout.Undefined,
+            };
+            Check(_vk.CreateImage(_device, &imageInfo, null, out _imeOverlayImage), "vkCreateImage(imeOverlay)");
+            _vk.GetImageMemoryRequirements(_device, _imeOverlayImage, out var requirements);
+            var memoryInfo = new MemoryAllocateInfo
+            {
+                SType = StructureType.MemoryAllocateInfo,
+                AllocationSize = requirements.Size,
+                MemoryTypeIndex = FindMemoryType(
+                    requirements.MemoryTypeBits,
+                    MemoryPropertyFlags.DeviceLocalBit),
+            };
+            Check(
+                _vk.AllocateMemory(_device, &memoryInfo, null, out _imeOverlayImageMemory),
+                "vkAllocateMemory(imeOverlay)");
+            Check(
+                _vk.BindImageMemory(_device, _imeOverlayImage, _imeOverlayImageMemory, 0),
+                "vkBindImageMemory(imeOverlay)");
+            _imeOverlayImageInitialized = false;
+
+            _imeOverlayStagingBuffers = new VkBuffer[MaxFramesInFlight];
+            _imeOverlayStagingMemory = new DeviceMemory[MaxFramesInFlight];
+            _imeOverlayStagingMapped = new nint[MaxFramesInFlight];
+            for (var slot = 0; slot < MaxFramesInFlight; slot++)
+            {
+                _imeOverlayStagingBuffers[slot] = CreateBuffer(
+                    overlayBytes,
+                    BufferUsageFlags.TransferSrcBit,
+                    MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
+                    out _imeOverlayStagingMemory[slot]);
+                void* mapped;
+                Check(
+                    _vk.MapMemory(_device, _imeOverlayStagingMemory[slot], 0, overlayBytes, 0, &mapped),
+                    "vkMapMemory(imeOverlay staging)");
+                _imeOverlayStagingMapped[slot] = (nint)mapped;
+            }
+        }
+
+        private void RecordImeOverlayBlit(uint imageIndex, int frameSlot)
+        {
+            if (_imeOverlayImage.Handle == 0 || _imeOverlayStagingMapped.Length <= frameSlot)
+            {
+                return;
+            }
+
+            var pixels = new Span<byte>(
+                (void*)_imeOverlayStagingMapped[frameSlot],
+                ImeDialogOverlay.PanelWidth * ImeDialogOverlay.PanelHeight * 4);
+            ImeDialogOverlay.Fill(pixels);
+
+            var toTransferDst = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = _imeOverlayImageInitialized ? AccessFlags.TransferReadBit : 0,
+                DstAccessMask = AccessFlags.TransferWriteBit,
+                OldLayout = _imeOverlayImageInitialized
+                    ? ImageLayout.TransferSrcOptimal
+                    : ImageLayout.Undefined,
+                NewLayout = ImageLayout.TransferDstOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = _imeOverlayImage,
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.TransferBit,
+                PipelineStageFlags.TransferBit,
+                0, 0, null, 0, null, 1, &toTransferDst);
+
+            var copyRegion = new BufferImageCopy
+            {
+                ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                ImageExtent = new Extent3D(ImeDialogOverlay.PanelWidth, ImeDialogOverlay.PanelHeight, 1),
+            };
+            _vk.CmdCopyBufferToImage(
+                _commandBuffer,
+                _imeOverlayStagingBuffers[frameSlot],
+                _imeOverlayImage,
+                ImageLayout.TransferDstOptimal,
+                1,
+                &copyRegion);
+
+            var toTransferSrc = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = AccessFlags.TransferWriteBit,
+                DstAccessMask = AccessFlags.TransferReadBit,
+                OldLayout = ImageLayout.TransferDstOptimal,
+                NewLayout = ImageLayout.TransferSrcOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = _imeOverlayImage,
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            var swapchainToDst = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = 0,
+                DstAccessMask = AccessFlags.TransferWriteBit,
+                OldLayout = ImageLayout.PresentSrcKhr,
+                NewLayout = ImageLayout.TransferDstOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = _swapchainImages[imageIndex],
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            var preBlitBarriers = stackalloc ImageMemoryBarrier[2] { toTransferSrc, swapchainToDst };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit,
+                PipelineStageFlags.TransferBit,
+                0, 0, null, 0, null, 2, preBlitBarriers);
+
+            var panelWidth = (int)Math.Min(ImeDialogOverlay.PanelWidth, _extent.Width);
+            var panelHeight = (int)Math.Min(ImeDialogOverlay.PanelHeight, _extent.Height);
+            var dstX = Math.Max(0, ((int)_extent.Width - panelWidth) / 2);
+            var dstY = Math.Max(0, ((int)_extent.Height - panelHeight) / 2);
+            // Exact copy, not a scaled blit: see RecordOverlayBlit's comment on
+            // MoltenVK corruption with the blit-on-swapchain path.
+            var copy = new ImageCopy
+            {
+                SrcSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                DstSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+                SrcOffset = new Offset3D(0, 0, 0),
+                DstOffset = new Offset3D(dstX, dstY, 0),
+                Extent = new Extent3D((uint)panelWidth, (uint)panelHeight, 1),
+            };
+            _vk.CmdCopyImage(
+                _commandBuffer,
+                _imeOverlayImage,
+                ImageLayout.TransferSrcOptimal,
+                _swapchainImages[imageIndex],
+                ImageLayout.TransferDstOptimal,
+                1,
+                &copy);
+
+            var swapchainToPresent = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = AccessFlags.TransferWriteBit,
+                DstAccessMask = 0,
+                OldLayout = ImageLayout.TransferDstOptimal,
+                NewLayout = ImageLayout.PresentSrcKhr,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = _swapchainImages[imageIndex],
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.TransferBit,
+                PipelineStageFlags.BottomOfPipeBit,
+                0, 0, null, 0, null, 1, &swapchainToPresent);
+            _imeOverlayImageInitialized = true;
         }
 
         private void CreateOverlayResources()
@@ -13390,6 +13577,95 @@ internal static unsafe class VulkanVideoPresenter
             _overlayHotkeyWasDown = down;
         }
 
+        /// <summary>
+        /// Edge-detected host-keyboard capture for the IME dialog overlay.
+        /// Windows-only for now, same limitation as <see cref="PollPerfOverlayHotkey"/>
+        /// (POSIX hosts route keyboard events through HostWindowInput.Attach
+        /// instead of user32 polling — wiring that path is a fast-follow).
+        /// </summary>
+        private void PollImeDialogInput()
+        {
+            if (!OperatingSystem.IsWindows() || !ImeDialogOverlay.IsOpen)
+            {
+                _imeEnterWasDown = false;
+                _imeEscapeWasDown = false;
+                _imeBackspaceWasDown = false;
+                Array.Clear(_imeCharKeyWasDown);
+                return;
+            }
+
+            const int VkBackspace = 0x08;
+            const int VkEnter = 0x0D;
+            const int VkEscape = 0x1B;
+            const int VkSpace = 0x20;
+            const int VkShift = 0x10;
+            const int Vk0 = 0x30;
+            const int Vk9 = 0x39;
+            const int VkA = 0x41;
+            const int VkZ = 0x5A;
+
+            var input = SharpEmu.HLE.Host.HostPlatform.Current.Input;
+            if (!input.IsHostWindowFocused())
+            {
+                return;
+            }
+
+            var enterDown = input.IsKeyDown(VkEnter);
+            if (enterDown && !_imeEnterWasDown)
+            {
+                ImeDialogExports.ConfirmFromHostInput();
+                _imeEnterWasDown = enterDown;
+                return;
+            }
+            _imeEnterWasDown = enterDown;
+
+            var escapeDown = input.IsKeyDown(VkEscape);
+            if (escapeDown && !_imeEscapeWasDown)
+            {
+                ImeDialogExports.CancelFromHostInput();
+                _imeEscapeWasDown = escapeDown;
+                return;
+            }
+            _imeEscapeWasDown = escapeDown;
+
+            var backspaceDown = input.IsKeyDown(VkBackspace);
+            if (backspaceDown && !_imeBackspaceWasDown)
+            {
+                ImeDialogOverlay.Backspace();
+            }
+            _imeBackspaceWasDown = backspaceDown;
+
+            var shiftDown = input.IsKeyDown(VkShift);
+
+            var spaceDown = input.IsKeyDown(VkSpace);
+            if (spaceDown && !_imeCharKeyWasDown[VkSpace])
+            {
+                ImeDialogOverlay.AppendChar(' ');
+            }
+            _imeCharKeyWasDown[VkSpace] = spaceDown;
+
+            for (var vk = Vk0; vk <= Vk9; vk++)
+            {
+                var down = input.IsKeyDown(vk);
+                if (down && !_imeCharKeyWasDown[vk])
+                {
+                    ImeDialogOverlay.AppendChar((char)('0' + (vk - Vk0)));
+                }
+                _imeCharKeyWasDown[vk] = down;
+            }
+
+            for (var vk = VkA; vk <= VkZ; vk++)
+            {
+                var down = input.IsKeyDown(vk);
+                if (down && !_imeCharKeyWasDown[vk])
+                {
+                    var letter = (char)('A' + (vk - VkA));
+                    ImeDialogOverlay.AppendChar(shiftDown ? letter : char.ToLowerInvariant(letter));
+                }
+                _imeCharKeyWasDown[vk] = down;
+            }
+        }
+
         private void Render(double _)
         {
             try
@@ -13424,6 +13700,7 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             PollPerfOverlayHotkey();
+            PollImeDialogInput();
 
             if (_hostSurface is not null)
             {
@@ -13903,6 +14180,11 @@ internal static unsafe class VulkanVideoPresenter
             if (PerfOverlay.Enabled)
             {
                 RecordOverlayBlit(imageIndex, frameSlot);
+            }
+
+            if (ImeDialogOverlay.IsOpen)
+            {
+                RecordImeOverlayBlit(imageIndex, frameSlot);
             }
 
             Check(_vk.EndCommandBuffer(_commandBuffer), "vkEndCommandBuffer");
@@ -16962,6 +17244,31 @@ internal static unsafe class VulkanVideoPresenter
             _overlayStagingMemory = [];
             _overlayStagingMapped = [];
             _overlayImageInitialized = false;
+            if (_imeOverlayImage.Handle != 0)
+            {
+                _vk.DestroyImage(_device, _imeOverlayImage, null);
+                _imeOverlayImage = default;
+            }
+            if (_imeOverlayImageMemory.Handle != 0)
+            {
+                _vk.FreeMemory(_device, _imeOverlayImageMemory, null);
+                _imeOverlayImageMemory = default;
+            }
+            for (var slot = 0; slot < _imeOverlayStagingBuffers.Length; slot++)
+            {
+                if (_imeOverlayStagingBuffers[slot].Handle != 0)
+                {
+                    _vk.DestroyBuffer(_device, _imeOverlayStagingBuffers[slot], null);
+                }
+                if (_imeOverlayStagingMemory[slot].Handle != 0)
+                {
+                    _vk.FreeMemory(_device, _imeOverlayStagingMemory[slot], null);
+                }
+            }
+            _imeOverlayStagingBuffers = [];
+            _imeOverlayStagingMemory = [];
+            _imeOverlayStagingMapped = [];
+            _imeOverlayImageInitialized = false;
             foreach (var fence in _frameFences)
             {
                 if (fence.Handle != 0)
