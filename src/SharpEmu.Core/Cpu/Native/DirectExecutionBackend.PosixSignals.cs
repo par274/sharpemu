@@ -70,6 +70,7 @@ public sealed unsafe partial class DirectExecutionBackend
 	private static readonly int[] PosixRegisterOffsets = OperatingSystem.IsMacOS()
 		? new[] { 16, 32, 40, 24, 72, 64, 56, 48, 80, 88, 96, 104, 112, 120, 128, 136, 144 }
 		: new[] { 104, 112, 96, 88, 120, 80, 72, 64, 0, 8, 16, 24, 32, 40, 48, 56, 128 };
+	private static readonly int PosixEflagsOffset = OperatingSystem.IsMacOS() ? 152 : 17 * 8;
 
 	private static DirectExecutionBackend? _posixSignalBackend;
 	private static bool _posixSignalHandlersInstalled;
@@ -273,6 +274,7 @@ public sealed unsafe partial class DirectExecutionBackend
 		{
 			WriteCtxU64(contextRecord, CTX_RAX + i * 8, *(ulong*)(registers + offsets[i]));
 		}
+		WriteCtxU32(contextRecord, CTX_EFLAGS, *(uint*)(registers + PosixEflagsOffset));
 
 		// Bridge the XMM registers alongside the GPRs where the layout is
 		// known: on Linux the fpstate pointer and FXSAVE image are kernel
@@ -359,6 +361,7 @@ public sealed unsafe partial class DirectExecutionBackend
 		{
 			*(ulong*)(registers + offsets[i]) = ReadCtxU64(contextRecord, CTX_RAX + i * 8);
 		}
+		*(uint*)(registers + PosixEflagsOffset) = ReadCtxU32(contextRecord, CTX_EFLAGS);
 		if (fpstate != null)
 		{
 			Buffer.MemoryCopy(

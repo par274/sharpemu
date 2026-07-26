@@ -12,20 +12,26 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Cpu;
 
 /// <summary>
-/// Coverage for the SSE4a EXTRQ/INSERTQ fault recovery through the POSIX signal bridge on
-/// Linux. Each test fabricates the exact frame the kernel hands the SIGILL handler - gregs
-/// whose RIP points at a real EXTRQ/INSERTQ encoding in probe-visible host memory, plus an
-/// FXSAVE image carrying the XMM registers - and drives the production entry point
-/// (TryHandlePosixFault) over it. The bridge must capture the XMM state into the CONTEXT
-/// scratch buffer, the recovery must decode and emulate the instruction, and the write-back
-/// must land the result in the FXSAVE image and advance RIP, because that is precisely what
-/// sigreturn restores on a live fault.
+/// Coverage for illegal-instruction recovery through the POSIX signal bridge. Tests
+/// fabricate the platform signal frames consumed by TryHandlePosixFault and verify
+/// that recovered register state is written back exactly as sigreturn would restore it.
 /// </summary>
-public sealed unsafe class Sse4aPosixSignalRecoveryTests
+public sealed unsafe class PosixSignalRecoveryTests
 {
     private const int PosixSigIll = 4;
+    private const uint CarryFlag = 1u << 0;
+    private const uint ReservedFlag = 1u << 1;
+    private const uint ZeroFlag = 1u << 6;
+    private const uint DirectionFlag = 1u << 10;
+
+    private const int DarwinUcontextMcontextOffset = 48;
+    private const int DarwinRaxOffset = 16;
+    private const int DarwinRipOffset = 144;
+    private const int DarwinRflagsOffset = 152;
     private const int LinuxUcontextGregsOffset = 40;
+    private const int LinuxGregsRaxOffset = 13 * 8;
     private const int LinuxGregsRipOffset = 16 * 8;
+    private const int LinuxGregsRflagsOffset = 17 * 8;
     private const int LinuxGregsFpstateOffset = 184;
     private const int FxsaveXmm0Offset = 160;
     private const int FxsaveXmm1Offset = 176;
@@ -116,6 +122,38 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests
     }
 
     [Fact]
+    public void TzcntSigillRoundTripsEflagsThroughTheBridge()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        // tzcnt eax, eax
+        var code = AllocateProbeVisibleCode([0xF3, 0x0F, 0xBC, 0xC0]);
+        try
+        {
+            var frame = new FakeSignalFrame((ulong)code)
+            {
+                Rax = 1,
+                EFlags = ReservedFlag | CarryFlag | DirectionFlag,
+            };
+
+            Assert.True(frame.Dispatch());
+
+            Assert.Equal(0UL, frame.Rax);
+            Assert.Equal((ulong)code + 4, frame.Rip);
+            Assert.Equal(0u, frame.EFlags & CarryFlag);
+            Assert.Equal(ZeroFlag, frame.EFlags & ZeroFlag);
+            Assert.Equal(DirectionFlag, frame.EFlags & DirectionFlag);
+        }
+        finally
+        {
+            FreeProbeVisibleCode(code);
+        }
+    }
+
+    [Fact]
     public void RecoveryDeclinesWhenNoXmmStateWasBridged()
     {
         if (!OperatingSystem.IsLinux() ||
@@ -148,36 +186,32 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests
         }
     }
 
-    /// <summary>
-    /// The Linux x86-64 signal frame as TryHandlePosixFault consumes it: a ucontext whose
-    /// mcontext gregs sit at +40 (kernel sigcontext layout) with the fpstate pointer at
-    /// gregs+184 aiming at a 512-byte FXSAVE image.
-    /// </summary>
     private sealed class FakeSignalFrame
     {
         private readonly byte[] _ucontext = new byte[512];
+        private readonly byte[] _mcontext = new byte[512];
         private readonly byte[] _fpstate = new byte[512];
         private readonly bool _wireFpstate;
 
         public FakeSignalFrame(ulong rip, bool wireFpstate = true)
         {
             _wireFpstate = wireFpstate;
-            fixed (byte* ucontext = _ucontext)
-            {
-                *(ulong*)(ucontext + LinuxUcontextGregsOffset + LinuxGregsRipOffset) = rip;
-            }
+            WriteRegisterU64(PlatformRipOffset, rip);
         }
 
-        public ulong Rip
+        public ulong Rax
         {
-            get
-            {
-                fixed (byte* ucontext = _ucontext)
-                {
-                    return *(ulong*)(ucontext + LinuxUcontextGregsOffset + LinuxGregsRipOffset);
-                }
-            }
+            get => ReadRegisterU64(PlatformRaxOffset);
+            set => WriteRegisterU64(PlatformRaxOffset, value);
         }
+
+        public uint EFlags
+        {
+            get => ReadRegisterU32(PlatformRflagsOffset);
+            set => WriteRegisterU32(PlatformRflagsOffset, value);
+        }
+
+        public ulong Rip => ReadRegisterU64(PlatformRipOffset);
 
         public void SetXmmLow(int fxsaveOffset, ulong value)
         {
@@ -207,9 +241,14 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests
         {
             EnsureBridgeBackend();
             fixed (byte* ucontext = _ucontext)
+            fixed (byte* mcontext = _mcontext)
             fixed (byte* fpstate = _fpstate)
             {
-                if (_wireFpstate)
+                if (OperatingSystem.IsMacOS())
+                {
+                    *(byte**)(ucontext + DarwinUcontextMcontextOffset) = mcontext;
+                }
+                else if (_wireFpstate)
                 {
                     *(byte**)(ucontext + LinuxUcontextGregsOffset + LinuxGregsFpstateOffset) = fpstate;
                 }
@@ -217,6 +256,55 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests
                 return (bool)TryHandlePosixFault.Invoke(
                     null,
                     [PosixSigIll, (nint)0, (nint)ucontext])!;
+            }
+        }
+
+        private static int PlatformRaxOffset =>
+            OperatingSystem.IsMacOS() ? DarwinRaxOffset : LinuxGregsRaxOffset;
+
+        private static int PlatformRipOffset =>
+            OperatingSystem.IsMacOS() ? DarwinRipOffset : LinuxGregsRipOffset;
+
+        private static int PlatformRflagsOffset =>
+            OperatingSystem.IsMacOS() ? DarwinRflagsOffset : LinuxGregsRflagsOffset;
+
+        private byte[] RegisterStorage => OperatingSystem.IsMacOS() ? _mcontext : _ucontext;
+
+        private int RegisterBaseOffset => OperatingSystem.IsMacOS() ? 0 : LinuxUcontextGregsOffset;
+
+        private ulong ReadRegisterU64(int offset)
+        {
+            var storage = RegisterStorage;
+            fixed (byte* registers = storage)
+            {
+                return *(ulong*)(registers + RegisterBaseOffset + offset);
+            }
+        }
+
+        private uint ReadRegisterU32(int offset)
+        {
+            var storage = RegisterStorage;
+            fixed (byte* registers = storage)
+            {
+                return *(uint*)(registers + RegisterBaseOffset + offset);
+            }
+        }
+
+        private void WriteRegisterU64(int offset, ulong value)
+        {
+            var storage = RegisterStorage;
+            fixed (byte* registers = storage)
+            {
+                *(ulong*)(registers + RegisterBaseOffset + offset) = value;
+            }
+        }
+
+        private void WriteRegisterU32(int offset, uint value)
+        {
+            var storage = RegisterStorage;
+            fixed (byte* registers = storage)
+            {
+                *(uint*)(registers + RegisterBaseOffset + offset) = value;
             }
         }
     }
