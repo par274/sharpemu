@@ -5672,6 +5672,9 @@ public static partial class AgcExports
                         $"[LOADER][TRACE] agc.wait_monitor_resumed count={resumed} " +
                         $"remaining={remaining}");
                 }
+
+                SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot(
+                    ctx.Memory);
                 if (remaining == 0)
                 {
                     gpuState.WaitMonitorRunning = false;

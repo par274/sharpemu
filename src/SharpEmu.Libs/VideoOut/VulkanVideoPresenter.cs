@@ -1711,7 +1711,7 @@ internal static unsafe class VulkanVideoPresenter
 
             var version = ++_orderedGuestFlipVersionSequence;
             _lastOrderedGuestFlipVersions[(videoOutHandle, displayBufferIndex)] = version;
-            return EnqueueGuestWorkLocked(
+            var enqueued = EnqueueGuestWorkLocked(
                 new VulkanOrderedGuestFlip(
                     version,
                     videoOutHandle,
@@ -1720,6 +1720,13 @@ internal static unsafe class VulkanVideoPresenter
                     width,
                     height,
                     pitchInPixel)) > 0;
+            SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceOrderedFlipEnqueue(
+                videoOutHandle,
+                displayBufferIndex,
+                address,
+                version,
+                enqueued);
+            return enqueued;
         }
     }
 
@@ -14060,8 +14067,14 @@ internal static unsafe class VulkanVideoPresenter
 				{
 				// A render-loop tick with no newer flip is normal. Warn only when
 				// an actual queued presentation is waiting on unfinished guest work.
+                var hasPendingPresentation =
+                    HasPendingGuestPresentation(_presentedSequence);
+                SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TracePresentNotTaken(
+                    _presentedSequence,
+                    hasPendingPresentation);
+                SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot();
                 if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
-					HasPendingGuestPresentation(_presentedSequence) &&
+					hasPendingPresentation &&
                     _presentNotTakenLoggedSequence != _presentedSequence)
                 {
                     _presentNotTakenLoggedSequence = _presentedSequence;
@@ -14086,6 +14099,10 @@ internal static unsafe class VulkanVideoPresenter
                 }
             }
 
+            SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TracePresentTaken(
+                presentation.Sequence,
+                presentation.GuestImageAddress,
+                presentation.GuestImageVersion);
             if (ShouldTracePresentedGuestImageContentsForDiagnostics())
             {
                 Console.Error.WriteLine(

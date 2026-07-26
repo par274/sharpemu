@@ -13,6 +13,7 @@ using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Diagnostics;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -3651,6 +3652,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			$"[LOADER][INFO] Scheduled guest thread '{thread.Name}' handle=0x{thread.ThreadHandle:X16} " +
 			$"entry=0x{thread.EntryPoint:X16} arg=0x{thread.Argument:X16} priority={thread.Priority} " +
 			$"host_priority={MapGuestThreadPriority(thread.Priority)} affinity=0x{thread.AffinityMask:X}");
+		LoadProgressDiagnostics.ArmIfNorthAudioThread(thread.Name);
 		Pump(creatorContext, "pthread_create");
 		// Pump is suppressed while another cooperative dispatch is active. The
 		// background dispatcher would eventually observe this thread, but an

@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
+
 namespace SharpEmu.Libs.Agc;
 
 /// <summary>
@@ -89,6 +91,64 @@ internal static class GpuWaitRegistry
             }
 
             return total;
+        }
+    }
+
+    public readonly record struct OutstandingSnapshot(
+        int Outstanding,
+        int Latched,
+        long OldestAgeMs,
+        ulong SampleWaitAddress,
+        string? SampleQueueName);
+
+    /// <summary>
+    /// Diagnostics snapshot of suspended WAIT_REG_MEM / dims waiters.
+    /// </summary>
+    public static OutstandingSnapshot SnapshotOutstanding(object? memory = null)
+    {
+        lock (_gate)
+        {
+            var outstanding = 0;
+            var latched = 0;
+            var oldestTicks = long.MaxValue;
+            ulong sampleAddress = 0;
+            string? sampleQueue = null;
+            var now = Stopwatch.GetTimestamp();
+            foreach (var (_, list) in _waiters)
+            {
+                foreach (var waiter in list)
+                {
+                    if (memory is not null &&
+                        !ReferenceEquals(waiter.Memory, memory))
+                    {
+                        continue;
+                    }
+
+                    outstanding++;
+                    if (waiter.Latched)
+                    {
+                        latched++;
+                    }
+
+                    if (waiter.RegisteredTicks != 0 &&
+                        waiter.RegisteredTicks < oldestTicks)
+                    {
+                        oldestTicks = waiter.RegisteredTicks;
+                        sampleAddress = waiter.WaitAddress;
+                        sampleQueue = waiter.QueueName;
+                    }
+                }
+            }
+
+            var oldestAgeMs = oldestTicks == long.MaxValue || oldestTicks == 0
+                ? 0L
+                : (now - oldestTicks) * 1000L / Stopwatch.Frequency;
+            return new OutstandingSnapshot(
+                outstanding,
+                latched,
+                oldestAgeMs,
+                sampleAddress,
+                sampleQueue);
         }
     }
 
