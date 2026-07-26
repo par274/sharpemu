@@ -189,5 +189,11 @@
   "Updater.Status.Timeout": "업데이트 확인이 10초 후 시간 초과되었습니다",
   "Updater.Status.Failed": "업데이트를 확인할 수 없습니다",
   "Updater.Status.ChecksumFailed": "다운로드한 업데이트가 SHA-256 검증에 실패했습니다",
-  "Updater.Status.Unsupported": "자동 업데이트에는 Windows, Linux 또는 macOS x64 빌드가 필요합니다"
+  "Updater.Status.Unsupported": "자동 업데이트에는 Windows, Linux 또는 macOS x64 빌드가 필요합니다",
+  "Overlay.Session": "현재 세션",
+  "Overlay.LastTwoWeeks": "최근 2주",
+  "Overlay.Exit": "종료",
+  "Overlay.Hint.Select": "선택",
+  "Overlay.Hint.Close": "닫기",
+  "Overlay.Hint.Toggle": "오버레이"
 }

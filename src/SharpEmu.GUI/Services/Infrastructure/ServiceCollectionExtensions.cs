@@ -39,6 +39,9 @@ internal static class ServiceCollectionExtensions
         // Gamepad: polls DualSense/XInput and raises navigation intents.
         services.AddSingleton<Abstractions.IGamepadInputService, GamepadInputService>();
 
+        // Play history: rolling session totals used by the in-game overlay.
+        services.AddSingleton<Abstractions.IGameActivityService, GameActivityService>();
+
         // ViewModels. MainViewModel is the shell that composes the others, so it
         // must be a singleton the window and any sub-view resolve consistently.
         services.AddSingleton<ViewModels.MainViewModel>();
@@ -46,6 +49,7 @@ internal static class ServiceCollectionExtensions
         services.AddTransient<ViewModels.OptionsViewModel>();
         services.AddSingleton<ViewModels.ConsoleViewModel>();
         services.AddSingleton<ViewModels.SessionViewModel>();
+        services.AddSingleton<ViewModels.GameOverlayViewModel>();
         // PerGameSettingsViewModel is constructed ad-hoc with title-specific
         // arguments when a dialog opens, so it is not registered here.
 

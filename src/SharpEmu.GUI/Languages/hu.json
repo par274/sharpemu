@@ -190,5 +190,11 @@
   "Updater.Status.Timeout": "A frissítés-ellenőrzés 10 másodperc után túllépte az időkorlátot",
   "Updater.Status.Failed": "Nem sikerült frissítéseket keresni",
   "Updater.Status.ChecksumFailed": "A letöltött frissítés nem ment át az SHA-256-ellenőrzésen",
-  "Updater.Status.Unsupported": "Az automatikus frissítéshez Windows, Linux vagy macOS x64 build szükséges"
+  "Updater.Status.Unsupported": "Az automatikus frissítéshez Windows, Linux vagy macOS x64 build szükséges",
+  "Overlay.Session": "Jelenlegi munkamenet",
+  "Overlay.LastTwoWeeks": "Elmúlt két hét",
+  "Overlay.Exit": "Kilépés",
+  "Overlay.Hint.Select": "Kiválasztás",
+  "Overlay.Hint.Close": "Bezárás",
+  "Overlay.Hint.Toggle": "Átfedés"
 }

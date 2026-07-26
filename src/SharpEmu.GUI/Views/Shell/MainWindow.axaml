@@ -12,7 +12,6 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
         xmlns:navigationControls="using:SharpEmu.GUI.Controls.Navigation"
         xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings"
         xmlns:viewModels="using:SharpEmu.GUI.ViewModels"
-        xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
         x:Class="SharpEmu.GUI.MainWindow"
         x:DataType="viewModels:MainViewModel"
@@ -1534,6 +1533,19 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
       <TextBlock x:Name="StatusText" />
     </Grid>
 
+    <!-- A NativeControlHost always renders above Avalonia content. In a
+         windowed session GameView leaves this strip uncovered so the
+         frameless window still has a reliable native-window drag target. -->
+    <Border x:Name="GameWindowDragRegion"
+            Grid.RowSpan="3"
+            ZIndex="999"
+            Height="32"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Top"
+            Background="Black"
+            IsVisible="False"
+            PointerPressed="OnTitleBarPointerPressed" />
+
     <!-- Portable resize hit targets for the frameless desktop window. -->
     <Border Tag="North"
               Grid.RowSpan="3"
@@ -1611,71 +1623,6 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
               Background="#01000000"
               Cursor="BottomRightCorner"
               PointerPressed="OnResizeHandlePointerPressed" />
-
-    <primitives:Popup x:Name="SessionBarPopup"
-                      IsOpen="False"
-                      PlacementTarget="{Binding #GameView}"
-                      Placement="Bottom"
-                      VerticalOffset="-66"
-                      Topmost="True"
-                      ShouldUseOverlayLayer="False"
-                      TakesFocusFromNativeControl="False"
-                      IsLightDismissEnabled="False">
-      <Border Background="#F5202020"
-              Width="598"
-              Height="58"
-              CornerRadius="16"
-              Padding="14,8"
-              BoxShadow="0 10 34 0 #55000000">
-        <Grid ColumnDefinitions="*,Auto">
-          <StackPanel Spacing="3" VerticalAlignment="Center">
-            <StackPanel Orientation="Horizontal" Spacing="8">
-              <TextBlock x:Name="SessionGameTitle"
-                         Text="GAME RUNNING"
-                         FontSize="13"
-                         FontWeight="SemiBold"
-                         MaxWidth="240"
-                         TextTrimming="CharacterEllipsis"
-                         VerticalAlignment="Center" />
-              <Border Classes="badge running" VerticalAlignment="Center">
-                <TextBlock Text="RUNNING"
-                           FontSize="9"
-                           FontWeight="Bold"
-                           LetterSpacing="1"
-                           Foreground="{StaticResource SuccessBrush}" />
-              </Border>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Spacing="7">
-              <Border x:Name="SessionF11Badge" Classes="badge key">
-                <TextBlock Text="F11"
-                           FontSize="9"
-                           FontWeight="Bold"
-                           Foreground="{StaticResource InfoBrush}" />
-              </Border>
-              <TextBlock x:Name="SessionHintText"
-                         Text="Fullscreen"
-                         FontSize="11"
-                         Foreground="{StaticResource MutedBrush}"
-                         VerticalAlignment="Center" />
-            </StackPanel>
-          </StackPanel>
-          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-            <Button x:Name="SessionConsoleButton" Classes="ghost">
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Classes="materialSymbol" Text="terminal" />
-                <TextBlock x:Name="SessionConsoleButtonLabel" Text="Console" VerticalAlignment="Center" />
-              </StackPanel>
-            </Button>
-            <Button x:Name="SessionStopButton" Classes="danger" IsEnabled="False">
-              <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBlock Classes="materialSymbol" Text="stop" />
-                <TextBlock x:Name="SessionStopButtonLabel" Text="Stop" VerticalAlignment="Center" />
-              </StackPanel>
-            </Button>
-          </StackPanel>
-        </Grid>
-      </Border>
-    </primitives:Popup>
 
   </Grid>
 </Window>

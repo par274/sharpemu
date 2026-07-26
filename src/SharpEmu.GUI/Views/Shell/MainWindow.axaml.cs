@@ -24,6 +24,7 @@ using SharpEmu.Logging;
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
 using System.Net.Http.Headers;
@@ -43,6 +44,8 @@ public partial class MainWindow : Window
     // handlers are kept here only until their corresponding view is extracted.
     private const int LaunchIndicatorExitMilliseconds = 220;
     private const int LaunchBlackoutEnterMilliseconds = 360;
+    private const double GameWindowDragHeight = 32;
+    private const double GameWindowResizeInset = 6;
 
     private static readonly IBrush DefaultLineBrush = new SolidColorBrush(Color.Parse("#C7CFDE"));
     private static readonly IBrush DimLineBrush = new SolidColorBrush(Color.Parse("#6B7488"));
@@ -68,6 +71,7 @@ public partial class MainWindow : Window
     private GuiSettings _settings = GuiSettings.Load();
     private GameSurfaceHost? _gameSurfaceHost;
     private ConsoleWindow? _consoleWindow;
+    private readonly GameOverlayWindow _gameOverlay;
     private GuiConsoleMirror? _consoleMirror;
     private readonly SndPreviewPlayer _sndPreview = new();
     private string? _emulatorExePath;
@@ -77,6 +81,7 @@ public partial class MainWindow : Window
     private bool _awaitingFirstFrame;
     private bool _isGameSurfaceTransitioning;
     private int _launchPresentationGeneration;
+    private bool _overlayBoundsSyncQueued;
     private int _autoScrollTicks;
     private Updater.UpdateInfo? _availableUpdate;
     private string _updateStatusKey = "Updater.Status.Ready";
@@ -116,6 +121,7 @@ public partial class MainWindow : Window
     private readonly Services.Abstractions.IEmulatorService _emulatorService;
     private readonly Services.Abstractions.ILogService _logService;
     private readonly Services.Abstractions.IGameLibraryService _libraryService;
+    private readonly Services.Abstractions.IGameActivityService _gameActivity;
     private readonly ViewModels.SessionViewModel _session;
     private readonly Services.Abstractions.IGamepadInputService _gamepad;
 
@@ -142,7 +148,20 @@ public partial class MainWindow : Window
         _emulatorService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IEmulatorService>();
         _logService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.ILogService>();
         _libraryService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGameLibraryService>();
+        _gameActivity = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGameActivityService>();
         _gamepad = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGamepadInputService>();
+        _gameOverlay = new GameOverlayWindow(
+            GuiLauncher.Services.GetRequiredService<ViewModels.GameOverlayViewModel>());
+        _gameOverlay.ConsoleRequested += () =>
+        {
+            _gameOverlay.HideOverlay();
+            ShowConsoleWindow();
+        };
+        _gameOverlay.ExitRequested += async () =>
+        {
+            await _gameOverlay.HideOverlayAsync(activateOwner: false);
+            StopEmulator();
+        };
         _logService.SetEmulatorExePath(_emulatorService.EmulatorExePath);
 
         // Forward emulator process events to the window's UI reactions.
@@ -160,6 +179,8 @@ public partial class MainWindow : Window
         _gamepad.MoveHorizontal += delta => Dispatcher.UIThread.Post(() => HandleGamepadHorizontal(delta));
         _gamepad.MoveVertical += direction => Dispatcher.UIThread.Post(() => HandleGamepadVertical(direction));
         _gamepad.Activate += () => Dispatcher.UIThread.Post(HandleGamepadActivate);
+        _gamepad.Cancel += () => Dispatcher.UIThread.Post(() => _gameOverlay.HideOverlay());
+        _gamepad.ToggleOverlay += () => Dispatcher.UIThread.Post(ToggleGameOverlay);
         _main.PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(ViewModels.MainViewModel.ActivePage))
@@ -198,13 +219,9 @@ public partial class MainWindow : Window
 
         Closed += (_, _) => _emulatorService.Stop();
 
-        // Native popups float above every window on the desktop; they must
-        // follow the launcher into the background or a minimized state.
-        Activated += (_, _) => UpdateSessionBarVisibility();
-        Deactivated += (_, _) =>
-        {
-            SessionBarPopup.IsOpen = false;
-        };
+        PositionChanged += (_, _) => QueueGameOverlayBoundsSync();
+        Resized += (_, _) => QueueGameOverlayBoundsSync();
+        GameView.LayoutUpdated += (_, _) => QueueGameOverlayBoundsSync();
 
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
         GameList.SelectionChanged += (_, _) =>
@@ -281,8 +298,6 @@ public partial class MainWindow : Window
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
         LaunchButton.Click += (_, _) => LaunchSelected();
         ClearLogButton.Click += (_, _) => _logService.Clear();
-        SessionStopButton.Click += (_, _) => StopEmulator();
-        SessionConsoleButton.Click += (_, _) => ShowConsoleWindow();
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
         ConsoleToggle.Click += (_, _) => OpenSelectedGameSettings();
@@ -577,7 +592,11 @@ public partial class MainWindow : Window
         // intents; the window only feeds it the current UI context. Intents
         // are marshalled to the UI thread via the event subscriptions set up
         // in the constructor.
-        _gamepad.Poll(IsActive, _isRunning || _isStopping, _main.ActivePageIndex);
+        _gamepad.Poll(
+            IsActive || _gameOverlay.IsActive,
+            _isRunning || _isStopping,
+            _gameOverlay.IsOverlayVisible,
+            _main.ActivePageIndex);
     }
 
     private void MoveSelection(int delta)
@@ -596,6 +615,12 @@ public partial class MainWindow : Window
 
     private void HandleGamepadHorizontal(int direction)
     {
+        if (_gameOverlay.IsOverlayVisible)
+        {
+            _gameOverlay.MoveFocus(direction);
+            return;
+        }
+
         if (_main.ActivePage == Navigation.ShellPage.Library)
         {
             MoveSelection(direction);
@@ -625,6 +650,12 @@ public partial class MainWindow : Window
 
     private void HandleGamepadVertical(int direction)
     {
+        if (_gameOverlay.IsOverlayVisible)
+        {
+            _gameOverlay.MoveFocus(direction);
+            return;
+        }
+
         if (_main.ActivePage == Navigation.ShellPage.Library)
         {
             MoveSelection(direction * TilesPerRow());
@@ -649,6 +680,12 @@ public partial class MainWindow : Window
 
     private void HandleGamepadActivate()
     {
+        if (_gameOverlay.IsOverlayVisible)
+        {
+            _gameOverlay.ActivateFocused();
+            return;
+        }
+
         if (_main.ActivePage == Navigation.ShellPage.Library)
         {
             LaunchSelected();
@@ -934,8 +971,6 @@ public partial class MainWindow : Window
 
         LaunchButtonLabel.Text = loc.Get("Launch.Launch");
         LaunchLoadingLabel.Text = loc.Get("Launch.Loading");
-        SessionConsoleButtonLabel.Text = loc.Get("Launch.Console");
-        SessionStopButtonLabel.Text = loc.Get("Launch.Stop");
 
         GithubLabel.Text = loc.Get("About.Github.Label");
         GithubDesc.Text = loc.Get("About.Github.Desc");
@@ -1013,6 +1048,15 @@ public partial class MainWindow : Window
 
     private void OnKeyDown(object sender, KeyEventArgs args)
     {
+        if (_isRunning &&
+            args.Key == Key.Tab &&
+            args.KeyModifiers.HasFlag(KeyModifiers.Shift))
+        {
+            ToggleGameOverlay();
+            args.Handled = true;
+            return;
+        }
+
         args.Handled = true;
         switch (args.Key)
         {
@@ -1027,6 +1071,15 @@ public partial class MainWindow : Window
 
     private void OnPreviewKeyDown(object? sender, KeyEventArgs args)
     {
+        if (_isRunning &&
+            args.Key == Key.Tab &&
+            args.KeyModifiers.HasFlag(KeyModifiers.Shift))
+        {
+            ToggleGameOverlay();
+            args.Handled = true;
+            return;
+        }
+
         if (_isGameSettingsOpen && args.Key == Key.Escape)
         {
             CloseGameSettings();
@@ -1062,6 +1115,8 @@ public partial class MainWindow : Window
 
     private void OnWindowFullScreen(object sender, RoutedEventArgs args)
     {
+        _gameOverlay.HideOverlay(activateOwner: false);
+
         if (WindowState == WindowState.FullScreen)
         {
             // Leaving F11 should restore a monitor-sized window with the
@@ -1077,8 +1132,9 @@ public partial class MainWindow : Window
                 Grid.SetRowSpan(MainContent, 2);
                 MainContent.Margin = new Thickness(0);
                 ContentToolbar.IsVisible = !_isRunning;
+                UpdateGameWindowFrame();
                 QueueGameSurfaceResize();
-                UpdateSessionBarVisibility();
+                QueueGameOverlayBoundsSync();
             }
         }
         else
@@ -1100,8 +1156,9 @@ public partial class MainWindow : Window
                 Grid.SetRowSpan(MainContent, 3);
                 MainContent.Margin = new Thickness(0);
                 ContentToolbar.IsVisible = false;
+                UpdateGameWindowFrame();
                 QueueGameSurfaceResize();
-                UpdateSessionBarVisibility();
+                QueueGameOverlayBoundsSync();
             }
         }
     }
@@ -1115,11 +1172,13 @@ public partial class MainWindow : Window
 
     private void OnWindowClosing()
     {
+        _session.OnApplicationClosing();
         _settings.Save();
         _consoleFlushTimer.Stop();
         _gamepadTimer.Stop();
         _sndPreview.Stop();
         _discord?.Dispose();
+        _gameOverlay.Close();
         _consoleWindow?.Close();
         _emulatorService.Stop();
         _consoleMirror?.Dispose();
@@ -1939,6 +1998,7 @@ public partial class MainWindow : Window
             SelectedCoverPanel.DataContext = game;
             SelectedBadgesRow.DataContext = game;
             SelectedBadgesRow.IsVisible = true;
+            UpdateLastPlayedValues(game);
         }
         else
         {
@@ -1952,7 +2012,51 @@ public partial class MainWindow : Window
             SelectedCoverPanel.DataContext = null;
             SelectedBadgesRow.DataContext = null;
             SelectedBadgesRow.IsVisible = false;
+            UpdateLastPlayedValues(null);
         }
+    }
+
+    private void UpdateLastPlayedValues(GameEntry? game)
+    {
+        var text = Localization.Instance.Get("Library.Stat.NotPlayed");
+        if (game is not null)
+        {
+            var gameKey = game.TitleId ?? game.Name;
+            if (_gameActivity.GetLastPlayedAt(gameKey) is { } lastPlayedAt)
+            {
+                text = lastPlayedAt
+                    .ToLocalTime()
+                    .ToString("g", CurrentLocalizationCulture());
+            }
+        }
+
+        LastPlayedValue.Text = text;
+        GameOptionsLastPlayedValue.Text = text;
+    }
+
+    private static CultureInfo CurrentLocalizationCulture()
+    {
+        var cultureName = Localization.Instance.CurrentCode.ToLowerInvariant() switch
+        {
+            "ar" => "ar-SA",
+            "br" => "pt-BR",
+            "de" => "de-DE",
+            "dk" => "da-DK",
+            "en" => "en-GB",
+            "es" => "es-ES",
+            "fr" => "fr-FR",
+            "hu" => "hu-HU",
+            "it" => "it-IT",
+            "ja" => "ja-JP",
+            "ko" => "ko-KR",
+            "nl" => "nl-NL",
+            "pt" => "pt-PT",
+            "ru" => "ru-RU",
+            "tr" => "tr-TR",
+            _ => CultureInfo.CurrentCulture.Name,
+        };
+
+        return CultureInfo.GetCultureInfo(cultureName);
     }
 
     /// <summary>
@@ -2012,10 +2116,20 @@ public partial class MainWindow : Window
             if (WindowState == WindowState.Minimized)
             {
                 _sndPreview.Pause();
+                _gameOverlay.HideOverlay(activateOwner: false);
             }
             else
             {
                 _sndPreview.Resume();
+            }
+
+            // Re-evaluate after the new window state has completed one render
+            // pass so the owned overlay follows the actual native GameView,
+            // including when the launcher crosses monitor boundaries.
+            if (GameView is not null)
+            {
+                UpdateGameWindowFrame();
+                QueueGameOverlayBoundsSync();
             }
         }
     }
@@ -2113,11 +2227,25 @@ public partial class MainWindow : Window
     {
         if (GameList.SelectedItem is GameEntry game)
         {
-            Launch(game.Path, game.Name, game.TitleId);
+            Launch(
+                game.Path,
+                game.Name,
+                game.TitleId,
+                game.VersionText,
+                game.Cover,
+                game.PlaceholderBrush,
+                game.Initials);
         }
     }
 
-    private void Launch(string ebootPath, string displayName, string? titleId = null)
+    private void Launch(
+        string ebootPath,
+        string displayName,
+        string? titleId = null,
+        string? version = null,
+        Bitmap? poster = null,
+        IBrush? placeholderBrush = null,
+        string? initials = null)
     {
         if (_isRunning)
         {
@@ -2144,10 +2272,15 @@ public partial class MainWindow : Window
 
         _isRunning = true;
         _runningGameName = displayName;
-        SessionGameTitle.Text = displayName;
         _runningGameTitleId = resolvedTitleId;
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        _session.OnLaunchPrepared(displayName, resolvedTitleId);
+        _session.OnLaunchPrepared(
+            displayName,
+            resolvedTitleId,
+            version,
+            poster,
+            placeholderBrush ?? Brushes.Transparent,
+            initials ?? "?");
         StatusText.Text = Localization.Instance.Format("Launch.Running", displayName);
         StatusBarRight.Text = Localization.Instance.Format("Status.Running", displayName);
         BeginLaunchPresentation();
@@ -2181,22 +2314,20 @@ public partial class MainWindow : Window
         // already cancelled.
         if (_emulatorService.CancelPendingLaunch())
         {
+            _session.OnLaunchCancelled();
             OnEmulatorExited(0);
             return;
         }
 
         _isStopping = true;
         _session.OnStopRequested();
-        SessionStopButton.IsEnabled = false;
-        SessionHintText.Text = Localization.Instance.Get("Launch.Stopping");
-        SessionF11Badge.IsVisible = false;
+        _gameOverlay.HideOverlay(activateOwner: false);
         _emulatorService.Stop();
         _runningGameName = null;
         _runningGameTitleId = null;
         StatusText.Text = Localization.Instance.Get("Launch.Stopping");
         StatusBarRight.Text = Localization.Instance.Get("Status.Stopping");
         UpdateDiscordPresence();
-        UpdateSessionBarVisibility();
         ReturnToLibraryWhileStopping();
     }
 
@@ -2240,6 +2371,7 @@ public partial class MainWindow : Window
         StatusBarRight.Text = Localization.Instance.Get("Status.Idle");
         _runningGameName = null;
         _runningGameTitleId = null;
+        UpdateLastPlayedValues(GameList.SelectedItem as GameEntry);
         UpdateRunButtons();
         UpdateDiscordPresence();
     }
@@ -2315,7 +2447,7 @@ public partial class MainWindow : Window
         }
 
         MainContent.Margin = new Thickness(0);
-        RestoreGameViewToFull();
+        UpdateGameWindowFrame();
         GameView.Background = Brushes.Black;
         GameView.IsHitTestVisible = true;
         PagesHost.IsVisible = false;
@@ -2338,7 +2470,7 @@ public partial class MainWindow : Window
         _isGameSurfaceTransitioning = false;
         // Keep a black frame behind the native child. On Stop/exit the child
         // disappears first, then this bridge fades out to the launcher.
-        UpdateSessionBarVisibility();
+        QueueGameOverlayBoundsSync();
     }
 
     private async Task WaitForAnimationFramesAsync(int frameCount)
@@ -2416,9 +2548,30 @@ public partial class MainWindow : Window
         GameView.Margin = new Thickness(-20000, 0, 20000, 0);
     }
 
-    private void RestoreGameViewToFull()
+    /// <summary>
+    /// Keeps a small part of the frameless parent window outside the native
+    /// child surface while a session is windowed. NativeControlHost children
+    /// sit above Avalonia and would otherwise swallow both the title drag
+    /// target and every resize handle. Fullscreen deliberately removes all
+    /// insets so the presentation surface still covers the monitor.
+    /// </summary>
+    private void UpdateGameWindowFrame()
     {
-        GameView.Margin = new Thickness(0);
+        var useWindowFrame =
+            _isRunning &&
+            !_isStopping &&
+            GameView.IsVisible &&
+            !_gameFullscreen &&
+            WindowState is not WindowState.FullScreen and not WindowState.Minimized;
+
+        GameWindowDragRegion.IsVisible = useWindowFrame;
+        GameView.Margin = useWindowFrame
+            ? new Thickness(
+                GameWindowResizeInset,
+                GameWindowDragHeight,
+                GameWindowResizeInset,
+                GameWindowResizeInset)
+            : new Thickness(0);
     }
 
     private void ShowGameView()
@@ -2426,14 +2579,13 @@ public partial class MainWindow : Window
         _isStopping = false;
         _awaitingFirstFrame = true;
         var host = EnsureGameSurfaceHost();
+        GameWindowDragRegion.IsVisible = false;
         ParkGameViewOffscreen();
         GameView.IsVisible = true;
         GameView.Background = Brushes.Transparent;
         GameView.IsHitTestVisible = false;
         host.SetPresentationVisible(false);
-        SessionHintText.Text = "Fullscreen";
-        SessionF11Badge.IsVisible = true;
-        UpdateSessionBarVisibility();
+        QueueGameOverlayBoundsSync();
     }
 
     private void HideGameView()
@@ -2448,7 +2600,8 @@ public partial class MainWindow : Window
         _awaitingFirstFrame = false;
         GameView.IsVisible = false;
         GameView.IsHitTestVisible = true;
-        SessionBarPopup.IsOpen = false;
+        GameWindowDragRegion.IsVisible = false;
+        _gameOverlay.HideOverlay(activateOwner: false);
         MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
         PagesHost.IsVisible = true;
@@ -2530,7 +2683,8 @@ public partial class MainWindow : Window
         ParkGameViewOffscreen();
         GameView.Background = Brushes.Transparent;
         GameView.IsHitTestVisible = false;
-        SessionBarPopup.IsOpen = false;
+        GameWindowDragRegion.IsVisible = false;
+        _gameOverlay.HideOverlay(activateOwner: false);
         MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
         PagesHost.IsVisible = true;
@@ -2545,13 +2699,40 @@ public partial class MainWindow : Window
     private void UpdateRunButtons()
     {
         LaunchButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
-        SessionStopButton.IsEnabled = _isRunning && !_isStopping;
     }
 
-    private void UpdateSessionBarVisibility()
+    private void ToggleGameOverlay()
     {
-        SessionBarPopup.IsOpen = _isRunning && !_isStopping && !_awaitingFirstFrame && GameView.IsVisible &&
-            !_gameFullscreen && WindowState != WindowState.FullScreen;
+        if (!_isRunning ||
+            _isStopping ||
+            _awaitingFirstFrame ||
+            !GameView.IsVisible ||
+            WindowState == WindowState.Minimized)
+        {
+            return;
+        }
+
+        _gameOverlay.Toggle(this, GameView);
+    }
+
+    private void QueueGameOverlayBoundsSync()
+    {
+        if (!_gameOverlay.IsOverlayVisible || _overlayBoundsSyncQueued)
+        {
+            return;
+        }
+
+        _overlayBoundsSyncQueued = true;
+        Dispatcher.UIThread.Post(
+            () => RequestAnimationFrame(_ =>
+            {
+                _overlayBoundsSyncQueued = false;
+                if (_gameOverlay.IsOverlayVisible)
+                {
+                    _gameOverlay.SyncTo(GameView);
+                }
+            }),
+            DispatcherPriority.Render);
     }
 
     // ---- Console ----

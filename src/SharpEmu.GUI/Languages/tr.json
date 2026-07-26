@@ -190,5 +190,11 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Topluluğa katılın, destek alın ve geliştirmeyi takip edin",
   "About.GithubButton": "GitHub'da katkıda bulun!",
-  "About.DiscordButton": "Discord'umuza katıl!"
+  "About.DiscordButton": "Discord'umuza katıl!",
+  "Overlay.Session": "Mevcut oturum",
+  "Overlay.LastTwoWeeks": "Son iki hafta",
+  "Overlay.Exit": "Çıkış",
+  "Overlay.Hint.Select": "Seç",
+  "Overlay.Hint.Close": "Kapat",
+  "Overlay.Hint.Toggle": "Yer paylaşımı"
 }

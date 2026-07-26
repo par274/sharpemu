@@ -192,5 +192,11 @@
   "Updater.Status.Failed": "Не удалось проверить наличие обновлений",
   "Updater.Status.Unsupported": "Автоматическое обновление требует сборку Windows, Linux или macOS x64",
 
-  "Updater.Status.ChecksumFailed": "Скачанное обновление не прошло проверку SHA-256"
+  "Updater.Status.ChecksumFailed": "Скачанное обновление не прошло проверку SHA-256",
+  "Overlay.Session": "Текущая сессия",
+  "Overlay.LastTwoWeeks": "Последние две недели",
+  "Overlay.Exit": "Выйти",
+  "Overlay.Hint.Select": "Выбрать",
+  "Overlay.Hint.Close": "Закрыть",
+  "Overlay.Hint.Toggle": "Оверлей"
 }

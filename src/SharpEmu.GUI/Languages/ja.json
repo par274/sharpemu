@@ -189,5 +189,11 @@
   "Updater.Status.Timeout": "アップデートの確認が10秒でタイムアウトしました",
   "Updater.Status.Failed": "アップデートを確認できませんでした",
   "Updater.Status.ChecksumFailed": "ダウンロードしたアップデートはSHA-256検証に失敗しました",
-  "Updater.Status.Unsupported": "自動アップデートにはWindows、Linux、またはmacOSのx64ビルドが必要です"
+  "Updater.Status.Unsupported": "自動アップデートにはWindows、Linux、またはmacOSのx64ビルドが必要です",
+  "Overlay.Session": "現在のセッション",
+  "Overlay.LastTwoWeeks": "過去2週間",
+  "Overlay.Exit": "終了",
+  "Overlay.Hint.Select": "選択",
+  "Overlay.Hint.Close": "閉じる",
+  "Overlay.Hint.Toggle": "オーバーレイ"
 }
