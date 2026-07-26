@@ -4761,49 +4761,22 @@ public static partial class AgcExports
     /// CPU-authored surfaces once per flip. Surfaces only the GPU writes keep
     /// all-zero guest memory and are skipped, preserving their GPU content.
     /// </summary>
-    private static long _guestImageSyncTraceCount;
-
     private static void SyncCpuWrittenGuestImages(
         CpuContext ctx,
         ulong scopeAddress = 0,
         ulong scopeByteCount = ulong.MaxValue)
     {
+        // Uploads used to copy full planes here and SubmitGuestImageWrite on the
+        // AGC producer thread, which hit the payload guest-work caps and
+        // soft-locked titles (GTA). The presenter's render drain owns the
+        // read/upload/re-arm; this call is only a scoped wake.
+        _ = ctx;
         if (!SharpEmu.HLE.GuestImageWriteTracker.Enabled || scopeByteCount == 0)
         {
             return;
         }
 
-        foreach (var (address, width, height, byteCount) in GuestGpu.Current.GetGuestImageExtents())
-        {
-            if (scopeByteCount != ulong.MaxValue &&
-                !RangesOverlap(address, byteCount, scopeAddress, scopeByteCount))
-            {
-                continue;
-            }
-
-            if (!SharpEmu.HLE.GuestImageWriteTracker.ConsumeDirty(address))
-            {
-                continue;
-            }
-
-            if (byteCount == 0 || byteCount > MaxPresentedTextureBytes)
-            {
-                continue;
-            }
-
-            var pixels = new byte[byteCount];
-            if (ctx.Memory.TryRead(address, pixels))
-            {
-                GuestGpu.Current.SubmitGuestImageWrite(address, pixels);
-                if (Interlocked.Increment(ref _guestImageSyncTraceCount) <= 64)
-                {
-                    Console.Error.WriteLine(
-                        $"[SYNC] cpu-write addr=0x{address:X} {width}x{height}");
-                }
-            }
-
-            SharpEmu.HLE.GuestImageWriteTracker.Rearm(address);
-        }
+        GuestGpu.Current.RequestCpuWrittenGuestImageSync(scopeAddress, scopeByteCount);
     }
 
     private static long _dmaMirrorTraceCount;
@@ -9336,9 +9309,14 @@ public static partial class AgcExports
         // generation-stale when the guest CPU rewrites a CPU-backed image
         // (video planes, streamed font atlases), which routes this draw back
         // through the texel copy below so the refresh path re-uploads.
+        // Skip is only correct while GuestImageWriteTracker can bump the
+        // write generation. With the tracker off (Windows default), known
+        // stays true forever and CPU-updated planes (GTA guest Bink) would
+        // ship empty RgbaPixels after the first upload.
         if (!isStorage &&
             !wantsArrayUpload &&
             descriptor.Address != 0 &&
+            SharpEmu.HLE.GuestImageWriteTracker.Enabled &&
             GuestGpu.Current.IsGuestImageUploadKnown(
                 descriptor.Address,
                 descriptor.Format,
@@ -9453,21 +9431,21 @@ public static partial class AgcExports
         // the render thread evicts the stale cache entry before executing it
         // (skipping would leave the draw with no pixels and a fallback
         // texture for the frame — visible flicker on animated textures).
+        // Skip is only correct while GuestImageWriteTracker can report dirty
+        // pages. With the tracker off (Windows default), PeekDirty never
+        // fires and CPU-updated planes (GTA guest Bink) would stay black.
         var sampler = ToGuestSampler(samplerDescriptor);
         // Track the guest allocation before reading its texels so a CPU
         // rewrite landing after the copy still bumps the write generation.
         // The generation rides on the texture and is recorded by the
         // presenter after upload, where the upload-known skip compares it
         // against the tracker to force fresh texels for rewritten memory.
-        SharpEmu.HLE.GuestImageWriteTracker.Track(
-            descriptor.Address,
-            physicalSourceByteCount,
-            source: "agc.decoded-texture");
         var hasWriteGeneration =
             SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
                 descriptor.Address,
                 out var writeGeneration);
         if (!_textureCopySkipDisabled &&
+            SharpEmu.HLE.GuestImageWriteTracker.Enabled &&
             descriptor.Address != 0 &&
             !SharpEmu.HLE.GuestImageWriteTracker.PeekDirty(descriptor.Address) &&
             GuestGpu.Current.IsTextureContentCached(

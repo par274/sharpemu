@@ -239,6 +239,12 @@ internal interface IGuestGpuBackend
 
     void SubmitGuestImageWrite(ulong address, byte[] pixels);
 
+    /// <summary>
+    /// Asks the presenter to refresh CPU-dirty guest images on its render/present
+    /// drain. Must not enqueue retained plane copies on the producer path.
+    /// </summary>
+    void RequestCpuWrittenGuestImageSync(ulong scopeAddress = 0, ulong scopeByteCount = ulong.MaxValue);
+
     bool TryGetGuestImageExtent(ulong address, out uint width, out uint height, out ulong byteCount);
 
     IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents();

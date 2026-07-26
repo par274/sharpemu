@@ -162,6 +162,22 @@ internal static partial class MetalVideoPresenter
     public static void AttachGuestMemory(ICpuMemory memory) =>
         _guestMemory = memory;
 
+    private static int _cpuWrittenGuestImageSyncRequested;
+    private static long _guestImageCpuSyncTraceCount;
+
+    public static void RequestCpuWrittenGuestImageSync(
+        ulong scopeAddress = 0,
+        ulong scopeByteCount = ulong.MaxValue)
+    {
+        _ = scopeAddress;
+        if (scopeByteCount == 0 || !GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 1);
+    }
+
     public static long SubmitOrderedGuestAction(Action action, string debugName)
     {
         ArgumentNullException.ThrowIfNull(action);
@@ -599,7 +615,7 @@ internal static partial class MetalVideoPresenter
         var completedWork = 0;
         RecycleCompletedUploadPages();
         RecycleCompletedSnapshotResources();
-        EvictDirtyCachedDrawTextures();
+        DrainGuestImageCpuSync(device);
         try
         {
             while (completedWork < MaxGuestWorkPerRender)

@@ -1868,6 +1868,26 @@ internal static unsafe class VulkanVideoPresenter
     internal static void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
         _guestMemory = memory;
 
+    // Flip/acquire wakes: the render drain always scans dirty guest images;
+    // this flag only forces a full-scope pass after a Sync kick (and is the
+    // seam Agc uses instead of enqueueing plane copies on the producer path).
+    private static int _cpuWrittenGuestImageSyncRequested;
+    private static long _guestImageCpuSyncTraceCount;
+
+    internal static void RequestCpuWrittenGuestImageSync(
+        ulong scopeAddress = 0,
+        ulong scopeByteCount = ulong.MaxValue)
+    {
+        _ = scopeAddress;
+        if (scopeByteCount == 0 ||
+            !SharpEmu.HLE.GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 1);
+    }
+
     internal static bool IsTextureContentCached(in TextureContentIdentity identity) =>
         _cachedTextureIdentities.ContainsKey(identity);
 
@@ -5548,36 +5568,25 @@ internal static unsafe class VulkanVideoPresenter
             var status = _vk.GetFenceStatus(_device, fence);
             if (status == Result.NotReady)
             {
-                // macOS drains guest work on the Cocoa main thread — never block
-                // it on a GPU fence (defer + retry next Render). Windows/Linux
-                // use a dedicated render thread; polling NotReady then excluding
-                // the only logical queue ends the drain for the whole tick and
-                // soft-locks producers at the 512 OrderedGuestAction cap
-                // (North Yankton load).
+                // Never block the drain for seconds on ordered-action visibility.
+                // A multi-second WaitForFences here tanked Dead Cells (~0.4fps)
+                // and soft-locked GTA after intro once the GPU was busy. Sync
+                // item ceiling is high enough that deferring a tick is safe;
+                // take a short probe wait on dedicated render threads only.
                 if (OperatingSystem.IsMacOS())
                 {
                     return false;
                 }
 
+                const ulong orderedVisibilityProbeNs = 2_000_000UL; // 2ms
                 var waitResult = _vk.WaitForFences(
                     _device,
                     1,
                     &fence,
                     true,
-                    _guestFenceWaitTimeoutNs);
+                    orderedVisibilityProbeNs);
                 if (waitResult == Result.Timeout)
                 {
-                    if (_tracedFenceTimeouts.Add(
-                            $"ordered-visibility:{_activeGuestQueue.Name}:{target.DebugName}"))
-                    {
-                        Console.Error.WriteLine(
-                            $"[LOADER][WARN] vk.ordered_action_fence_timeout " +
-                            $"queue={_activeGuestQueue.Name} " +
-                            $"submission='{target.DebugName}' " +
-                            $"— GPU work not completing after " +
-                            $"{_guestFenceWaitTimeoutNs / 1_000_000}ms; deferring ordered action.");
-                    }
-
                     return false;
                 }
 
@@ -7844,6 +7853,19 @@ internal static unsafe class VulkanVideoPresenter
                     _pendingAliasImageDumps.Enqueue(guestImage);
                 }
 
+                // With the write tracker off, AGC ships real texels again but
+                // aliased guest images created as GPU RTs stay !IsCpuBacked, so
+                // fingerprint refresh never runs and CPU-updated planes (guest
+                // Bink) stay black. Promote only when this draw carried
+                // non-zero guest pixels — same outcome as the old per-draw path.
+                if (!guestImage.IsCpuBacked &&
+                    !SharpEmu.HLE.GuestImageWriteTracker.Enabled &&
+                    texture.RgbaPixels.Length > 0 &&
+                    texture.RgbaPixels.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
+                {
+                    guestImage.IsCpuBacked = true;
+                }
+
                 if (TryCreateCpuTextureRefreshResource(
                         texture,
                         guestImage,
@@ -8207,33 +8229,131 @@ internal static unsafe class VulkanVideoPresenter
                 resource.Cached = true;
                 _textureCache[key] = resource;
                 MarkTextureContentCached(key);
-                SharpEmu.HLE.GuestImageWriteTracker.Track(
-                    texture.Address,
-                    (ulong)(texture.TiledSource?.Length ?? texture.RgbaPixels.Length),
-                    CurrentGuestWorkSequenceForDiagnostics,
-                    "vulkan.texture-cache");
+                // Do not Track sampled textures here. Watch-only registration
+                // still poisoned NotifyManagedWrite when it shared the fault
+                // snapshot; protected RTs / CPU-backed images own dirtying.
             }
 
             return resource;
         }
 
-        private void EvictDirtyCachedTextures()
+        /// <summary>
+        /// Single dirty consumer per drain: re-upload CPU-written guest images
+        /// from guest memory, evict matching texture-cache entries, then
+        /// re-arm each address once. Must not enqueue <see cref="VulkanGuestImageWrite"/>.
+        /// </summary>
+        private void DrainGuestImageCpuSync()
         {
+            if (!SharpEmu.HLE.GuestImageWriteTracker.Enabled)
+            {
+                return;
+            }
+
+            _ = Interlocked.Exchange(ref _cpuWrittenGuestImageSyncRequested, 0);
+
+            HashSet<ulong>? dirtyAddresses = null;
+            List<(ulong Address, uint Width, uint Height, ulong ByteCount)>? extents = null;
+            lock (_gate)
+            {
+                if (_guestImageExtents.Count > 0)
+                {
+                    extents = new(_guestImageExtents.Count);
+                    foreach (var entry in _guestImageExtents)
+                    {
+                        extents.Add((
+                            entry.Key,
+                            entry.Value.Width,
+                            entry.Value.Height,
+                            entry.Value.ByteCount));
+                    }
+                }
+            }
+
+            var memory = _guestMemory;
+            if (extents is not null)
+            {
+                foreach (var (address, width, height, byteCount) in extents)
+                {
+                    if (!SharpEmu.HLE.GuestImageWriteTracker.ConsumeDirty(address))
+                    {
+                        continue;
+                    }
+
+                    (dirtyAddresses ??= []).Add(address);
+                    if (memory is null ||
+                        byteCount == 0 ||
+                        byteCount > 128UL * 1024UL * 1024UL ||
+                        !_guestImages.TryGetValue(address, out var target))
+                    {
+                        continue;
+                    }
+
+                    // GPU-only RTs often get Dirty via page-overlap. A full
+                    // plane read/upload per false dirty destroys Dead Cells FPS
+                    // and can stall GTA after intro. Probe 4 KiB first unless
+                    // the surface is already known CPU-backed.
+                    if (!target.IsCpuBacked)
+                    {
+                        var probeLen = (int)Math.Min(byteCount, 4096UL);
+                        var probe = new byte[probeLen];
+                        if (!memory.TryRead(address, probe) ||
+                            probe.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+                        {
+                            continue;
+                        }
+
+                        target.IsCpuBacked = true;
+                    }
+
+                    var pixels = new byte[byteCount];
+                    if (!memory.TryRead(address, pixels) ||
+                        pixels.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+                    {
+                        continue;
+                    }
+
+                    UploadGuestImageInitialData(target, pixels);
+                    if (Interlocked.Increment(ref _guestImageCpuSyncTraceCount) <= 64)
+                    {
+                        Console.Error.WriteLine(
+                            $"[SYNC] cpu-write-drain addr=0x{address:X} {width}x{height}");
+                    }
+                }
+            }
+
             if (_textureCache.Count == 0)
             {
+                if (dirtyAddresses is not null)
+                {
+                    foreach (var address in dirtyAddresses)
+                    {
+                        SharpEmu.HLE.GuestImageWriteTracker.Rearm(address);
+                    }
+                }
+
                 return;
             }
 
             List<TextureContentIdentity>? evicted = null;
             foreach (var entry in _textureCache)
             {
-                if (SharpEmu.HLE.GuestImageWriteTracker.ConsumeDirty(entry.Key.Address))
+                var address = entry.Key.Address;
+                if (dirtyAddresses is not null && dirtyAddresses.Contains(address))
                 {
+                    (evicted ??= []).Add(entry.Key);
+                    continue;
+                }
+
+                if (SharpEmu.HLE.GuestImageWriteTracker.ConsumeDirty(address))
+                {
+                    (dirtyAddresses ??= []).Add(address);
                     (evicted ??= []).Add(entry.Key);
                 }
             }
 
-            if (evicted is null && _textureCache.Count <= 2048)
+            if (evicted is null &&
+                dirtyAddresses is null &&
+                _textureCache.Count <= 2048)
             {
                 return;
             }
@@ -8244,7 +8364,7 @@ internal static unsafe class VulkanVideoPresenter
             // is flushed first so the retire timeline exactly covers every
             // recorded reference (nothing may guess which submission lands
             // next on the shared queue).
-            if (_batchOpen)
+            if (_batchOpen && (evicted is not null || _textureCache.Count > 2048))
             {
                 FlushBatchedGuestCommands();
             }
@@ -8259,16 +8379,24 @@ internal static unsafe class VulkanVideoPresenter
 
                 _textureCache.Clear();
                 ClearCachedTextureIdentities();
-                return;
+            }
+            else if (evicted is not null)
+            {
+                foreach (var key in evicted)
+                {
+                    if (_textureCache.Remove(key, out var resource))
+                    {
+                        UnmarkTextureContentCached(key);
+                        _deferredTextureDestroys.Enqueue((resource, retireTimeline));
+                    }
+                }
             }
 
-            foreach (var key in evicted!)
+            if (dirtyAddresses is not null)
             {
-                if (_textureCache.Remove(key, out var resource))
+                foreach (var address in dirtyAddresses)
                 {
-                    UnmarkTextureContentCached(key);
-                    _deferredTextureDestroys.Enqueue((resource, retireTimeline));
-                    SharpEmu.HLE.GuestImageWriteTracker.Rearm(key.Address);
+                    SharpEmu.HLE.GuestImageWriteTracker.Rearm(address);
                 }
             }
         }
@@ -8900,6 +9028,7 @@ internal static unsafe class VulkanVideoPresenter
                 _guestImages.Add(texture.Address, guestImage);
                 resource.OwnsStorage = false;
                 resource.GuestImage = guestImage;
+                TrackCpuBackedGuestImage(guestImage);
                 lock (_gate)
                 {
                     if (guestFormat != 0)
@@ -12832,15 +12961,7 @@ internal static unsafe class VulkanVideoPresenter
                             depth));
                 }
 
-                if (target.Width <= 1920 && target.Height <= 1080)
-                {
-                    SharpEmu.HLE.GuestImageWriteTracker.Track(
-                        target.Address,
-                        (ulong)target.Width * target.Height * depth *
-                            GetTextureBytesPerPixel(target.Format),
-                        CurrentGuestWorkSequenceForDiagnostics,
-                        "vulkan.render-target");
-                }
+                TrackCpuBackedGuestImage(retained);
 
                 if (_traceGuestImageEvents)
                 {
@@ -12991,15 +13112,7 @@ internal static unsafe class VulkanVideoPresenter
                         depth));
             }
 
-            if (target.Width <= 1920 && target.Height <= 1080)
-            {
-                SharpEmu.HLE.GuestImageWriteTracker.Track(
-                    target.Address,
-                    (ulong)target.Width * target.Height * depth *
-                        GetTextureBytesPerPixel(target.Format),
-                    CurrentGuestWorkSequenceForDiagnostics,
-                    "vulkan.render-target");
-            }
+            TrackCpuBackedGuestImage(resource);
 
             if (_traceGuestImageEvents)
             {
@@ -13009,6 +13122,30 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             return resource;
+        }
+
+        private void TrackCpuBackedGuestImage(GuestImageResource image)
+        {
+            // Arm ≤1080p guest images so native CPU stores fault. Drain skips
+            // false overlap dirties with a 4 KiB zero probe unless IsCpuBacked.
+            if (image.Width == 0 ||
+                image.Height == 0 ||
+                image.Width > 1920 ||
+                image.Height > 1080)
+            {
+                return;
+            }
+
+            var depth = Math.Max(image.Depth, 1u);
+            SharpEmu.HLE.GuestImageWriteTracker.Track(
+                image.Address,
+                GetVulkanImageByteCount(
+                    image.Format,
+                    image.Width,
+                    image.Height,
+                    depth),
+                CurrentGuestWorkSequenceForDiagnostics,
+                "vulkan.render-target");
         }
 
         private (RenderPass RenderPass, RenderPass InitialRenderPass, Framebuffer Framebuffer)
@@ -13872,7 +14009,7 @@ internal static unsafe class VulkanVideoPresenter
                 CollectCompletedGuestSubmissions(waitForOldest: false);
             }
 
-            EvictDirtyCachedTextures();
+            DrainGuestImageCpuSync();
             var completedWork = 0;
             HashSet<string>? deferredOrderedQueues = null;
             var workBudgetTicks = _renderWorkBudgetTicks;
