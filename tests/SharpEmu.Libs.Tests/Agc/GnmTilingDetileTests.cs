@@ -6,7 +6,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// TryDetile's exact-XOR fast path (PS5 swizzle modes 5/9/24/27) factors the
+// TryDetile's exact-XOR fast path (PS5 swizzle modes 1/5/9/24/27) factors the
 // AddrLib bit-interleave into independent per-column X and per-row Y terms so
 // the inner loop is one array load and one XOR instead of a 16-bit interleave.
 // These tests pin that the factored output stays byte-identical to the direct
@@ -84,6 +84,50 @@ public sealed class GnmTilingDetileTests
         }
     }
 
+    // Gen5 Standard256B (mode 1) uses the 8-bit AddrLib S equation, not the
+    // generic StandardSwizzle bit-interleave. Pin that TryDetile recovers a
+    // known linear fill placed with that equation.
+    private static readonly (uint XMask, uint YMask)[] Standard256_1Bpp =
+    [
+        (1u << 0, 0), (1u << 1, 0), (1u << 2, 0), (1u << 3, 0),
+        (0, 1u << 0), (0, 1u << 1), (0, 1u << 2), (0, 1u << 3),
+    ];
+
+    [Theory]
+    [InlineData(32, 32)]
+    [InlineData(64, 48)]
+    public void TryDetile_ExactXorMode1_MatchesReferenceAddressEquation(
+        int elementsWide,
+        int elementsHigh)
+    {
+        const uint swizzleMode = 1; // Standard256B
+        const int bytesPerElement = 1;
+        const int blockBytes = 256;
+        const int blockWidth = 16;
+        const int blockHeight = 16;
+        var blocksPerRow = (elementsWide + blockWidth - 1) / blockWidth;
+        var blocksPerColumn = (elementsHigh + blockHeight - 1) / blockHeight;
+
+        var tiled = new byte[blocksPerRow * blocksPerColumn * blockBytes];
+        for (var y = 0; y < elementsHigh; y++)
+        {
+            for (var x = 0; x < elementsWide; x++)
+            {
+                var blockIndex = (long)(y / blockHeight) * blocksPerRow + (x / blockWidth);
+                var sourceByte = (int)(blockIndex * blockBytes +
+                    ReferenceOffset((uint)x, (uint)y, Standard256_1Bpp));
+                tiled[sourceByte] = (byte)(y * elementsWide + x);
+            }
+        }
+
+        var linear = new byte[elementsWide * elementsHigh * bytesPerElement];
+        Assert.True(GnmTiling.TryDetile(tiled, linear, swizzleMode, elementsWide, elementsHigh, bytesPerElement));
+        for (var i = 0; i < elementsWide * elementsHigh; i++)
+        {
+            Assert.Equal((byte)i, linear[i]);
+        }
+    }
+
     // GetDetileParams must reproduce TryDetile bit-for-bit: the CPU fallback and
     // the GPU compute kernel both consume these params, so a detile driven purely
     // by DetileParams (the shared addressing formula the kernel runs) must equal
@@ -94,8 +138,8 @@ public sealed class GnmTilingDetileTests
     [InlineData(9u, 4, 300, 300)]  // 64 KiB standard (exact-XOR)
     [InlineData(24u, 4, 128, 256)] // 64 KiB RB+ Z_X (exact-XOR)
     [InlineData(5u, 4, 200, 120)]  // 4 KiB standard (exact-XOR)
+    [InlineData(1u, 4, 64, 64)]    // 256 B standard (exact-XOR)
     [InlineData(8u, 4, 128, 128)]  // 64 KiB Z (block-table path)
-    [InlineData(1u, 4, 64, 64)]    // 256 B standard (block-table path)
     public void GetDetileParams_ReproducesTryDetile(uint mode, int bpp, int w, int h)
     {
         var p = GnmTiling.GetDetileParams(mode, bpp, w, h);

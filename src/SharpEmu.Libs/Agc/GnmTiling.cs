@@ -12,7 +12,7 @@ internal enum DetileEquation
     /// <summary>Unsupported mode/format; caller must use the CPU path or raw upload.</summary>
     None,
 
-    /// <summary>Exact AddrLib XOR equation (RDNA2 modes 5/9/24/27): factored X/Y terms.</summary>
+    /// <summary>Exact AddrLib XOR equation (RDNA2 modes 1/5/9/24/27): factored X/Y terms.</summary>
     ExactXor,
 
     /// <summary>Other modes: a precomputed in-block Morton/standard element-offset table.</summary>
@@ -143,6 +143,18 @@ internal static unsafe class GnmTiling
         // 16 bytes/element (also 16-byte BC compressed blocks).
         [Zero, Zero, Zero, Zero, Y(0), Y(1), X(0), X(1),
          Y(2), X(2), Y(3), X(3), Y(4), X(4), Y(5), X(5)],
+    ];
+
+    // GFX10 256B_S: 8-bit micro-tile equation (low octet of the 4K_S pattern).
+    // The generic StandardSwizzle bit-interleave is a different layout and leaves
+    // a broken grid on Gen5 UI atlases that ship as Standard256B.
+    private static readonly AddressBit[][] Standard256 =
+    [
+        [X(0), X(1), X(2), X(3), Y(0), Y(1), Y(2), Y(3)],
+        [Zero, X(0), X(1), X(2), Y(0), Y(1), Y(2), X(3)],
+        [Zero, Zero, X(0), X(1), Y(0), Y(1), Y(2), X(2)],
+        [Zero, Zero, Zero, X(0), Y(0), Y(1), X(1), X(2)],
+        [Zero, Zero, Zero, Zero, Y(0), Y(1), X(0), X(1)],
     ];
 
     // GFX10 4K_S has a separate 12-bit micro-tile equation. It is not the
@@ -789,6 +801,7 @@ internal static unsafe class GnmTiling
 
         pattern = swizzleMode switch
         {
+            1 => Standard256[bytesPerElementLog2],
             5 => Standard4K[bytesPerElementLog2],
             9 => RbPlus64KStandard[bytesPerElementLog2],
             24 => RbPlus64KDepthX[bytesPerElementLog2],
