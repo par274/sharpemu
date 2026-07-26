@@ -9445,7 +9445,8 @@ internal static unsafe class VulkanVideoPresenter
                 size,
                 BufferUsageFlags.StorageBufferBit,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                out var memory);
+                out var memory,
+                preferredMemoryFlags: MemoryPropertyFlags.HostCachedBit);
             void* mapped;
             Check(_vk.MapMemory(_device, memory, 0, size, 0, &mapped), "vkMapMemory(guest buffer)");
             var shadow = new byte[checked((int)size)];
@@ -10254,7 +10255,8 @@ internal static unsafe class VulkanVideoPresenter
             ulong size,
             BufferUsageFlags usage,
             MemoryPropertyFlags memoryFlags,
-            out DeviceMemory memory)
+            out DeviceMemory memory,
+            MemoryPropertyFlags preferredMemoryFlags = 0)
         {
             var bufferInfo = new BufferCreateInfo
             {
@@ -10270,7 +10272,10 @@ internal static unsafe class VulkanVideoPresenter
             {
                 SType = StructureType.MemoryAllocateInfo,
                 AllocationSize = requirements.Size,
-                MemoryTypeIndex = FindMemoryType(requirements.MemoryTypeBits, memoryFlags),
+                MemoryTypeIndex = FindMemoryType(
+                    requirements.MemoryTypeBits,
+                    memoryFlags,
+                    preferredMemoryFlags),
             };
             Check(_vk.AllocateMemory(_device, &memoryInfo, null, out memory), "vkAllocateMemory");
             Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory");
@@ -10307,16 +10312,24 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
-        private uint FindMemoryType(uint typeBits, MemoryPropertyFlags requiredFlags)
+        private uint FindMemoryType(
+            uint typeBits,
+            MemoryPropertyFlags requiredFlags,
+            MemoryPropertyFlags preferredFlags = 0)
         {
             _vk.GetPhysicalDeviceMemoryProperties(_physicalDevice, out var properties);
             var memoryTypes = &properties.MemoryTypes.Element0;
-            for (uint index = 0; index < properties.MemoryTypeCount; index++)
+
+            for (var pass = preferredFlags != 0 ? 0 : 1; pass < 2; pass++)
             {
-                if ((typeBits & (1u << (int)index)) != 0 &&
-                    (memoryTypes[index].PropertyFlags & requiredFlags) == requiredFlags)
+                var wanted = pass == 0 ? requiredFlags | preferredFlags : requiredFlags;
+                for (uint index = 0; index < properties.MemoryTypeCount; index++)
                 {
-                    return index;
+                    if ((typeBits & (1u << (int)index)) != 0 &&
+                        (memoryTypes[index].PropertyFlags & wanted) == wanted)
+                    {
+                        return index;
+                    }
                 }
             }
 
