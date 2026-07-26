@@ -32,6 +32,13 @@ namespace SharpEmu.GUI;
 
 public partial class MainWindow : Window
 {
+    private enum UpdateActionState
+    {
+        Idle,
+        Checking,
+        Available,
+    }
+
     // Shell navigation is ViewModel-owned. Remaining feature-specific event
     // handlers are kept here only until their corresponding view is extracted.
     private const double LaunchBlurRadius = 12;
@@ -79,6 +86,7 @@ public partial class MainWindow : Window
     private Updater.UpdateInfo? _availableUpdate;
     private string _updateStatusKey = "Updater.Status.Ready";
     private object?[] _updateStatusArgs = [BuildInfo.CommitSha ?? "dev"];
+    private bool _isUpdateOperationRunning;
 
     // Discord Rich Presence state.
     private readonly long _launcherStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -909,7 +917,7 @@ public partial class MainWindow : Window
         LogToFileRow.Description = loc.Get("Options.LogToFile.Desc");
 
         LogFilePathRow.Label = loc.Get("Options.LogFilePath.Label");
-        SelectLogFilePathButton.Content = loc.Get("Options.LogFilePath.Select");
+        SelectLogFilePathButtonLabel.Text = loc.Get("Options.LogFilePath.Select");
         UpdateLogFilePathText();
 
         OverrideLogFileRow.Label = loc.Get("Options.OverrideLogFile.Label");
@@ -1199,13 +1207,19 @@ public partial class MainWindow : Window
 
     private async Task OnUpdateButtonAsync()
     {
+        if (_isUpdateOperationRunning)
+        {
+            return;
+        }
+
         if (_availableUpdate is null)
         {
             await CheckForUpdatesAsync();
             return;
         }
 
-        UpdateButton.IsEnabled = false;
+        _isUpdateOperationRunning = true;
+        UpdateButton.IsHitTestVisible = false;
         try
         {
             var progress = new Progress<int>(value =>
@@ -1217,19 +1231,29 @@ public partial class MainWindow : Window
         catch (InvalidDataException)
         {
             SetUpdateStatus("Updater.Status.ChecksumFailed");
-            UpdateButton.IsEnabled = true;
         }
         catch
         {
             SetUpdateStatus("Updater.Status.Failed");
-            UpdateButton.IsEnabled = true;
+        }
+        finally
+        {
+            _isUpdateOperationRunning = false;
+            UpdateButton.IsHitTestVisible = true;
         }
     }
 
     private async Task CheckForUpdatesAsync()
     {
+        if (_isUpdateOperationRunning)
+        {
+            return;
+        }
+
+        _isUpdateOperationRunning = true;
         _availableUpdate = null;
-        UpdateButton.IsEnabled = false;
+        UpdateButton.IsHitTestVisible = false;
+        SetUpdateActionState(UpdateActionState.Checking);
         SetUpdateStatus("Updater.Status.Checking");
         try
         {
@@ -1252,7 +1276,10 @@ public partial class MainWindow : Window
         }
         finally
         {
-            UpdateButton.IsEnabled = true;
+            _isUpdateOperationRunning = false;
+            UpdateButton.IsHitTestVisible = true;
+            SetUpdateActionState(
+                _availableUpdate is null ? UpdateActionState.Idle : UpdateActionState.Available);
             RefreshUpdateText();
         }
     }
@@ -1266,9 +1293,18 @@ public partial class MainWindow : Window
 
     private void RefreshUpdateText()
     {
-        UpdateStatusText.Text = Localization.Instance.Format(_updateStatusKey, _updateStatusArgs);
-        UpdateButton.Content = Localization.Instance.Get(
-            _availableUpdate is null ? "Updater.Check" : "Updater.DownloadRestart");
+        var loc = Localization.Instance;
+        UpdateStatusText.Text = loc.Format(_updateStatusKey, _updateStatusArgs);
+        UpdateCheckLabel.Text = loc.Get("Updater.Check");
+        UpdateCheckingLabel.Text = loc.Get("Updater.Checking");
+        UpdateInstallLabel.Text = loc.Get("Updater.Install");
+    }
+
+    private void SetUpdateActionState(UpdateActionState state)
+    {
+        UpdateButton.Classes.Set("idle", state == UpdateActionState.Idle);
+        UpdateButton.Classes.Set("checking", state == UpdateActionState.Checking);
+        UpdateButton.Classes.Set("available", state == UpdateActionState.Available);
     }
 
     private void SetEnvironmentToggle(string name, bool enabled)
@@ -1719,7 +1755,7 @@ public partial class MainWindow : Window
             EnvLogIoToggle,
             EnvLogNpToggle,
         ],
-        5 => [LatestCommitButton, UpdateButton, GithubButton, DiscordButton],
+        5 => [UpdateButton, LatestCommitButton, GithubButton, DiscordButton],
         _ => [],
     };
 

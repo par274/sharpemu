@@ -618,13 +618,13 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                           Classes="optionRow"
                                           Label="Import trace limit"
                                           Description="Trace the first N imports per module.">
-                          <NumericUpDown x:Name="GameTraceBox"
-                                         Classes="optionValue"
-                                         Width="170"
-                                         Minimum="0"
-                                         Maximum="4096"
-                                         Increment="16"
-                                         FormatString="0" />
+                          <settingsControls:SplitNumericUpDown x:Name="GameTraceBox"
+                                                              Classes="optionValue"
+                                                              Width="170"
+                                                              Minimum="0"
+                                                              Maximum="4096"
+                                                              Increment="16"
+                                                              FormatString="0" />
                         </local:SettingRow>
 
                         <local:SettingRow x:Name="GameLogToFileRow"
@@ -847,14 +847,14 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Classes="optionRow"
                                               Label="Import trace limit"
                                               Description="Trace the first N imports per module (0 = off).">
-                              <NumericUpDown x:Name="TraceImportsBox"
-                                             Classes="optionValue"
-                                             Width="190"
-                                             Minimum="0"
-                                             Maximum="4096"
-                                             Increment="16"
-                                             Value="0"
-                                             FormatString="0" />
+                              <settingsControls:SplitNumericUpDown x:Name="TraceImportsBox"
+                                                                  Classes="optionValue"
+                                                                  Width="190"
+                                                                  Minimum="0"
+                                                                  Maximum="4096"
+                                                                  Increment="16"
+                                                                  Value="0"
+                                                                  FormatString="0" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="LogToFileRow"
                                               Classes="optionRow"
@@ -868,8 +868,17 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Label="Log file path"
                                               Description="No custom path">
                               <Button x:Name="SelectLogFilePathButton"
-                                      Classes="optionAction"
-                                      Content="Select…" />
+                                      Classes="optionAction">
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="8"
+                                            VerticalAlignment="Center">
+                                  <TextBlock Classes="materialSymbol compact"
+                                             Text="description" />
+                                  <TextBlock x:Name="SelectLogFilePathButtonLabel"
+                                             Text="Select…"
+                                             VerticalAlignment="Center" />
+                                </StackPanel>
+                              </Button>
                             </local:SettingRow>
                             <local:SettingRow x:Name="OverrideLogFileRow"
                                               Classes="optionRow"
@@ -1048,6 +1057,62 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                               <Grid ColumnDefinitions="*,Auto"
                                     ColumnSpacing="18">
                                 <StackPanel VerticalAlignment="Center">
+                                  <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="14" FontWeight="Medium" />
+                                  <TextBlock x:Name="UpdateStatusText"
+                                             Text="Current build: dev"
+                                             FontSize="11"
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button x:Name="UpdateButton"
+                                        Grid.Column="1"
+                                        Classes="optionAction updateAction idle">
+                                  <Grid>
+                                    <Grid Classes="updateActionState updateActionIdle">
+                                      <TextBlock x:Name="UpdateCheckLabel"
+                                                 Classes="updateActionVisual"
+                                                 Text="Check for updates"
+                                                 VerticalAlignment="Center" />
+                                    </Grid>
+                                    <Grid Classes="updateActionState updateActionChecking">
+                                      <StackPanel Orientation="Horizontal"
+                                                  Spacing="8"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center">
+                                        <TextBlock Classes="materialSymbol compact updateActionVisual updateSpinner"
+                                                   Text="progress_activity">
+                                          <TextBlock.RenderTransform>
+                                            <RotateTransform Angle="0" />
+                                          </TextBlock.RenderTransform>
+                                        </TextBlock>
+                                        <TextBlock x:Name="UpdateCheckingLabel"
+                                                   Classes="updateActionVisual"
+                                                   Text="Checking…"
+                                                   VerticalAlignment="Center" />
+                                      </StackPanel>
+                                    </Grid>
+                                    <Grid Classes="updateActionState updateActionAvailable">
+                                      <StackPanel Orientation="Horizontal"
+                                                  Spacing="8"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center">
+                                        <TextBlock Classes="materialSymbol compact updateActionVisual"
+                                                   Text="system_update_alt" />
+                                        <TextBlock x:Name="UpdateInstallLabel"
+                                                   Classes="updateActionVisual"
+                                                   Text="Install update"
+                                                   VerticalAlignment="Center" />
+                                      </StackPanel>
+                                    </Grid>
+                                  </Grid>
+                                </Button>
+                              </Grid>
+                            </Border>
+                            <Border Classes="optionsInfoRow">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
+                                <StackPanel VerticalAlignment="Center">
                                   <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="14" FontWeight="Medium" />
                                   <TextBlock x:Name="LatestCommitDescription"
                                              Text="Latest commit on the main branch"
@@ -1074,24 +1139,6 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                                Text="fork_right" />
                                   </StackPanel>
                                 </Button>
-                              </Grid>
-                            </Border>
-                            <Border Classes="optionsInfoRow">
-                              <Grid ColumnDefinitions="*,Auto"
-                                    ColumnSpacing="18">
-                                <StackPanel VerticalAlignment="Center">
-                                  <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="14" FontWeight="Medium" />
-                                  <TextBlock x:Name="UpdateStatusText"
-                                             Text="Current build: dev"
-                                             FontSize="11"
-                                             FontWeight="Normal"
-                                             Foreground="{StaticResource SettingsDescriptionBrush}"
-                                             TextWrapping="Wrap" />
-                                </StackPanel>
-                                <Button x:Name="UpdateButton"
-                                        Grid.Column="1"
-                                        Classes="optionAction"
-                                        Content="Check for updates" />
                               </Grid>
                             </Border>
                             <Border Classes="optionsInfoRow">

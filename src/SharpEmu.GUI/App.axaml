@@ -6,6 +6,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:SharpEmu.GUI"
+             xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings"
              xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
              x:Class="SharpEmu.GUI.App"
              RequestedThemeVariant="Dark">
@@ -152,6 +153,194 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Style Selector="^:disabled /template/ Border#PART_Track">
         <Setter Property="Opacity" Value="0.45" />
       </Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="SplitNumericRepeatButtonTheme" TargetType="RepeatButton">
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#B8FFFFFF" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <ContentPresenter x:Name="PART_ContentPresenter"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="Transparent"
+                            BorderThickness="0"
+                            Content="{TemplateBinding Content}"
+                            HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}">
+            <ContentPresenter.Transitions>
+              <Transitions>
+                <BrushTransition Property="Background"
+                                 Duration="0:0:0.18"
+                                 Easing="CubicEaseOut" />
+                <BrushTransition Property="Foreground"
+                                 Duration="0:0:0.18"
+                                 Easing="CubicEaseOut" />
+              </Transitions>
+            </ContentPresenter.Transitions>
+          </ContentPresenter>
+        </ControlTemplate>
+      </Setter>
+      <Style Selector="^:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="#16FFFFFF" />
+        <Setter Property="Foreground" Value="White" />
+      </Style>
+      <Style Selector="^:pressed /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="#22FFFFFF" />
+        <Setter Property="Foreground" Value="White" />
+      </Style>
+      <Style Selector="^:disabled /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Opacity" Value="0.45" />
+      </Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="SplitNumericSpinnerTheme" TargetType="ButtonSpinner">
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#E8FFFFFF" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="VerticalContentAlignment" Value="Stretch" />
+      <Setter Property="Focusable" Value="True" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Grid ColumnDefinitions="*,52"
+                ColumnSpacing="8">
+            <Border x:Name="PART_ValueSurface"
+                    MinHeight="{TemplateBinding MinHeight}"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="Transparent"
+                    BorderThickness="0"
+                    CornerRadius="14"
+                    ClipToBounds="True">
+              <ContentPresenter x:Name="PART_ContentPresenter"
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                Padding="{TemplateBinding Padding}"
+                                HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+              <Border.Transitions>
+                <Transitions>
+                  <BrushTransition Property="Background"
+                                   Duration="0:0:0.18"
+                                   Easing="CubicEaseOut" />
+                </Transitions>
+              </Border.Transitions>
+            </Border>
+
+            <Border x:Name="PART_SpinnerSurface"
+                    Grid.Column="1"
+                    MinHeight="{TemplateBinding MinHeight}"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="Transparent"
+                    BorderThickness="0"
+                    CornerRadius="14"
+                    ClipToBounds="True"
+                    IsVisible="{TemplateBinding ShowButtonSpinner}">
+              <Grid RowDefinitions="*,*">
+                <RepeatButton x:Name="PART_IncreaseButton"
+                              Grid.Row="0"
+                              Theme="{StaticResource SplitNumericRepeatButtonTheme}"
+                              IsTabStop="{TemplateBinding IsTabStop}">
+                  <TextBlock Classes="materialSymbol compact"
+                             Text="keyboard_arrow_up" />
+                </RepeatButton>
+                <RepeatButton x:Name="PART_DecreaseButton"
+                              Grid.Row="1"
+                              Theme="{StaticResource SplitNumericRepeatButtonTheme}"
+                              IsTabStop="{TemplateBinding IsTabStop}">
+                  <TextBlock Classes="materialSymbol compact"
+                             Text="keyboard_arrow_down" />
+                </RepeatButton>
+                <Border Height="1"
+                        Grid.RowSpan="2"
+                        Background="{StaticResource GameOptionsMenuBrush}"
+                        VerticalAlignment="Center"
+                        IsHitTestVisible="False" />
+              </Grid>
+              <Border.Transitions>
+                <Transitions>
+                  <BrushTransition Property="Background"
+                                   Duration="0:0:0.18"
+                                   Easing="CubicEaseOut" />
+                </Transitions>
+              </Border.Transitions>
+            </Border>
+          </Grid>
+        </ControlTemplate>
+      </Setter>
+      <Style Selector="^:pointerover /template/ Border#PART_ValueSurface,
+                       ^:focus-within /template/ Border#PART_ValueSurface">
+        <Setter Property="Background" Value="#20FFFFFF" />
+      </Style>
+      <Style Selector="^:pointerover /template/ Border#PART_SpinnerSurface,
+                       ^:focus-within /template/ Border#PART_SpinnerSurface">
+        <Setter Property="Background" Value="#20FFFFFF" />
+      </Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="{x:Type settingsControls:SplitNumericUpDown}"
+                  TargetType="settingsControls:SplitNumericUpDown">
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#E8FFFFFF" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="TextAlignment" Value="Left" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <DataValidationErrors>
+            <ButtonSpinner x:Name="PART_Spinner"
+                           Theme="{StaticResource SplitNumericSpinnerTheme}"
+                           Background="{TemplateBinding Background}"
+                           BorderBrush="Transparent"
+                           BorderThickness="0"
+                           IsTabStop="False"
+                           Padding="0"
+                           MinWidth="0"
+                           HorizontalContentAlignment="Stretch"
+                           VerticalContentAlignment="Stretch"
+                           AllowSpin="{TemplateBinding AllowSpin}"
+                           ShowButtonSpinner="{TemplateBinding ShowButtonSpinner}">
+              <TextBox x:Name="PART_TextBox"
+                       Classes="splitNumericTextBox"
+                       MinHeight="{TemplateBinding MinHeight}"
+                       MinWidth="0"
+                       Margin="0"
+                       Padding="17,0"
+                       Background="Transparent"
+                       BorderBrush="Transparent"
+                       BorderThickness="0"
+                       Foreground="{TemplateBinding Foreground}"
+                       PlaceholderText="{TemplateBinding PlaceholderText}"
+                       PlaceholderForeground="{TemplateBinding PlaceholderForeground}"
+                       IsReadOnly="{TemplateBinding IsReadOnly}"
+                       VerticalContentAlignment="Center"
+                       HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                       Text="{TemplateBinding Text}"
+                       TextAlignment="{TemplateBinding TextAlignment}"
+                       AcceptsReturn="False"
+                       TextWrapping="NoWrap"
+                       InnerLeftContent="{Binding InnerLeftContent, RelativeSource={RelativeSource TemplatedParent}}"
+                       InnerRightContent="{Binding InnerRightContent, RelativeSource={RelativeSource TemplatedParent}}" />
+            </ButtonSpinner>
+          </DataValidationErrors>
+        </ControlTemplate>
+      </Setter>
     </ControlTheme>
   </Application.Resources>
 
@@ -576,11 +765,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Background" Value="#0DFFFFFF" />
       <Setter Property="BorderBrush" Value="#22FFFFFF" />
     </Style>
-    <Style Selector="ComboBox.optionValue, NumericUpDown.optionValue">
+    <Style Selector="ComboBox.optionValue, settingsControls|SplitNumericUpDown.optionValue">
       <Setter Property="Width" Value="190" />
       <Setter Property="MinHeight" Value="44" />
       <Setter Property="CornerRadius" Value="14" />
       <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <!-- The outer split-input surface owns hover/focus animation. Keep the
+         Fluent TextBox template transparent in every interaction state so it
+         cannot flash its opaque pointer-over background above that surface. -->
+    <Style Selector="TextBox.splitNumericTextBox /template/ Border#PART_BorderElement,
+                     TextBox.splitNumericTextBox:pointerover /template/ Border#PART_BorderElement,
+                     TextBox.splitNumericTextBox:focus /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderBrush" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
     </Style>
@@ -597,15 +796,94 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="CornerRadius" Value="12" />
       <Setter Property="Background" Value="#12FFFFFF" />
-      <Setter Property="BorderBrush" Value="#1FFFFFFF" />
-      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Foreground" Value="White" />
       <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+    </Style>
+    <Style Selector="Button.optionAction /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
     </Style>
     <Style Selector="Button.optionAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
                      Button.optionAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="#20FFFFFF" />
-      <Setter Property="BorderBrush" Value="#42FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+    </Style>
+    <Style Selector="Grid.updateActionState">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="RenderTransform" Value="translateY(5px)" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.14"
+                            Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.18"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.updateAction.idle Grid.updateActionIdle,
+                     Button.updateAction.checking Grid.updateActionChecking,
+                     Button.updateAction.available Grid.updateActionAvailable">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+    </Style>
+    <Style Selector="TextBlock.updateActionVisual">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="TextAlignment" Value="Center" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.updateAction.available">
+      <Setter Property="Foreground" Value="#111111" />
+    </Style>
+    <Style Selector="Button.updateAction.available /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="White" />
+      <Setter Property="Foreground" Value="#111111" />
+    </Style>
+    <Style Selector="Button.updateAction.available:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.updateAction.available:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#F1F1F1" />
+      <Setter Property="Foreground" Value="#111111" />
+    </Style>
+    <Style Selector="Button.updateAction.available TextBlock.updateActionVisual">
+      <Setter Property="Foreground" Value="#111111" />
+    </Style>
+    <Style Selector="TextBlock.updateSpinner">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    </Style>
+    <Style Selector="Button.updateAction.checking TextBlock.updateSpinner">
+      <Style.Animations>
+        <Animation Duration="0:0:0.85"
+                   IterationCount="Infinite"
+                   Easing="LinearEasing">
+          <KeyFrame Cue="0%">
+            <Setter Property="RotateTransform.Angle" Value="0" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="RotateTransform.Angle" Value="360" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
     </Style>
     <Style Selector="Button.aboutLinkAction">
       <Setter Property="MinHeight" Value="44" />
