@@ -457,6 +457,7 @@ internal static unsafe class VulkanVideoPresenter
             : 100_000_000UL;
     private static readonly HashSet<string> _tracedFenceTimeouts = new();
     private static long _guestQueueBackpressureTraceCount;
+    private static long _orderedActionFenceWaitTraceCount;
     private static long _guestQueueStarvationTraceCount;
     private static long _guestQueueStarvationLastQueued = -1;
     // Diagnostic: skip every compute dispatch (mistranslated compute shaders
@@ -2572,12 +2573,24 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
+    private static bool IsPrioritySyncGuestWork(object work) => work is
+        VulkanOrderedGuestAction or
+        VulkanOrderedGuestFlip or
+        VulkanOrderedGuestFlipWait;
+
     private static bool TryTakeGuestWork(
         out PendingGuestWork work,
-        HashSet<string>? excludedQueues = null)
+        HashSet<string>? excludedQueues = null,
+        bool preferSyncWork = false)
     {
         lock (_gate)
         {
+            if (preferSyncWork &&
+                TryTakePreferredSyncGuestWorkLocked(out work, excludedQueues))
+            {
+                return true;
+            }
+
             var queuesToProbe = _pendingGuestQueueSchedule.Count;
             while (_pendingGuestQueueSchedule.Count > 0 && queuesToProbe > 0)
             {
@@ -2634,6 +2647,67 @@ internal static unsafe class VulkanVideoPresenter
             work = default;
             return false;
         }
+    }
+
+    private static bool TryTakePreferredSyncGuestWorkLocked(
+        out PendingGuestWork work,
+        HashSet<string>? excludedQueues)
+    {
+        // When the backlog is elevated, prefer draining ordered sync / flip
+        // markers ahead of heavy compute/draw heads on other logical queues.
+        // Within a queue, FIFO still holds — we only choose among ready heads.
+        for (var index = 0; index < _pendingGuestQueueSchedule.Count; index++)
+        {
+            var queueName = _pendingGuestQueueSchedule[index];
+            if (excludedQueues?.Contains(queueName) == true)
+            {
+                continue;
+            }
+
+            if (!_pendingGuestWorkByQueue.TryGetValue(queueName, out var queue) ||
+                queue.First is not { } first)
+            {
+                continue;
+            }
+
+            work = first.Value;
+            if (!IsPrioritySyncGuestWork(work.Work) ||
+                !IsGuestWorkCompletedLocked(work.RequiredSequence))
+            {
+                continue;
+            }
+
+            queue.RemoveFirst();
+            _pendingGuestWorkCount--;
+            if (queue.Count == 0)
+            {
+                _pendingGuestWorkByQueue.Remove(queueName);
+                _pendingGuestQueueSchedule.RemoveAt(index);
+                if (_pendingGuestQueueCursor > index)
+                {
+                    _pendingGuestQueueCursor--;
+                }
+                else if (_pendingGuestQueueCursor >= _pendingGuestQueueSchedule.Count)
+                {
+                    _pendingGuestQueueCursor = 0;
+                }
+            }
+            else if (_pendingGuestQueueSchedule.Count > 0)
+            {
+                _pendingGuestQueueCursor =
+                    (Math.Min(index, _pendingGuestQueueSchedule.Count - 1) + 1) %
+                    _pendingGuestQueueSchedule.Count;
+            }
+            else
+            {
+                _pendingGuestQueueCursor = 0;
+            }
+
+            return true;
+        }
+
+        work = default;
+        return false;
     }
 
     private static bool RequeueGuestWorkFront(in PendingGuestWork work)
@@ -5398,7 +5472,68 @@ internal static unsafe class VulkanVideoPresenter
             var status = _vk.GetFenceStatus(_device, fence);
             if (status == Result.NotReady)
             {
-                return false;
+                // macOS drains guest work on the Cocoa main thread — never block
+                // it on a GPU fence (defer + retry next Render). Windows/Linux
+                // use a dedicated render thread; polling NotReady then excluding
+                // the only logical queue ends the drain for the whole tick and
+                // soft-locks producers at the 512 OrderedGuestAction cap
+                // (North Yankton load).
+                if (OperatingSystem.IsMacOS())
+                {
+                    return false;
+                }
+
+                var waitResult = _vk.WaitForFences(
+                    _device,
+                    1,
+                    &fence,
+                    true,
+                    _guestFenceWaitTimeoutNs);
+                if (waitResult == Result.Timeout)
+                {
+                    if (_tracedFenceTimeouts.Add(
+                            $"ordered-visibility:{_activeGuestQueue.Name}:{target.DebugName}"))
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][WARN] vk.ordered_action_fence_timeout " +
+                            $"queue={_activeGuestQueue.Name} " +
+                            $"submission='{target.DebugName}' " +
+                            $"— GPU work not completing after " +
+                            $"{_guestFenceWaitTimeoutNs / 1_000_000}ms; deferring ordered action.");
+                    }
+
+                    return false;
+                }
+
+                if (waitResult == Result.ErrorDeviceLost)
+                {
+                    _deviceLost = true;
+                    return true;
+                }
+
+                Check(
+                    waitResult,
+                    $"vkWaitForFences(queue visibility: {_activeGuestQueue.Name})");
+                var waitTrace = Interlocked.Increment(ref _orderedActionFenceWaitTraceCount);
+                if (waitTrace <= 8 || (waitTrace & (waitTrace - 1)) == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] vk.ordered_action_fence_wait " +
+                        $"count={waitTrace} queue={_activeGuestQueue.Name} " +
+                        $"submission='{target.DebugName}'");
+                }
+
+                CollectCompletedGuestSubmissions(waitForOldest: false);
+                if (_traceVulkanShaderEnabled)
+                {
+                    TraceVulkanShader(
+                        $"vk.queue_visibility queue={_activeGuestQueue.Name} " +
+                        $"submission={_activeGuestQueue.SubmissionId} " +
+                        $"target_timeline={targetTimeline} " +
+                        $"completed_timeline={_completedTimeline} waited=1");
+                }
+
+                return true;
             }
 
             if (status == Result.ErrorDeviceLost)
@@ -13669,6 +13804,11 @@ internal static unsafe class VulkanVideoPresenter
                 ? System.Diagnostics.Stopwatch.GetTimestamp() + workBudgetTicks
                 : long.MaxValue;
             var workLimit = _maxGuestWorkPerRender;
+            // Prefer ordered sync / flip heads while the queue is elevated so
+            // label wakeups are not starved behind fat compute/draw items on
+            // sibling logical queues.
+            var preferSyncWork =
+                _pendingGuestWorkCount >= (_maxPendingGuestWorkItems / 2);
             while (completedWork < workLimit)
             {
                 // Never block the macOS main thread waiting for in-flight GPU
@@ -13683,7 +13823,10 @@ internal static unsafe class VulkanVideoPresenter
                     break;
                 }
 
-                if (!TryTakeGuestWork(out var pendingGuestWork, deferredOrderedQueues))
+                if (!TryTakeGuestWork(
+                        out var pendingGuestWork,
+                        deferredOrderedQueues,
+                        preferSyncWork))
                 {
                     break;
                 }
@@ -13780,8 +13923,21 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (deferGuestWork)
                 {
-                    deferredOrderedQueues ??= new HashSet<string>(StringComparer.Ordinal);
-                    deferredOrderedQueues.Add(pendingGuestWork.Queue.Name);
+                    // macOS: non-blocking defer — exclude this logical queue for
+                    // the rest of the tick so sibling queues can still progress.
+                    // Windows/Linux already blocked in WaitForFences; excluding
+                    // the only busy queue ends the drain immediately and leaves
+                    // OrderedGuestAction stacked. Leave the item at the front and
+                    // end this Render; the next tick retries after GPU progress.
+                    if (OperatingSystem.IsMacOS())
+                    {
+                        deferredOrderedQueues ??= new HashSet<string>(StringComparer.Ordinal);
+                        deferredOrderedQueues.Add(pendingGuestWork.Queue.Name);
+                    }
+                    else
+                    {
+                        break;
+                    }
                 }
 
                 if (workStart != 0)
