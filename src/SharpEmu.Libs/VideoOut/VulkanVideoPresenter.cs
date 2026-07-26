@@ -460,6 +460,18 @@ internal static unsafe class VulkanVideoPresenter
     private static long _orderedActionFenceWaitTraceCount;
     private static long _guestQueueStarvationTraceCount;
     private static long _guestQueueStarvationLastQueued = -1;
+    // Zero-payload sync (ordered actions / flip markers) may exceed the
+    // payload item cap without hard-blocking producers; byte budget still
+    // bounds fat compute/draw snapshots. Override with
+    // SHARPEMU_PENDING_GUEST_SYNC_ITEMS (default 8x payload item cap).
+    private static readonly int _maxPendingGuestSyncItems =
+        int.TryParse(
+            Environment.GetEnvironmentVariable("SHARPEMU_PENDING_GUEST_SYNC_ITEMS"),
+            out var pendingGuestSyncItems) && pendingGuestSyncItems > 0
+            ? pendingGuestSyncItems
+            : Math.Max(_maxPendingGuestWorkItems * 8, 4096);
+    private static int _pendingPayloadGuestWorkCount;
+    private static int _pendingSyncGuestWorkCount;
     // Diagnostic: skip every compute dispatch (mistranslated compute shaders
     // run long / GPU-hang and starve the present). Isolates whether the
     // geometry+composite path renders on its own.
@@ -845,6 +857,8 @@ internal static unsafe class VulkanVideoPresenter
         _pendingGuestQueueSchedule.Clear();
         _pendingGuestQueueCursor = 0;
         _pendingGuestWorkCount = 0;
+        _pendingPayloadGuestWorkCount = 0;
+        _pendingSyncGuestWorkCount = 0;
         _pendingGuestWorkBytes = 0;
         _pendingGuestImagePresentations.Clear();
         _guestImageWorkSequences.Clear();
@@ -2399,6 +2413,7 @@ internal static unsafe class VulkanVideoPresenter
     private static long EnqueueGuestWorkLocked(object work)
     {
         var payloadBytes = GetGuestWorkPayloadBytes(work);
+        var isPayloadWork = IsPayloadBearingGuestWork(work);
         var backpressureLogged = false;
         // Work executed by the render-thread consumer can enqueue an ordered
         // same-queue completion marker. Blocking that consumer on the normal
@@ -2406,10 +2421,19 @@ internal static unsafe class VulkanVideoPresenter
         // can drain an item to make room for the marker. The consumer has
         // already removed the current item, and each immediate follow-up is
         // bounded by that item, so admitting it cannot cause unbounded growth.
+        //
+        // Item cap applies to payload-bearing compute/draw/image writes. Zero-
+        // payload ordered sync / flip markers use a higher sync ceiling so
+        // ACQUIRE/label traffic cannot hard-block behind the 512 draw cap.
+        // Byte budget remains the RAM safety valve for fat dispatches
+        // (SHARPEMU_PENDING_GUEST_WORK_MB).
         while (!_enqueueAsImmediateQueueFollowup &&
                !_closed &&
                _thread is not null &&
-               (_pendingGuestWorkCount >= _maxPendingGuestWorkItems ||
+               ((isPayloadWork &&
+                 _pendingPayloadGuestWorkCount >= _maxPendingGuestWorkItems) ||
+                (!isPayloadWork &&
+                 _pendingSyncGuestWorkCount >= _maxPendingGuestSyncItems) ||
                 // Always admit one item when no payload is outstanding, even
                 // when that single item exceeds the configured budget. This
                 // avoids an impossible wait while still bounding the normal
@@ -2429,6 +2453,8 @@ internal static unsafe class VulkanVideoPresenter
                         $"[LOADER][TRACE] vk.guest_queue_backpressure " +
                         $"count={traceCount} " +
                         $"queued={_pendingGuestWorkCount} " +
+                        $"payload={_pendingPayloadGuestWorkCount}/{_maxPendingGuestWorkItems} " +
+                        $"sync={_pendingSyncGuestWorkCount}/{_maxPendingGuestSyncItems} " +
                         $"logical_queues={_pendingGuestWorkByQueue.Count} " +
                         $"retained_mb={_pendingGuestWorkBytes / (1024 * 1024)} " +
                         $"incoming_mb={payloadBytes / (1024 * 1024)} " +
@@ -2440,7 +2466,10 @@ internal static unsafe class VulkanVideoPresenter
 
                 // Sustained full-queue backpressure is the North Yankton soft-lock
                 // signature: ordered actions pile up and producers block for seconds.
-                if (_pendingGuestWorkCount >= _maxPendingGuestWorkItems &&
+                var atItemCap = isPayloadWork
+                    ? _pendingPayloadGuestWorkCount >= _maxPendingGuestWorkItems
+                    : _pendingSyncGuestWorkCount >= _maxPendingGuestSyncItems;
+                if (atItemCap &&
                     _pendingGuestWorkCount != _guestQueueStarvationLastQueued)
                 {
                     _guestQueueStarvationLastQueued = _pendingGuestWorkCount;
@@ -2452,6 +2481,8 @@ internal static unsafe class VulkanVideoPresenter
                             $"[LOADER][WARN] vk.guest_queue_starvation " +
                             $"count={starvationCount} " +
                             $"queued={_pendingGuestWorkCount} " +
+                            $"payload={_pendingPayloadGuestWorkCount}/{_maxPendingGuestWorkItems} " +
+                            $"sync={_pendingSyncGuestWorkCount}/{_maxPendingGuestSyncItems} " +
                             $"work={work.GetType().Name}" +
                             FormatGuestQueueBacklogLocked());
                     }
@@ -2508,11 +2539,86 @@ internal static unsafe class VulkanVideoPresenter
         }
         RecordGuestImageWritersLocked(work, sequence);
         _pendingGuestWorkCount++;
+        if (isPayloadWork)
+        {
+            _pendingPayloadGuestWorkCount++;
+        }
+        else
+        {
+            _pendingSyncGuestWorkCount++;
+        }
+
         _pendingGuestWorkBytes = SaturatingAdd(_pendingGuestWorkBytes, payloadBytes);
         // Wake the embedded render loop parked in WaitForRenderWork; without a
         // pulse it only notices new work when its timed wait expires.
         System.Threading.Monitor.PulseAll(_gate);
         return sequence;
+    }
+
+    private static bool IsPayloadBearingGuestWork(object work) => work is
+        VulkanComputeGuestDispatch or
+        VulkanOffscreenGuestDraw or
+        VulkanGuestImageWrite or
+        VulkanOffscreenColorClear;
+
+    private static bool IsPrioritySyncGuestWork(object work) => work is
+        VulkanOrderedGuestAction or
+        VulkanOrderedGuestFlip or
+        VulkanOrderedGuestFlipWait;
+
+    private static string FormatGuestQueueBacklogLocked()
+    {
+        var typeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var orderedNameCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var queue in _pendingGuestWorkByQueue.Values)
+        {
+            for (var node = queue.First; node is not null; node = node.Next)
+            {
+                var work = node.Value.Work;
+                var typeName = work.GetType().Name;
+                typeCounts[typeName] = typeCounts.GetValueOrDefault(typeName) + 1;
+                if (work is VulkanOrderedGuestAction ordered)
+                {
+                    var prefix = GetOrderedActionDebugPrefix(ordered.DebugName);
+                    orderedNameCounts[prefix] = orderedNameCounts.GetValueOrDefault(prefix) + 1;
+                }
+            }
+        }
+
+        static string TopEntries(Dictionary<string, int> counts, int limit)
+        {
+            if (counts.Count == 0)
+            {
+                return "-";
+            }
+
+            return string.Join(
+                ',',
+                counts
+                    .OrderByDescending(static entry => entry.Value)
+                    .Take(limit)
+                    .Select(static entry => $"{entry.Key}:{entry.Value}"));
+        }
+
+        return $" types=[{TopEntries(typeCounts, 6)}]" +
+               $" ordered=[{TopEntries(orderedNameCounts, 8)}]";
+    }
+
+    private static string GetOrderedActionDebugPrefix(string debugName)
+    {
+        if (string.IsNullOrEmpty(debugName))
+        {
+            return "(empty)";
+        }
+
+        var span = debugName.AsSpan();
+        var cut = span.IndexOfAny(' ', '=');
+        if (cut <= 0)
+        {
+            cut = Math.Min(span.Length, 48);
+        }
+
+        return debugName[..cut];
     }
 
     private static long GetGuestWorkDependencyLocked(object work)
@@ -2573,11 +2679,6 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
-    private static bool IsPrioritySyncGuestWork(object work) => work is
-        VulkanOrderedGuestAction or
-        VulkanOrderedGuestFlip or
-        VulkanOrderedGuestFlipWait;
-
     private static bool TryTakeGuestWork(
         out PendingGuestWork work,
         HashSet<string>? excludedQueues = null,
@@ -2628,19 +2729,7 @@ internal static unsafe class VulkanVideoPresenter
                     continue;
                 }
 
-                queue.RemoveFirst();
-                _pendingGuestWorkCount--;
-                if (queue.Count == 0)
-                {
-                    _pendingGuestWorkByQueue.Remove(queueName);
-                    _pendingGuestQueueSchedule.RemoveAt(_pendingGuestQueueCursor);
-                }
-                else
-                {
-                    _pendingGuestQueueCursor =
-                        (_pendingGuestQueueCursor + 1) % _pendingGuestQueueSchedule.Count;
-                }
-
+                RemoveTakenGuestWorkLocked(queueName, queue, advanceScheduleCursor: true);
                 return true;
             }
 
@@ -2677,22 +2766,8 @@ internal static unsafe class VulkanVideoPresenter
                 continue;
             }
 
-            queue.RemoveFirst();
-            _pendingGuestWorkCount--;
-            if (queue.Count == 0)
-            {
-                _pendingGuestWorkByQueue.Remove(queueName);
-                _pendingGuestQueueSchedule.RemoveAt(index);
-                if (_pendingGuestQueueCursor > index)
-                {
-                    _pendingGuestQueueCursor--;
-                }
-                else if (_pendingGuestQueueCursor >= _pendingGuestQueueSchedule.Count)
-                {
-                    _pendingGuestQueueCursor = 0;
-                }
-            }
-            else if (_pendingGuestQueueSchedule.Count > 0)
+            RemoveTakenGuestWorkLocked(queueName, queue, advanceScheduleCursor: false);
+            if (_pendingGuestQueueSchedule.Count > 0)
             {
                 _pendingGuestQueueCursor =
                     (Math.Min(index, _pendingGuestQueueSchedule.Count - 1) + 1) %
@@ -2708,6 +2783,47 @@ internal static unsafe class VulkanVideoPresenter
 
         work = default;
         return false;
+    }
+
+    private static void RemoveTakenGuestWorkLocked(
+        string queueName,
+        LinkedList<PendingGuestWork> queue,
+        bool advanceScheduleCursor)
+    {
+        var work = queue.First!.Value;
+        queue.RemoveFirst();
+        _pendingGuestWorkCount--;
+        if (IsPayloadBearingGuestWork(work.Work))
+        {
+            _pendingPayloadGuestWorkCount = Math.Max(0, _pendingPayloadGuestWorkCount - 1);
+        }
+        else
+        {
+            _pendingSyncGuestWorkCount = Math.Max(0, _pendingSyncGuestWorkCount - 1);
+        }
+
+        var scheduleIndex = _pendingGuestQueueSchedule.IndexOf(queueName);
+        if (queue.Count == 0)
+        {
+            _pendingGuestWorkByQueue.Remove(queueName);
+            if (scheduleIndex >= 0)
+            {
+                _pendingGuestQueueSchedule.RemoveAt(scheduleIndex);
+                if (_pendingGuestQueueCursor > scheduleIndex)
+                {
+                    _pendingGuestQueueCursor--;
+                }
+                else if (_pendingGuestQueueCursor >= _pendingGuestQueueSchedule.Count)
+                {
+                    _pendingGuestQueueCursor = 0;
+                }
+            }
+        }
+        else if (advanceScheduleCursor && scheduleIndex >= 0)
+        {
+            _pendingGuestQueueCursor =
+                (scheduleIndex + 1) % _pendingGuestQueueSchedule.Count;
+        }
     }
 
     private static bool RequeueGuestWorkFront(in PendingGuestWork work)
@@ -2731,6 +2847,15 @@ internal static unsafe class VulkanVideoPresenter
             // the retained-byte total a second time.
             queue.AddFirst(work);
             _pendingGuestWorkCount++;
+            if (IsPayloadBearingGuestWork(work.Work))
+            {
+                _pendingPayloadGuestWorkCount++;
+            }
+            else
+            {
+                _pendingSyncGuestWorkCount++;
+            }
+
             System.Threading.Monitor.PulseAll(_gate);
             return true;
         }
@@ -2817,62 +2942,6 @@ internal static unsafe class VulkanVideoPresenter
                 $" global_lengths=[{string.Join(',', compute.GlobalMemoryBuffers.Select(static buffer => buffer.Length))}]",
             _ => string.Empty,
         };
-    }
-
-    private static string FormatGuestQueueBacklogLocked()
-    {
-        var typeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
-        var orderedNameCounts = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var queue in _pendingGuestWorkByQueue.Values)
-        {
-            for (var node = queue.First; node is not null; node = node.Next)
-            {
-                var work = node.Value.Work;
-                var typeName = work.GetType().Name;
-                typeCounts[typeName] = typeCounts.GetValueOrDefault(typeName) + 1;
-                if (work is VulkanOrderedGuestAction ordered)
-                {
-                    var prefix = GetOrderedActionDebugPrefix(ordered.DebugName);
-                    orderedNameCounts[prefix] =
-                        orderedNameCounts.GetValueOrDefault(prefix) + 1;
-                }
-            }
-        }
-
-        static string TopEntries(Dictionary<string, int> counts, int limit)
-        {
-            if (counts.Count == 0)
-            {
-                return "-";
-            }
-
-            return string.Join(
-                ',',
-                counts
-                    .OrderByDescending(static entry => entry.Value)
-                    .Take(limit)
-                    .Select(static entry => $"{entry.Key}:{entry.Value}"));
-        }
-
-        return $" types=[{TopEntries(typeCounts, 6)}]" +
-               $" ordered=[{TopEntries(orderedNameCounts, 8)}]";
-    }
-
-    private static string GetOrderedActionDebugPrefix(string debugName)
-    {
-        if (string.IsNullOrEmpty(debugName))
-        {
-            return "(empty)";
-        }
-
-        var span = debugName.AsSpan();
-        var cut = span.IndexOfAny(' ', '=');
-        if (cut <= 0)
-        {
-            cut = Math.Min(span.Length, 48);
-        }
-
-        return debugName[..cut];
     }
 
     private static ulong GetDrawPayloadBytes(VulkanTranslatedGuestDraw draw)
@@ -13808,6 +13877,7 @@ internal static unsafe class VulkanVideoPresenter
             // label wakeups are not starved behind fat compute/draw items on
             // sibling logical queues.
             var preferSyncWork =
+                _pendingSyncGuestWorkCount >= (_maxPendingGuestWorkItems / 2) ||
                 _pendingGuestWorkCount >= (_maxPendingGuestWorkItems / 2);
             while (completedWork < workLimit)
             {
