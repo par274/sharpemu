@@ -80,7 +80,7 @@
   "Options.OverrideLogFile.Label": "Переопределить файл лога",
   "Options.OverrideLogFile.Desc": "Использовать указанный путь к файлу без добавления ID игры и метки времени",
 
-  "Options.TitleMusic.Label": "Музыка игры",
+  "Options.TitleMusic.Label": "Фоновая музыка",
   "Options.TitleMusic.Desc": "Зацикленно воспроизводить музыку предпросмотра выбранной игры в библиотеке",
 
   "Options.Discord.Label": "Статус Discord",

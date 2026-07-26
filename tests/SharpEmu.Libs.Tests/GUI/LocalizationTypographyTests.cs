@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using Avalonia.Controls;
+using Avalonia.Data;
 using SharpEmu.GUI;
 using Xunit;
 
@@ -29,5 +31,32 @@ public sealed class LocalizationTypographyTests
         localization.Load("en");
 
         Assert.Equal(["Google Sans"], localization.LauncherFontFamily.FamilyNames);
+    }
+
+    [Fact]
+    public void LocalizedIndexerBinding_RefreshesAfterLanguageChange()
+    {
+        var localization = Localization.Instance;
+        var label = new TextBlock();
+        using var binding = label.Bind(
+            TextBlock.TextProperty,
+            new Binding("[Library.AddFolder]")
+            {
+                Source = localization,
+                Mode = BindingMode.OneWay,
+            });
+
+        try
+        {
+            localization.Load("en");
+            Assert.Equal("Add folder", label.Text);
+
+            localization.Load("ru");
+            Assert.Equal("Добавить папку", label.Text);
+        }
+        finally
+        {
+            localization.Load("en");
+        }
     }
 }

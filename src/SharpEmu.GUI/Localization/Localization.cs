@@ -77,8 +77,8 @@ public sealed class Localization : INotifyPropertyChanged
     /// <summary>
     /// Indexer exposing localized strings by key, for XAML bindings of the form
     /// <c>Text="{Binding [Page.Library], Source={x:Static loc:Localization.Instance}}"</c>.
-    /// Raises <see cref="PropertyChanged"/> for <see cref="Item[]"/> on language
-    /// change so bound controls refresh.
+    /// Raises <see cref="PropertyChanged"/> for the Avalonia indexer property on
+    /// a language change so both direct and cached template bindings refresh.
     /// </summary>
     public string this[string key] => Get(key);
 
@@ -176,10 +176,11 @@ public sealed class Localization : INotifyPropertyChanged
             : LoadMergedLanguage(code);
 
         CurrentCode = code;
-        // Bumping the revision and notifying Item[] lets any XAML binding of the
-        // form "{Binding [Key], Source=Localization.Instance}" refresh.
+        // Bump the revision even when both languages happen to resolve a key to
+        // the same text. Avalonia observes reflection indexers through their
+        // CLR property name ("Item"), rather than WPF's "Item[]" convention.
         _revision++;
-        OnPropertyChanged(BindableIndexerName);
+        OnPropertyChanged(IndexerPropertyName);
     }
 
     private Dictionary<string, string> LoadMergedLanguage(string code)
@@ -202,9 +203,7 @@ public sealed class Localization : INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 
-    /// <summary>The property name Avalonia reports for indexer bindings.</summary>
-    private const string BindableIndexerName = "Item[]";
-
+    private const string IndexerPropertyName = "Item";
 
     private static IEnumerable<string> EmbeddedLanguageCodes()
     {

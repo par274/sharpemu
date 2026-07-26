@@ -83,6 +83,74 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </ControlTemplate>
       </Setter>
     </ControlTheme>
+
+    <ControlTheme x:Key="OptionToggleTheme" TargetType="ToggleSwitch">
+      <Setter Property="Width" Value="46" />
+      <Setter Property="Height" Value="26" />
+      <Setter Property="MinWidth" Value="46" />
+      <Setter Property="MinHeight" Value="26" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="#2BFFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="KnobTransitions">
+        <Transitions>
+          <DoubleTransition Property="Canvas.Left"
+                            Duration="0:0:0.18"
+                            Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border x:Name="PART_Track"
+                  Width="{TemplateBinding Width}"
+                  Height="{TemplateBinding Height}"
+                  Padding="3"
+                  Background="{TemplateBinding Background}"
+                  BorderThickness="0"
+                  CornerRadius="13"
+                  ClipToBounds="True">
+            <Canvas x:Name="PART_SwitchKnob"
+                    Width="20"
+                    Height="20"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center">
+              <Grid x:Name="PART_MovingKnobs"
+                    Width="20"
+                    Height="20"
+                    Canvas.Left="0">
+                <Border x:Name="PART_Thumb"
+                        Background="{StaticResource TextBrush}"
+                        BorderThickness="0"
+                        CornerRadius="10" />
+              </Grid>
+            </Canvas>
+            <Border.Transitions>
+              <Transitions>
+                <BrushTransition Property="Background"
+                                 Duration="0:0:0.16"
+                                 Easing="CubicEaseOut" />
+              </Transitions>
+            </Border.Transitions>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+      <Style Selector="^:pointerover /template/ Border#PART_Track">
+        <Setter Property="Background" Value="#38FFFFFF" />
+      </Style>
+      <Style Selector="^:checked /template/ Border#PART_Track">
+        <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+      </Style>
+      <Style Selector="^:checked:pointerover /template/ Border#PART_Track">
+        <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+      </Style>
+      <Style Selector="^:disabled /template/ Border#PART_Track">
+        <Setter Property="Opacity" Value="0.45" />
+      </Style>
+    </ControlTheme>
   </Application.Resources>
 
   <Application.Styles>
@@ -520,7 +588,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="BorderThickness" Value="0" />
     </Style>
     <Style Selector="ToggleSwitch.optionToggle">
-      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Theme" Value="{StaticResource OptionToggleTheme}" />
+      <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
     <Style Selector="Button.optionAction">
       <Setter Property="MinWidth" Value="156" />
@@ -801,8 +870,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="RenderTransform" Value="translateY(0px)" />
       <Setter Property="Transitions">
         <Transitions>
-          <DoubleTransition Property="Opacity" Duration="0:0:0.18" />
-          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.26" />
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.11"
+                            Easing="QuadraticEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.16"
+                                         Easing="CubicEaseOut" />
         </Transitions>
       </Setter>
     </Style>
@@ -811,8 +884,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Opacity" Value="1" />
       <Setter Property="RenderTransform" Value="translateY(-7px) scale(1.045)" />
     </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                     ListBox.tileGrid ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Style Selector="ListBox.tileGrid ListBoxItem /template/ ContentPresenter#PART_ContentPresenter,
+                     ListBox.tileGrid ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderBrush" Value="White" />
     </Style>
@@ -871,8 +948,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                      ListBox.tileGrid ListBoxItem:selected TextBlock.addFolderGlyph">
       <Setter Property="Foreground" Value="White" />
     </Style>
-    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTile,
-                     ListBox.tileGrid ListBoxItem:selected Border.addFolderTile">
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTile">
+      <Setter Property="Background" Value="#1AFFFFFF" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:selected Border.addFolderTile">
       <Setter Property="Background" Value="#1AFFFFFF" />
       <Setter Property="BorderBrush" Value="#55FFFFFF" />
     </Style>

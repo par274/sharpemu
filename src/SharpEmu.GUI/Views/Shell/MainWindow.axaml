@@ -214,7 +214,10 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                  VerticalAlignment="Center" />
                     </Border>
                     <TextBlock Classes="addFolderGlyph"
-                               Text="{Binding [Library.AddFolder], Source={x:Static loc:Localization.Instance}}"
+                               Text="{Binding [Library.AddFolder],
+                                              Source={x:Static loc:Localization.Instance},
+                                              Mode=OneWay,
+                                              x:CompileBindings=False}"
                                FontSize="12"
                                FontWeight="SemiBold"
                                LetterSpacing="0.4"
@@ -820,9 +823,7 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Label="Strict dynlib resolution"
                                               Description="Fail the launch when an imported symbol cannot be resolved.">
                               <ToggleSwitch x:Name="StrictToggle"
-                                            Classes="optionToggle"
-                                            OnContent="On"
-                                            OffContent="Off" />
+                                            Classes="optionToggle" />
                             </local:SettingRow>
                           </StackPanel>
                         </Border>
@@ -860,9 +861,7 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Label="Log to file"
                                               Description="Mirror emulator output to a log file.">
                               <ToggleSwitch x:Name="LogToFileToggle"
-                                            Classes="optionToggle"
-                                            OnContent="On"
-                                            OffContent="Off" />
+                                            Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="LogFilePathRow"
                                               Classes="optionRow"
@@ -877,9 +876,7 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Label="Override log file"
                                               Description="Use the exact file path instead of appending title ID and timestamp.">
                               <ToggleSwitch x:Name="OverrideLogFileToggle"
-                                            Classes="optionToggle"
-                                            OnContent="On"
-                                            OffContent="Off" />
+                                            Classes="optionToggle" />
                             </local:SettingRow>
                           </StackPanel>
                         </Border>
@@ -926,8 +923,6 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Description="Loop the selected game's preview music in the library.">
                               <ToggleSwitch x:Name="TitleMusicToggle"
                                             Classes="optionToggle"
-                                            OnContent="On"
-                                            OffContent="Off"
                                             IsChecked="True" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="DiscordRow"
@@ -935,9 +930,7 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Label="Discord presence"
                                               Description="Show the running game on your Discord profile.">
                               <ToggleSwitch x:Name="DiscordToggle"
-                                            Classes="optionToggle"
-                                            OnContent="On"
-                                            OffContent="Off" />
+                                            Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="AutoUpdateRow"
                                               Classes="optionRow"
@@ -945,8 +938,6 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                               Description="Checks GitHub without delaying startup.">
                               <ToggleSwitch x:Name="AutoUpdateToggle"
                                             Classes="optionToggle"
-                                            OnContent="On"
-                                            OffContent="Off"
                                             IsChecked="True" />
                             </local:SettingRow>
                           </StackPanel>
@@ -980,42 +971,42 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                             <local:SettingRow x:Name="EnvBthidRow"
                                               Classes="optionRow"
                                               Label="SHARPEMU_BTHID_UNAVAILABLE">
-                              <ToggleSwitch x:Name="EnvBthidToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
+                              <ToggleSwitch x:Name="EnvBthidToggle" Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvLoopGuardRow"
                                               Classes="optionRow"
                                               Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD">
-                              <ToggleSwitch x:Name="EnvLoopGuardToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
+                              <ToggleSwitch x:Name="EnvLoopGuardToggle" Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvWritableApp0Row"
                                               Classes="optionRow"
                                               Label="SHARPEMU_WRITABLE_APP0">
-                              <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
+                              <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvVkValidationRow"
                                               Classes="optionRow"
                                               Label="SHARPEMU_VK_VALIDATION">
-                              <ToggleSwitch x:Name="EnvVkValidationToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
+                              <ToggleSwitch x:Name="EnvVkValidationToggle" Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvDumpSpirvRow"
                                               Classes="optionRow"
                                               Label="SHARPEMU_DUMP_SPIRV">
-                              <ToggleSwitch x:Name="EnvDumpSpirvToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
+                              <ToggleSwitch x:Name="EnvDumpSpirvToggle" Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvLogDirectMemoryRow"
                                               Classes="optionRow"
                                               Label="SHARPEMU_LOG_DIRECT_MEMORY">
-                              <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
+                              <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvLogIoRow"
                                               Classes="optionRow"
                                               Label="SHARPEMU_LOG_IO">
-                              <ToggleSwitch x:Name="EnvLogIoToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
+                              <ToggleSwitch x:Name="EnvLogIoToggle" Classes="optionToggle" />
                             </local:SettingRow>
                             <local:SettingRow x:Name="EnvLogNpRow"
                                               Classes="optionRow"
                                               Label="SHARPEMU_LOG_NP">
-                              <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" OnContent="On" OffContent="Off" />
+                              <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" />
                             </local:SettingRow>
                           </StackPanel>
                         </Border>

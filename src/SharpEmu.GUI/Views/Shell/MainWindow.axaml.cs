@@ -938,16 +938,6 @@ public partial class MainWindow : Window
         AutoUpdateRow.Label = loc.Get("Updater.Auto.Label");
         AutoUpdateRow.Description = loc.Get("Updater.Auto.Desc");
 
-        foreach (var toggle in new[]
-                 {
-                     StrictToggle, LogToFileToggle, OverrideLogFileToggle, TitleMusicToggle, DiscordToggle,
-                     AutoUpdateToggle, GameStrictToggle, GameLogToFileToggle,
-                 })
-        {
-            toggle.OnContent = loc.Get("Common.On");
-            toggle.OffContent = loc.Get("Common.Off");
-        }
-
         ConsoleSectionTitle.Text = loc.Get("Console.Title");
         ConsoleSearchBox.PlaceholderText = loc.Get("Console.SearchWatermark");
         AutoScrollCheck.Content = loc.Get("Console.AutoScroll");
