@@ -738,7 +738,11 @@ public static class AudioOut2Exports
                     try
                     {
                         var audio = HostPlatform.Current.Audio;
-                        PrimaryBackend = audio.OpenStereoPcm16Stream(context.Frequency);
+                        // Deeper host queue than classic AudioOut: FMOD's bursty
+                        // AudioOut2 Push pattern underran a 32 KiB (~171 ms) bed.
+                        PrimaryBackend = audio.OpenStereoPcm16Stream(
+                            context.Frequency,
+                            maxQueuedPcmBytes: 128 * 1024);
                         PrimaryBackendName = audio.BackendName + "-primary";
                     }
                     catch (Exception exception)
@@ -758,7 +762,9 @@ public static class AudioOut2Exports
                 try
                 {
                     var audio = HostPlatform.Current.Audio;
-                    SecondaryBackend = audio.OpenStereoPcm16Stream(context.Frequency);
+                    SecondaryBackend = audio.OpenStereoPcm16Stream(
+                        context.Frequency,
+                        maxQueuedPcmBytes: 128 * 1024);
                     SecondaryBackendName = audio.BackendName + "-secondary";
                 }
                 catch (Exception exception)
