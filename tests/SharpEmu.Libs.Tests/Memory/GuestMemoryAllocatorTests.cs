@@ -79,7 +79,16 @@ public sealed class GuestMemoryAllocatorTests
         var pointer = memory.GetPointer(address + 0x123);
 
         Assert.Equal(address + 0x123, (ulong)pointer);
-        Assert.Equal([(address, pageSize, HostPageProtection.ReadWrite)], host.CommitCalls);
+        // GetPointer commits a 32 MiB working-set chunk as 4 KiB pages against
+        // this fake host (Query reports 4 KiB reserved regions). Non-page-
+        // aligned start makes AlignUp(addr + chunk) cover one extra page.
+        const ulong lazyPrimeChunkBytes = 0x0200_0000UL;
+        var endPage = (address + 0x123 + lazyPrimeChunkBytes + pageSize - 1) & ~(pageSize - 1);
+        Assert.Equal((int)((endPage - address) / pageSize), host.CommitCalls.Count);
+        Assert.Equal((address, pageSize, HostPageProtection.ReadWrite), host.CommitCalls[0]);
+        Assert.All(
+            host.CommitCalls,
+            call => Assert.Equal(pageSize, call.Size));
     }
 
     [Fact]
