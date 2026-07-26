@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026 SharpEmu Emulator Project
+// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
@@ -7915,6 +7915,35 @@ public static partial class KernelMemoryCompatExports
         var matchIndex = haystackBytes.AsSpan().IndexOf(needleBytes.AsSpan());
         ctx[CpuRegister.Rax] = matchIndex >= 0 ? haystack + (ulong)matchIndex : 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // POSIX access(2)-style path reachability probe used by RAGE EnumerationThread.
+    [SysAbiExport(
+        Nid = "uWyW3v98sU4",
+        ExportName = "sceKernelCheckReachability",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelCheckReachability(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        if (pathAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        if (File.Exists(hostPath) || Directory.Exists(hostPath))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
     [SysAbiExport(
