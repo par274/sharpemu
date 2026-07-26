@@ -93,6 +93,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
           Condition="'$(DesignTimeBuild)' != 'true' and '$(SharpEmuSkipNotoSubsetUpdate)' != 'true'">
     <MSBuild Projects="$(SharpEmuFontSubsetterProject)"
              Targets="GetTargetPath"
+             Properties="Configuration=$(Configuration)"
              BuildInParallel="false">
       <Output TaskParameter="TargetOutputs"
               ItemName="_SharpEmuFontSubsetterAssembly" />

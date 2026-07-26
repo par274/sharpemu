@@ -24,4 +24,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Project Path="tests/SharpEmu.ShaderCompiler.Tests/SharpEmu.ShaderCompiler.Tests.csproj" />
     <Project Path="tests/SharpEmu.SourceGenerators.Tests/SharpEmu.SourceGenerators.Tests.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="src/SharpEmu.GUI/Build/FontSubsetter/SharpEmu.GUI.FontSubsetter.csproj" />
+  </Folder>
 </Solution>
