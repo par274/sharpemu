@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Numerics;
+using System.Runtime.InteropServices;
 using SharpEmu.Libs.Agc;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
@@ -31,11 +32,23 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
     private const uint LocalSize = 8;
     private const uint PushConstantBytes = 11 * sizeof(uint);
 
+    // RecordDetile runs once per texture creation, not once per draw, but a
+    // busy loading screen can create many textures per frame; each call was
+    // paying for 4 fresh buffer allocations + a fresh descriptor pool that
+    // just get destroyed once the batch fence signals (see #618). Textures of
+    // the same format/resolution recur constantly (mip chains, atlases,
+    // repeated UI elements), so pooling by (usage, capacity) turns most of
+    // those into a rent instead of a vkCreateBuffer/vkAllocateMemory pair.
+    private const ulong MaximumCachedDetileBufferBytes = 128UL * 1024 * 1024;
+
     private readonly Vk _vk;
     private readonly Device _device;
     private readonly Queue _queue;
     private readonly PhysicalDevice _physicalDevice;
     private readonly uint _queueFamilyIndex;
+    private readonly VulkanHostBufferPool _bufferPool;
+    private readonly Stack<DescriptorPool> _pooledDescriptorPools = new();
+    private readonly HashSet<ulong> _poolOwnedDescriptorPoolHandles = new();
 
     private ShaderModule _shaderModule;
     private DescriptorSetLayout _descriptorSetLayout;
@@ -57,6 +70,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         _queue = queue;
         _physicalDevice = physicalDevice;
         _queueFamilyIndex = queueFamilyIndex;
+        _bufferPool = new VulkanHostBufferPool(MaximumCachedDetileBufferBytes, DestroyPooledBuffer);
     }
 
     /// <summary>
@@ -249,18 +263,15 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         resources.OutputBytes =
             (ulong)parameters.ElementsWide * (ulong)parameters.ElementsHigh * bytesPerElement * layers;
 
-        resources.Tiled = CreateHostBuffer((ulong)tiled.Length, BufferUsageFlags.StorageBufferBit, out resources.TiledMemory);
-        UploadBytes(resources.TiledMemory, tiled);
-        resources.XTerm = CreateHostBuffer((ulong)xTerm.Length * sizeof(uint), BufferUsageFlags.StorageBufferBit, out resources.XMemory);
-        UploadUInts(resources.XMemory, xTerm);
-        resources.YTerm = CreateHostBuffer((ulong)yTerm.Length * sizeof(uint), BufferUsageFlags.StorageBufferBit, out resources.YMemory);
-        UploadUInts(resources.YMemory, yTerm);
+        resources.Tiled = CreateHostBuffer(tiled, BufferUsageFlags.StorageBufferBit, out resources.TiledMemory);
+        resources.XTerm = CreateHostBuffer(MemoryMarshal.AsBytes(xTerm.AsSpan()), BufferUsageFlags.StorageBufferBit, out resources.XMemory);
+        resources.YTerm = CreateHostBuffer(MemoryMarshal.AsBytes(yTerm.AsSpan()), BufferUsageFlags.StorageBufferBit, out resources.YMemory);
         resources.Output = CreateHostBuffer(
             resources.OutputBytes,
             BufferUsageFlags.StorageBufferBit | BufferUsageFlags.TransferSrcBit,
             out resources.OutputMemory);
 
-        resources.Pool = CreateDescriptorPool();
+        resources.Pool = RentDescriptorPool();
         resources.Set = AllocateDescriptorSet(resources.Pool);
         WriteDescriptors(
             resources.Set,
@@ -383,16 +394,38 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
     private void DestroyResources(in DetileResources resources)
     {
-        if (resources.Pool.Handle != 0)
+        if (resources.Pool.Handle != 0 && !TryReturnDescriptorPool(resources.Pool))
         {
             _vk.DestroyDescriptorPool(_device, resources.Pool, null);
         }
 
-        DestroyBuffer(resources.Output, resources.OutputMemory);
-        DestroyBuffer(resources.YTerm, resources.YMemory);
-        DestroyBuffer(resources.XTerm, resources.XMemory);
-        DestroyBuffer(resources.Tiled, resources.TiledMemory);
+        ReturnOrDestroyBuffer(resources.Output, resources.OutputMemory);
+        ReturnOrDestroyBuffer(resources.YTerm, resources.YMemory);
+        ReturnOrDestroyBuffer(resources.XTerm, resources.XMemory);
+        ReturnOrDestroyBuffer(resources.Tiled, resources.TiledMemory);
     }
+
+    private void ReturnOrDestroyBuffer(VkBuffer buffer, DeviceMemory memory)
+    {
+        if (buffer.Handle == 0)
+        {
+            return;
+        }
+
+        if (!_bufferPool.Return(buffer, memory))
+        {
+            _vk.DestroyBuffer(_device, buffer, null);
+            _vk.FreeMemory(_device, memory, null);
+        }
+    }
+
+    /// <summary>
+    /// Called by the render path (<see cref="RecordDetile"/>'s caller) once the
+    /// batch fence its transients rode along with has signaled, instead of
+    /// destroying them directly — lets a buffer/pool from one texture's detile
+    /// get reused by the next one instead of round-tripping through the driver.
+    /// </summary>
+    public bool TryReturnBuffer(VkBuffer buffer, DeviceMemory memory) => _bufferPool.Return(buffer, memory);
 
     private void EnsurePipeline()
     {
@@ -500,7 +533,51 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         return terms;
     }
 
+    /// <summary>Creates (or rents from the pool) a buffer sized to hold <paramref name="data"/> and uploads it.</summary>
+    private VkBuffer CreateHostBuffer(ReadOnlySpan<byte> data, BufferUsageFlags usage, out DeviceMemory memory)
+    {
+        var allocation = RentOrAllocateBuffer(usage, (ulong)Math.Max(data.Length, sizeof(uint)));
+        memory = allocation.Memory;
+        if (!data.IsEmpty)
+        {
+            fixed (byte* source = data)
+            {
+                System.Buffer.MemoryCopy(source, (void*)allocation.Mapped, checked((long)allocation.Key.Capacity), data.Length);
+            }
+        }
+
+        return allocation.Buffer;
+    }
+
+    /// <summary>Creates (or rents from the pool) a buffer with no initial CPU-side data (compute-shader output).</summary>
     private VkBuffer CreateHostBuffer(ulong size, BufferUsageFlags usage, out DeviceMemory memory)
+    {
+        var allocation = RentOrAllocateBuffer(usage, size);
+        memory = allocation.Memory;
+        return allocation.Buffer;
+    }
+
+    private VulkanHostBufferAllocation RentOrAllocateBuffer(BufferUsageFlags usage, ulong minimumSize)
+    {
+        // Round up to a shared bucket so textures of slightly different sizes
+        // (mip levels, near-identical UI elements) still hit the same pooled
+        // allocation instead of each demanding an exact-size match.
+        var capacity = BitOperations.RoundUpToPowerOf2(Math.Max(minimumSize, sizeof(uint)));
+        var key = new VulkanHostBufferPoolKey(usage, capacity);
+        if (_bufferPool.TryRent(key, out var pooled))
+        {
+            return pooled;
+        }
+
+        var buffer = AllocateBuffer(capacity, usage, out var deviceMemory);
+        void* mapped;
+        Check(_vk.MapMemory(_device, deviceMemory, 0, capacity, 0, &mapped), "vkMapMemory(detile persistent)");
+        var allocation = new VulkanHostBufferAllocation(buffer, deviceMemory, key, (nint)mapped);
+        _bufferPool.Register(allocation);
+        return allocation;
+    }
+
+    private VkBuffer AllocateBuffer(ulong size, BufferUsageFlags usage, out DeviceMemory memory)
     {
         var bufferInfo = new BufferCreateInfo
         {
@@ -536,6 +613,13 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         return buffer;
     }
 
+    private void DestroyPooledBuffer(VulkanHostBufferAllocation allocation)
+    {
+        _vk.UnmapMemory(_device, allocation.Memory);
+        _vk.DestroyBuffer(_device, allocation.Buffer, null);
+        _vk.FreeMemory(_device, allocation.Memory, null);
+    }
+
     private uint FindMemoryType(uint typeBits, MemoryPropertyFlags requiredFlags)
     {
         if (TryFindMemoryType(typeBits, requiredFlags, out var memoryTypeIndex))
@@ -564,21 +648,34 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         return false;
     }
 
-    private void UploadBytes(DeviceMemory memory, ReadOnlySpan<byte> data)
+    private DescriptorPool RentDescriptorPool()
     {
-        void* mapped;
-        Check(_vk.MapMemory(_device, memory, 0, (ulong)data.Length, 0, &mapped), "vkMapMemory(detile)");
-        data.CopyTo(new Span<byte>(mapped, data.Length));
-        _vk.UnmapMemory(_device, memory);
+        if (_pooledDescriptorPools.TryPop(out var pool))
+        {
+            Check(_vk.ResetDescriptorPool(_device, pool, 0), "vkResetDescriptorPool(detile)");
+            return pool;
+        }
+
+        pool = CreateDescriptorPool();
+        _poolOwnedDescriptorPoolHandles.Add(pool.Handle);
+        return pool;
     }
 
-    private void UploadUInts(DeviceMemory memory, uint[] data)
+    /// <summary>
+    /// Returns a descriptor pool to the free list — called both internally
+    /// (<see cref="DestroyResources"/>) and by the render path's retire logic
+    /// once the batch fence has signaled. False if it wasn't one we handed out
+    /// (nothing to do; caller should destroy it normally).
+    /// </summary>
+    public bool TryReturnDescriptorPool(DescriptorPool pool)
     {
-        void* mapped;
-        var byteCount = (ulong)data.Length * sizeof(uint);
-        Check(_vk.MapMemory(_device, memory, 0, byteCount, 0, &mapped), "vkMapMemory(detile terms)");
-        data.AsSpan().CopyTo(new Span<uint>(mapped, data.Length));
-        _vk.UnmapMemory(_device, memory);
+        if (pool.Handle == 0 || !_poolOwnedDescriptorPoolHandles.Contains(pool.Handle))
+        {
+            return false;
+        }
+
+        _pooledDescriptorPools.Push(pool);
+        return true;
     }
 
     private DescriptorPool CreateDescriptorPool()
@@ -708,19 +805,6 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         return fence;
     }
 
-    private void DestroyBuffer(VkBuffer buffer, DeviceMemory memory)
-    {
-        if (buffer.Handle != 0)
-        {
-            _vk.DestroyBuffer(_device, buffer, null);
-        }
-
-        if (memory.Handle != 0)
-        {
-            _vk.FreeMemory(_device, memory, null);
-        }
-    }
-
     private void Check(Result result, string operation)
     {
         if (result != Result.Success)
@@ -737,6 +821,12 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
         }
 
         _disposed = true;
+        _bufferPool.Dispose();
+        while (_pooledDescriptorPools.TryPop(out var pool))
+        {
+            _vk.DestroyDescriptorPool(_device, pool, null);
+        }
+
         if (_pipeline.Handle != 0)
         {
             _vk.DestroyPipeline(_device, _pipeline, null);

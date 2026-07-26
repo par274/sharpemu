@@ -261,20 +261,30 @@ internal static unsafe class VulkanDetileSelfTest
         {
             vk.DestroyFence(device, fence, null);
             vk.FreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+
+            // Mirror the presenter's real retire logic (see #618): return to
+            // the pass's pool first, same as VulkanVideoPresenter does once a
+            // batch fence signals, rather than destroying directly — the pass
+            // tracks every buffer/pool it ever hands out, so destroying one
+            // out from under it without calling Try* leaves a dangling entry
+            // that corrupts the pool the next time Vulkan reuses that handle.
             foreach (var (buffer, memory) in transients.Buffers)
             {
-                if (buffer.Handle != 0)
+                if (buffer.Handle == 0)
                 {
-                    vk.DestroyBuffer(device, buffer, null);
+                    continue;
                 }
 
-                if (memory.Handle != 0)
+                if (pass.TryReturnBuffer(buffer, memory))
                 {
-                    vk.FreeMemory(device, memory, null);
+                    continue;
                 }
+
+                vk.DestroyBuffer(device, buffer, null);
+                vk.FreeMemory(device, memory, null);
             }
 
-            if (transients.DescriptorPool.Handle != 0)
+            if (transients.DescriptorPool.Handle != 0 && !pass.TryReturnDescriptorPool(transients.DescriptorPool))
             {
                 vk.DestroyDescriptorPool(device, transients.DescriptorPool, null);
             }

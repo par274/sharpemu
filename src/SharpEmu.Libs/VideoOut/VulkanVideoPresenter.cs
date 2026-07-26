@@ -5233,12 +5233,32 @@ internal static unsafe class VulkanVideoPresenter
 
                 foreach (var (buffer, memory) in submission.RetireBuffers)
                 {
+                    // Detile buffers (see #618) get returned to VulkanDetilePass's
+                    // own pool instead of destroyed, so the next texture that
+                    // needs a same-sized scratch buffer can rent it back rather
+                    // than paying for a fresh vkCreateBuffer/vkAllocateMemory.
+                    // Non-detile buffers (e.g. staging) were never registered
+                    // with that pool, so TryReturnBuffer correctly no-ops (false)
+                    // for them and they fall through to a normal destroy.
+                    if (_detilePass is not null && _detilePass.TryReturnBuffer(buffer, memory))
+                    {
+                        continue;
+                    }
+
                     _vk.DestroyBuffer(_device, buffer, null);
                     _vk.FreeMemory(_device, memory, null);
                 }
 
                 foreach (var pool in submission.RetirePools)
                 {
+                    // Only detile ever populates RetirePools today, so this is
+                    // always a detile pool — but guard defensively the same way
+                    // as the buffer loop above in case that changes.
+                    if (_detilePass is not null && _detilePass.TryReturnDescriptorPool(pool))
+                    {
+                        continue;
+                    }
+
                     _vk.DestroyDescriptorPool(_device, pool, null);
                 }
 
