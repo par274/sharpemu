@@ -55,9 +55,12 @@ public static partial class AgcExports
     private const uint ItEventWrite = 0x46;
     private const uint ItReleaseMem = 0x49;
     private const uint ItDmaData = 0x50;
+    private const uint ItRewind = 0x59;
     private const uint ItSetContextReg = 0x69;
     private const uint ItSetShReg = 0x76;
     private const uint ItSetUconfigReg = 0x79;
+    private const uint RewindValidBit = 1u << 31;
+    private const uint RewindOffloadEnableBit = 1u << 24;
     private const uint ItGetLodStats = 0x8E;
     private const uint RZero = 0x00;
     private const uint RDrawIndexAuto = 0x04;
@@ -607,6 +610,11 @@ public static partial class AgcExports
         public uint FrameDrawCount { get; set; }
         public uint FrameDispatchCount { get; set; }
         public ulong FlipCount { get; set; }
+        // Coalesce ACQUIRE_MEM invalidations within one DCB parse so North
+        // Yankton load does not enqueue hundreds of empty OrderedGuestActions.
+        public bool PendingAcquireInvalidation { get; set; }
+        public ulong PendingAcquireBase { get; set; }
+        public ulong PendingAcquireSize { get; set; }
     }
 
     private sealed class SubmittedGpuState
@@ -3586,9 +3594,39 @@ public static partial class AgcExports
                 continue;
             }
 
+            var isAcquireMem = op == ItNop && register == RAcquireMem && length >= 8;
+            // Flush coalesced ACQUIRE_MEM only before packets that consume guest
+            // resources (draw/dispatch/dma/flip). Flushing before every register
+            // write produced a storm of tiny ordered actions during load.
+            if (!isAcquireMem &&
+                PacketRequiresPendingAcquireFlush(op, register, length))
+            {
+                FlushPendingAcquireInvalidation(ctx, state, tracePackets);
+            }
+
             if (op == ItSetPredication)
             {
                 ApplySubmittedPredication(ctx, state, currentAddress, length, tracePackets);
+                offset += length;
+                continue;
+            }
+
+            if (op == ItRewind && length >= 2)
+            {
+                if (HandleSubmittedRewind(
+                        ctx,
+                        state,
+                        commandAddress,
+                        currentAddress,
+                        offset,
+                        length,
+                        dwordCount,
+                        tracePackets))
+                {
+                    FlushPendingAcquireInvalidation(ctx, state, tracePackets);
+                    return true; // suspended until RewindPatchSetRewindState
+                }
+
                 offset += length;
                 continue;
             }
@@ -3605,7 +3643,7 @@ public static partial class AgcExports
                     $"packet=0x{currentAddress:X16}");
             }
 
-            if (op == ItNop && register == RAcquireMem && length >= 8)
+            if (isAcquireMem)
             {
                 ApplySubmittedAcquireMem(
                     ctx,
@@ -3756,6 +3794,7 @@ public static partial class AgcExports
                         dwordCount, is64Bit: register == RWaitMem64, isStandard: false,
                         tracePackets))
                 {
+                    FlushPendingAcquireInvalidation(ctx, state, tracePackets);
                     return true; // DCB suspended until the awaited label is written
                 }
             }
@@ -3766,6 +3805,7 @@ public static partial class AgcExports
                         ctx, state, commandAddress, currentAddress, offset, length,
                         dwordCount, is64Bit: false, isStandard: true, tracePackets))
                 {
+                    FlushPendingAcquireInvalidation(ctx, state, tracePackets);
                     return true; // DCB suspended until the awaited label is written
                 }
             }
@@ -4012,6 +4052,7 @@ public static partial class AgcExports
             offset += length;
         }
 
+        FlushPendingAcquireInvalidation(ctx, state, tracePackets);
         return false;
     }
 
@@ -4143,8 +4184,26 @@ public static partial class AgcExports
             $"agc_dma_data dst=0x{destinationAddress:X16} bytes={byteCount}",
             packetAddress,
             destinationAddress,
-            byteCount);
+            byteCount,
+            deferLabelCompletion: true);
     }
+
+    private static bool PacketRequiresPendingAcquireFlush(
+        uint op,
+        uint register,
+        uint length) =>
+        op is ItDispatchDirect or ItDispatchIndirect ||
+        op is ItDrawIndirect or
+            ItDrawIndexIndirect or
+            ItDrawIndex2 or
+            ItDrawIndexAuto or
+            ItDrawIndexMultiAuto or
+            ItDrawIndexOffset2 ||
+        op == ItDmaData ||
+        (op == ItNop && register == RDmaData && length >= 7) ||
+        (op == ItNop && register == RFlip && length >= 6) ||
+        (op == ItNop && register == RDrawIndexAuto && length >= 2) ||
+        (op == ItNop && register == RWaitFlipDone && length >= 3);
 
     private static void SubmitOrderedGpuSideEffect(
         CpuContext ctx,
@@ -4154,7 +4213,8 @@ public static partial class AgcExports
         string debugName,
         ulong packetAddress,
         ulong producerAddress = 0,
-        ulong producerLength = 0)
+        ulong producerLength = 0,
+        bool deferLabelCompletion = false)
     {
         var producer = RegisterLabelProducer(
             ctx.Memory,
@@ -4177,11 +4237,24 @@ public static partial class AgcExports
         void ApplyAndQueueCompletion()
         {
             action();
-            // DMA side effects can enqueue a Vulkan image mirror while this
-            // ordered action is executing. Completing the label here would
-            // wake another queue before that mirror is visible. Queue a
-            // second same-queue ordered action after all immediate follow-up
-            // writes; it fences those writes before publishing the producer.
+            // No label producer → nothing to wake; skip the follow-up enqueue
+            // that was doubling OrderedGuestAction traffic during load.
+            if (producer is null)
+            {
+                CompleteAndWake();
+                return;
+            }
+
+            // Release/write-data paths cannot enqueue Vulkan image mirrors, so
+            // complete the producer in the same ordered action. DMA can enqueue
+            // a mirror while applying; defer completion until after those
+            // follow-ups so waiters see the mirrored image.
+            if (!deferLabelCompletion)
+            {
+                CompleteAndWake();
+                return;
+            }
+
             if (GuestGpu.Current.SubmitOrderedGuestAction(
                     CompleteAndWake,
                     $"{debugName} completion") == 0)
@@ -4372,67 +4445,112 @@ public static partial class AgcExports
             return;
         }
 
-        var queueName = state.QueueName;
-        var submissionId = state.ActiveSubmissionId;
-        var debugName =
-            $"acquire_mem base=0x{acquire.BaseAddress:X16} size=0x{acquire.SizeBytes:X16} " +
-            $"gcr=0x{acquire.GcrControl:X8}";
-        void ApplyAcquire()
-        {
-            // ExecuteOrderedGuestAction first flushes and waits for this guest
-            // queue, then writes back dirty guest buffers. At that exact PM4
-            // point, refresh only tracked guest images covered by the acquire
-            // range. Cached sampled textures use the same dirty tracker and
-            // are evicted by the presenter without throwing away clean cache
-            // entries (hardware invalidation does not imply changed bytes).
-            if (acquire.InvalidatesGuestResources)
-            {
-                SyncCpuWrittenGuestImages(
-                    ctx,
-                    acquire.BaseAddress,
-                    acquire.CoversAllGuestMemory
-                        ? ulong.MaxValue
-                        : acquire.SizeBytes);
-            }
+        // The bulk PM4 read is itself a parser-side cache. Do not retain it
+        // across a guest cache-invalidation point.
+        _dcbWindowBuffer = null;
+        _dcbWindowByteLength = 0;
 
+        if (!acquire.InvalidatesGuestResources)
+        {
             if (tracePacket)
             {
                 TraceAgc(
-                    $"agc.acquire_mem_applied queue={queueName} " +
-                    $"submission={submissionId} packet=0x{packetAddress:X16} " +
-                    $"work_sequence={GuestGpu.Current.CurrentGuestWorkSequenceForDiagnostics}");
+                    $"agc.acquire_mem_skip_no_invalidate queue={state.QueueName} " +
+                    $"submission={state.ActiveSubmissionId} packet=0x{packetAddress:X16} " +
+                    $"gcr=0x{acquire.GcrControl:X8}");
             }
+
+            return;
         }
 
-        var sequence = GuestGpu.Current.SubmitOrderedGuestAction(
-            ApplyAcquire,
-            debugName);
-        if (sequence == 0)
-        {
-            // Headless startup has no host GPU queue, but the guest-memory
-            // cache model still needs the same invalidation semantics.
-            ApplyAcquire();
-        }
-
-        // The bulk PM4 read is itself a parser-side cache. Do not retain it
-        // across a guest cache-invalidation point; subsequent packets return
-        // to live guest memory while the host barrier remains ordered in the
-        // logical GPU queue. Submission stays asynchronous, matching hardware
-        // and avoiding a CPU stall for every ACQUIRE_MEM packet.
-        _dcbWindowBuffer = null;
-        _dcbWindowByteLength = 0;
+        var size = acquire.CoversAllGuestMemory ? ulong.MaxValue : acquire.SizeBytes;
+        NotePendingAcquireInvalidation(state, acquire.BaseAddress, size);
 
         if (tracePacket)
         {
             TraceAgc(
-                $"agc.acquire_mem queue={queueName} " +
-                $"submission={submissionId} packet=0x{packetAddress:X16} " +
+                $"agc.acquire_mem_coalesce queue={state.QueueName} " +
+                $"submission={state.ActiveSubmissionId} packet=0x{packetAddress:X16} " +
                 $"engine={acquire.Engine} cbdb=0x{acquire.CbDbControl:X8} " +
                 $"base=0x{acquire.BaseAddress:X16} size=0x{acquire.SizeBytes:X16} " +
                 $"scope={(acquire.CoversAllGuestMemory ? "all" : "range")} " +
                 $"poll={acquire.PollInterval} gcr=0x{acquire.GcrControl:X8} " +
-                $"resource_inv={acquire.InvalidatesGuestResources} " +
-                $"sequence={sequence} scheduled={(sequence != 0)}");
+                $"pending_base=0x{state.PendingAcquireBase:X16} " +
+                $"pending_size=0x{state.PendingAcquireSize:X16}");
+        }
+    }
+
+    private static void NotePendingAcquireInvalidation(
+        SubmittedDcbState state,
+        ulong baseAddress,
+        ulong sizeBytes)
+    {
+        if (!state.PendingAcquireInvalidation)
+        {
+            state.PendingAcquireInvalidation = true;
+            state.PendingAcquireBase = baseAddress;
+            state.PendingAcquireSize = sizeBytes;
+            return;
+        }
+
+        if (state.PendingAcquireSize == ulong.MaxValue || sizeBytes == ulong.MaxValue)
+        {
+            state.PendingAcquireBase = 0;
+            state.PendingAcquireSize = ulong.MaxValue;
+            return;
+        }
+
+        var existingEnd = state.PendingAcquireBase > ulong.MaxValue - state.PendingAcquireSize
+            ? ulong.MaxValue
+            : state.PendingAcquireBase + state.PendingAcquireSize;
+        var newEnd = baseAddress > ulong.MaxValue - sizeBytes
+            ? ulong.MaxValue
+            : baseAddress + sizeBytes;
+        var mergedBase = Math.Min(state.PendingAcquireBase, baseAddress);
+        var mergedEnd = Math.Max(existingEnd, newEnd);
+        state.PendingAcquireBase = mergedBase;
+        state.PendingAcquireSize = mergedEnd == ulong.MaxValue
+            ? ulong.MaxValue
+            : mergedEnd - mergedBase;
+    }
+
+    private static void FlushPendingAcquireInvalidation(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        bool tracePacket)
+    {
+        if (!state.PendingAcquireInvalidation)
+        {
+            return;
+        }
+
+        var baseAddress = state.PendingAcquireBase;
+        var sizeBytes = state.PendingAcquireSize;
+        state.PendingAcquireInvalidation = false;
+        state.PendingAcquireBase = 0;
+        state.PendingAcquireSize = 0;
+
+        var queueName = state.QueueName;
+        var submissionId = state.ActiveSubmissionId;
+        var debugName =
+            $"acquire_mem_flush base=0x{baseAddress:X16} size=0x{sizeBytes:X16}";
+        void ApplyAcquire()
+        {
+            SyncCpuWrittenGuestImages(ctx, baseAddress, sizeBytes);
+            if (tracePacket)
+            {
+                TraceAgc(
+                    $"agc.acquire_mem_applied queue={queueName} " +
+                    $"submission={submissionId} " +
+                    $"work_sequence={GuestGpu.Current.CurrentGuestWorkSequenceForDiagnostics} " +
+                    $"base=0x{baseAddress:X16} size=0x{sizeBytes:X16}");
+            }
+        }
+
+        var sequence = GuestGpu.Current.SubmitOrderedGuestAction(ApplyAcquire, debugName);
+        if (sequence == 0)
+        {
+            ApplyAcquire();
         }
     }
 
@@ -4796,7 +4914,8 @@ public static partial class AgcExports
             $"dma_data dst=0x{destinationHigh:X8}{destinationLow:X8} bytes={byteCount}",
             packetAddress,
             writesGuestMemory ? destinationAddress : 0,
-            writesGuestMemory ? byteCount : 0);
+            writesGuestMemory ? byteCount : 0,
+            deferLabelCompletion: true);
     }
 
     private static void ApplySubmittedStandardDmaDataSnapshot(
@@ -5291,6 +5410,80 @@ public static partial class AgcExports
             TraceAgc(
                 $"agc.dispatch_indirect_wait dims=0x{dimsAddress:X16} " +
                 $"packet=0x{packetAddress:X16} queue={state.QueueName}");
+        }
+
+        return true;
+    }
+
+    private static bool HandleSubmittedRewind(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong commandAddress,
+        ulong packetAddress,
+        uint offset,
+        uint length,
+        uint dwordCount,
+        bool tracePacket)
+    {
+        var bodyAddress = packetAddress + sizeof(uint);
+        if (!TryReadUInt32(ctx, bodyAddress, out var body))
+        {
+            return false;
+        }
+
+        if ((body & RewindValidBit) != 0)
+        {
+            if (tracePacket)
+            {
+                TraceAgc(
+                    $"agc.dcb.rewind_valid queue={state.QueueName} " +
+                    $"packet=0x{packetAddress:X16} body=0x{body:X8}");
+            }
+
+            return false; // already valid — keep parsing
+        }
+
+        if (!_gpuWaitSuspendEnabled)
+        {
+            return false;
+        }
+
+        // Suspend until RewindPatchSetRewindState sets bit 31 on the body dword.
+        const uint compareEqual = 3;
+        var waiter = new GpuWaitRegistry.WaitingDcb
+        {
+            CommandBufferAddress = commandAddress,
+            ResumeAddress = packetAddress + ((ulong)length * sizeof(uint)),
+            TotalDwords = dwordCount,
+            ResumeOffset = offset + length,
+            ReferenceValue = RewindValidBit,
+            Mask = RewindValidBit,
+            CompareFunction = compareEqual,
+            ControlValue = 0,
+            Is64Bit = false,
+            IsStandard = true,
+            WaitAddress = bodyAddress,
+            Memory = ctx.Memory,
+            QueueName = state.QueueName,
+            SubmissionId = state.ActiveSubmissionId,
+            RegisteredTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            State = state,
+        };
+
+        GpuWaitRegistry.Register(bodyAddress, waiter);
+        var gpuState = _submittedGpuStates.GetValue(
+            ctx.Memory,
+            static _ => new SubmittedGpuState());
+        EnsureGpuWaitMonitor(ctx, gpuState);
+        TraceAgcShader(
+            $"agc.rewind_suspend queue={state.QueueName} " +
+            $"submission={state.ActiveSubmissionId} " +
+            $"packet=0x{packetAddress:X16} body=0x{bodyAddress:X16}");
+        if (tracePacket)
+        {
+            TraceAgc(
+                $"agc.dcb.rewind_suspend queue={state.QueueName} " +
+                $"packet=0x{packetAddress:X16} body=0x{body:X8}");
         }
 
         return true;
@@ -12999,9 +13192,7 @@ public static partial class AgcExports
             $"[LOADER][TRACE] agc.create_shader dst=0x{destinationAddress:X16} header=0x{headerAddress:X16} code=0x{codeAddress:X16} {detail}");
     }
 
-    // Hardware REWIND is a fixed 2-dword header + valid-bit packet (same floor
-    // as CbNopGetSize). No Rewind writer is implemented yet; size-only is enough
-    // for callers that allocate the packet before filling it.
+    // Hardware REWIND is a fixed 2-dword header + body (valid bit 31).
     [SysAbiExport(
         Nid = "QIXCsbipds0",
         ExportName = "sceAgcDcbRewindGetSize",
@@ -13011,6 +13202,86 @@ public static partial class AgcExports
     {
         ctx[CpuRegister.Rax] = 2u * sizeof(uint);
         return (int)ctx[CpuRegister.Rax];
+    }
+
+    // Writes IT_REWIND. When valid=0 the submit parser suspends until
+    // sceAgcRewindPatchSetRewindState sets bit 31 on the body dword.
+    [SysAbiExport(
+        Nid = "zfcxg-ewMK8",
+        ExportName = "sceAgcDcbRewind",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbRewind(CpuContext ctx)
+    {
+        var dcb = ctx[CpuRegister.Rdi];
+        // rsi bit0 = valid; bit1 = offload_enable (PM4 body bits 31 / 24).
+        var flags = ctx[CpuRegister.Rsi];
+        var valid = (flags & 1UL) != 0;
+        var offloadEnable = (flags & 2UL) != 0;
+        if (dcb == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        var body = (valid ? RewindValidBit : 0u) |
+                   (offloadEnable ? RewindOffloadEnableBit : 0u);
+        if (!TryAllocateCommandDwords(ctx, dcb, 2, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(2, ItRewind, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, body))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc($"agc.dcb_rewind buf=0x{dcb:X16} cmd=0x{cmd:X16} valid={valid} offload={offloadEnable}");
+        return ReturnPointer(ctx, cmd);
+    }
+
+    // Patches the REWIND body dword's valid bit and wakes any DCB suspended on it.
+    // rdi is the packet pointer returned by sceAgcDcbRewind (header address).
+    [SysAbiExport(
+        Nid = "ziVA3whp3p4",
+        ExportName = "sceAgcRewindPatchSetRewindState",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int RewindPatchSetRewindState(CpuContext ctx)
+    {
+        var packetAddress = ctx[CpuRegister.Rdi];
+        var valid = (ctx[CpuRegister.Rsi] & 1UL) != 0;
+        if (packetAddress == 0 ||
+            (long)packetAddress < 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var bodyAddress = packetAddress;
+        if (TryReadUInt32(ctx, packetAddress, out var header) &&
+            ((header >> 8) & 0xFFu) == ItRewind)
+        {
+            bodyAddress = packetAddress + sizeof(uint);
+        }
+
+        if (!TryReadUInt32(ctx, bodyAddress, out var body) ||
+            !TryWriteUInt32(
+                ctx,
+                bodyAddress,
+                valid ? body | RewindValidBit : body & ~RewindValidBit))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (!TryReadUInt32(ctx, bodyAddress, out var patched))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (valid)
+        {
+            GpuWaitRegistry.RecordProduced(ctx.Memory, bodyAddress, patched);
+        }
+
+        TraceAgc($"agc.rewind_patch addr=0x{bodyAddress:X16} valid={valid} body=0x{patched:X8}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     // Matches the 4-dword INDIRECT_BUFFER packet DcbJump writes below.
@@ -13052,6 +13323,82 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, cmd);
+    }
+
+    [SysAbiExport(
+        Nid = "b-oySn+G2tE",
+        ExportName = "sceAgcAcbJumpGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbJumpGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 4u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
+        Nid = "e1DFTg+Sd8U",
+        ExportName = "sceAgcAcbJump",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbJump(CpuContext ctx) => DcbJump(ctx);
+
+    // Sony SetCf* range writer — SET_CONTEXT_REG packet (same shape as SH range).
+    [SysAbiExport(
+        Nid = "BVFg3CWU6Eo",
+        ExportName = "sceAgcDcbSetCfRegisterRangeDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetCfRegisterRangeDirect(CpuContext ctx) =>
+        DcbSetRegisterRangeDirect(ctx, ItSetContextReg, "cf");
+
+    // Logged unresolved as LHFXRrlTPD8 during North Yankton load.
+    [SysAbiExport(
+        Nid = "LHFXRrlTPD8",
+        ExportName = "sceAgcDcbSetCxRegisterDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetCxRegisterDirect(CpuContext ctx) =>
+        DcbSetRegisterDirect(ctx, ItSetContextReg, "cx");
+
+    private static int DcbSetRegisterRangeDirect(CpuContext ctx, uint op, string registerSpace)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var offset = (uint)ctx[CpuRegister.Rsi];
+        var valuesAddress = ctx[CpuRegister.Rdx];
+        var valueCount = (uint)ctx[CpuRegister.Rcx];
+        if (commandBufferAddress == 0 || valueCount == 0 || valueCount > 0x3FFE)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        var packetDwords = valueCount + 2;
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, op, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, offset & 0xFFFFu))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        for (uint i = 0; i < valueCount; i++)
+        {
+            var value = 0u;
+            if (valuesAddress != 0 &&
+                !TryReadUInt32(ctx, valuesAddress + (i * sizeof(uint)), out value))
+            {
+                return ReturnPointer(ctx, 0);
+            }
+
+            if (!TryWriteUInt32(ctx, commandAddress + 8 + (i * sizeof(uint)), value))
+            {
+                return ReturnPointer(ctx, 0);
+            }
+        }
+
+        TraceAgc(
+            $"agc.dcb_set_{registerSpace}_range buf=0x{commandBufferAddress:X16} " +
+            $"cmd=0x{commandAddress:X16} offset=0x{offset:X4} count={valueCount}");
+        return ReturnPointer(ctx, commandAddress);
     }
 
     [SysAbiExport(
