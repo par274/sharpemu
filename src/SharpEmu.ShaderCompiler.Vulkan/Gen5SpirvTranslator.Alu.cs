@@ -1403,6 +1403,25 @@ public static partial class Gen5SpirvTranslator
         private uint ISubU(uint left, uint right) =>
             _module.AddInstruction(SpirvOp.ISub, _uintType, left, right);
 
+        /// <summary>
+        /// Where a non-VCMPX compare writes its wave mask. The VOP3 encoding
+        /// names the destination SGPR pair explicitly and SDWA can override it;
+        /// the compact VOPC encoding has no destination field and always
+        /// targets VCC.
+        /// </summary>
+        private static uint CompareDestination(Gen5ShaderInstruction instruction)
+        {
+            if (instruction.Destinations.Count > 0 &&
+                instruction.Destinations[0].Kind == Gen5OperandKind.ScalarRegister)
+            {
+                return instruction.Destinations[0].Value;
+            }
+
+            return instruction.Control is Gen5SdwaControl { ScalarDestination: { } scalarDestination }
+                ? scalarDestination
+                : 106u;
+        }
+
         private bool TryEmitVectorCompare(
             Gen5ShaderInstruction instruction,
             out string error)
@@ -1517,11 +1536,15 @@ public static partial class Gen5SpirvTranslator
                     condition,
                     SignedClass(0x020, 0x040, zero));
             }
-            else if (opcode is "VCmpFF32" or "VCmpxFF32" or "VCmpFI32" or "VCmpFU32")
+            else if (opcode is "VCmpFF32" or "VCmpxFF32" or
+                     "VCmpFI32" or "VCmpxFI32" or
+                     "VCmpFU32" or "VCmpxFU32")
             {
                 condition = _module.ConstantBool(false);
             }
-            else if (opcode is "VCmpTruF32" or "VCmpxTruF32" or "VCmpTI32" or "VCmpTU32")
+            else if (opcode is "VCmpTruF32" or "VCmpxTruF32" or
+                     "VCmpTI32" or "VCmpxTI32" or
+                     "VCmpTU32" or "VCmpxTU32")
             {
                 condition = _module.ConstantBool(true);
             }
@@ -1646,11 +1669,7 @@ public static partial class Gen5SpirvTranslator
             }
             else
             {
-                var compareDestination = instruction.Control is Gen5SdwaControl
-                    { ScalarDestination: { } scalarDestination }
-                    ? scalarDestination
-                    : 106u;
-                StoreWaveMask(compareDestination, activeCondition);
+                StoreWaveMask(CompareDestination(instruction), activeCondition);
             }
 
             return true;

@@ -910,7 +910,13 @@ public static class Gen5ShaderTranslator
         var src0 = word & 0x1FF;
         sizeDwords = src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
-        name = opcode switch
+        name = Vop1Name(opcode);
+
+        return FinishDecode(name, $"unknown-vop1 op=0x{opcode:X2}", out error);
+    }
+
+    private static string Vop1Name(uint opcode) =>
+        opcode switch
         {
             0x00 => "VNop",
             0x01 => "VMovB32",
@@ -950,9 +956,6 @@ public static class Gen5ShaderTranslator
             _ => string.Empty,
         };
 
-        return FinishDecode(name, $"unknown-vop1 op=0x{opcode:X2}", out error);
-    }
-
     private static bool DecodeVop2(uint word, out string name, out uint sizeDwords, out string error)
     {
         var opcode = (word >> 25) & 0x3F;
@@ -970,7 +973,13 @@ public static class Gen5ShaderTranslator
         sizeDwords = opcode is 0x20 or 0x21 or 0x2C or 0x2D ||
             src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
-        name = opcode switch
+        name = Vop2Name(opcode);
+
+        return FinishDecode(name, $"unknown-vop2 op=0x{opcode:X2}", out error);
+    }
+
+    private static string Vop2Name(uint opcode) =>
+        opcode switch
         {
             0x01 => "VCndmaskB32",
             0x02 => "VDot2cF32F16",
@@ -1017,16 +1026,19 @@ public static class Gen5ShaderTranslator
             _ => string.Empty,
         };
 
-        return FinishDecode(name, $"unknown-vop2 op=0x{opcode:X2}", out error);
-    }
-
     private static bool DecodeVopc(uint word, out string name, out uint sizeDwords, out string error)
     {
         var opcode = (word >> 17) & 0xFF;
         var src0 = word & 0x1FF;
         sizeDwords = src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
-        name = opcode switch
+        name = VopcName(opcode);
+
+        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
+    }
+
+    private static string VopcName(uint opcode) =>
+        opcode switch
         {
             0x00 => "VCmpFF32",
             0x01 => "VCmpLtF32",
@@ -1096,8 +1108,30 @@ public static class Gen5ShaderTranslator
             _ => string.Empty,
         };
 
-        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
-    }
+    // GFX10 re-encodes most VOP1/VOP2/VOPC instructions in VOP3 form so they can
+    // carry the abs/neg source modifiers, clamp/omod, an SGPR src1, or (for
+    // compares) a destination other than VCC. The VOP3 opcode is derived from the
+    // original opcode by a fixed offset per class, matching LLVM's GFX10 encoding
+    // classes: VOPC uses VOP3a_gfx10<{0, op}>, VOP2 uses VOP3e_gfx10<{0,1,0,0,
+    // op[5:0]}> and VOP1 uses VOP3e_gfx10<{0,1,1,op[6:0]}>.
+    private const uint Vop3EncodedVop2Base = 0x100;
+    private const uint Vop3EncodedVop1Base = 0x180;
+
+    // VOPC occupies the bottom of the VOP3 opcode space, so the range test is
+    // just "below the VOP2 window".
+    private static bool IsVop3EncodedVopc(uint vop3Opcode) =>
+        vop3Opcode < Vop3EncodedVop2Base;
+
+    private static string Vop3EncodedName(uint vop3Opcode) => vop3Opcode switch
+    {
+        < Vop3EncodedVop2Base => VopcName(vop3Opcode),
+        // VOP2 is a 6-bit opcode, so only 0x100-0x13F is a re-encoded VOP2;
+        // 0x140 onwards is VOP3-only territory.
+        < Vop3EncodedVop2Base + 0x40 => Vop2Name(vop3Opcode - Vop3EncodedVop2Base),
+        >= Vop3EncodedVop1Base and < Vop3EncodedVop1Base + 0x80 =>
+            Vop1Name(vop3Opcode - Vop3EncodedVop1Base),
+        _ => string.Empty,
+    };
 
     private static bool DecodeVop3(
         uint word,
@@ -1123,17 +1157,10 @@ public static class Gen5ShaderTranslator
                 0x176 => "VMadU64U32",
                 _ => $"Vop3bRaw{opcode:X3}",
             }
-            : opcode switch
+            : Vop3EncodedName(opcode) is { Length: > 0 } reEncoded
+                ? reEncoded
+                : opcode switch
         {
-            0x101 => "VCndmaskB32",
-            0x103 => "VAddF32",
-            0x104 => "VSubF32",
-            0x108 => "VMulF32",
-            0x10F => "VMinF32",
-            0x110 => "VMaxF32",
-            0x11F => "VMacF32",
-            0x12B => "VFmacF32",
-            0x12F => "VCvtPkrtzF16F32",
             0x141 => "VMadF32",
             0x143 => "VMadU32U24",
             0x144 => "VCubeidF32",
@@ -2013,15 +2040,21 @@ public static class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 9) & 0x1FF, literal),
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
+                var vop3Opcode = (word >> 16) & 0x3FF;
                 destinations = [Gen5Operand.Vector(word & 0xFF)];
-                if (opcode == "VReadlaneB32")
+                if (opcode == "VReadlaneB32" || IsVop3EncodedVopc(vop3Opcode))
                 {
                     // V_READLANE uses the VOP3A vdst byte even though the
                     // destination register is scalar. Bits 8-14 are the
                     // distinct sdst field used by VOP3B encodings.
+                    //
+                    // A VOP3-encoded compare reuses the same byte as its sdst:
+                    // VOPC has no vector destination, and the whole reason a
+                    // compare takes the VOP3 form is usually that the result
+                    // goes somewhere other than VCC.
                     destinations = [Gen5Operand.Scalar(word & 0xFF)];
                 }
-                var isVop3B = IsVop3BOpcode((word >> 16) & 0x3FF);
+                var isVop3B = IsVop3BOpcode(vop3Opcode);
                 control = new Gen5Vop3Control(
                     isVop3B ? 0 : (word >> 8) & 0x7,
                     (extra >> 29) & 0x7,

@@ -578,11 +578,15 @@ public static partial class Gen5MslTranslator
             {
                 condition = EmitCompareClass(instruction);
             }
-            else if (opcode is "VCmpTruF32" or "VCmpxTruF32" or "VCmpTI32" or "VCmpTU32")
+            else if (opcode is "VCmpTruF32" or "VCmpxTruF32" or
+                     "VCmpTI32" or "VCmpxTI32" or
+                     "VCmpTU32" or "VCmpxTU32")
             {
                 condition = "true";
             }
-            else if (opcode is "VCmpFF32" or "VCmpxFF32" or "VCmpFI32" or "VCmpFU32")
+            else if (opcode is "VCmpFF32" or "VCmpxFF32" or
+                     "VCmpFI32" or "VCmpxFI32" or
+                     "VCmpFU32" or "VCmpxFU32")
             {
                 condition = "false";
             }
@@ -664,14 +668,29 @@ public static partial class Gen5MslTranslator
             }
             else
             {
-                var target = instruction.Control is Gen5SdwaControl
-                    { ScalarDestination: { } scalarDestination }
-                    ? scalarDestination
-                    : VccLoRegister;
-                StoreMaskBit(target, active);
+                StoreMaskBit(CompareDestination(instruction), active);
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Where a non-VCMPX compare writes its wave mask. The VOP3 encoding
+        /// names the destination SGPR pair explicitly and SDWA can override it;
+        /// the compact VOPC encoding has no destination field and always
+        /// targets VCC.
+        /// </summary>
+        private static uint CompareDestination(Gen5ShaderInstruction instruction)
+        {
+            if (instruction.Destinations.Count > 0 &&
+                instruction.Destinations[0].Kind == Gen5OperandKind.ScalarRegister)
+            {
+                return instruction.Destinations[0].Value;
+            }
+
+            return instruction.Control is Gen5SdwaControl { ScalarDestination: { } scalarDestination }
+                ? scalarDestination
+                : VccLoRegister;
         }
 
         private string EmitCompareClass(Gen5ShaderInstruction instruction)

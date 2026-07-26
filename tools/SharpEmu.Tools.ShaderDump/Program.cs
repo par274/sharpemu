@@ -123,6 +123,17 @@ const ulong ProgramAddress = 0x100000;
         0xBFA30000,             // s_waitcnt_depctr 0x0
         0xBF810000,             // s_endpgm
     ]),
+    // VOP1/VOP2/VOPC instructions in their VOP3 re-encoding, which is what a
+    // compiler emits when it needs source modifiers, an SGPR src1, or a compare
+    // destination other than VCC, so CI's spirv-val covers the emitted module.
+    ("vop3-encoded", true, [
+        0x7E0002FF, 0x3F800000, // v_mov_b32 v0, 1.0f
+        0x7E0202FF, 0x40000000, // v_mov_b32 v1, 2.0f
+        0xD401000A, 0x00020300, // v_cmp_lt_f32_e64 s[10:11], v0, v1
+        0xD5AA0002, 0x20000100, // v_rcp_f32_e64 v2, -v0
+        0xD5040003, 0x00020101, // v_sub_f32_e64 v3, v1, v0
+        0xBF810000,             // s_endpgm
+    ]),
     // s_round_mode / s_denorm_mode write the FP MODE state and must keep
     // failing decode loudly until their semantics are modeled (see #108);
     // this program pins that behavior.
