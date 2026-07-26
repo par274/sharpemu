@@ -100,7 +100,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </MSBuild>
     <Error Condition="'@(_SharpEmuFontSubsetterAssembly)' == ''"
            Text="Could not resolve the SharpEmu GUI font subsetter." />
-    <Exec Command="dotnet &quot;@(_SharpEmuFontSubsetterAssembly->'%(FullPath)')&quot; &quot;$(RepoRoot)&quot;"
-          WorkingDirectory="$(MSBuildProjectDirectory)" />
+    <!-- RepoRoot is normalized with a trailing separator, which would escape
+         the closing quote on Windows. Use it as the working directory and pass
+         a shell-independent relative path instead. -->
+    <Exec Command="dotnet &quot;@(_SharpEmuFontSubsetterAssembly->'%(FullPath)')&quot; ."
+          WorkingDirectory="$(RepoRoot)" />
   </Target>
 </Project>
