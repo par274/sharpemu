@@ -151,6 +151,7 @@
   "Dialog.LogFiles": "Naplózási fájlok",
 
   "Options.About" : "Erről",
+  "About.Tagline": "Kísérleti PlayStation 5 emulátor Windows, Linux és macOS rendszerekhez",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Forrás kód, hibajelentések és a projekt fejlesztése",
   "About.Discord.Label": "Discord",

@@ -1,17 +1,17 @@
 {
   "version": 2,
-  "inputSha256": "2592255f7866866d7d2c7c11840d3085acb68dcb07c0d6ddb9d331c8e24d195d",
+  "inputSha256": "f20b7648b3ee8fc59a4139dc1e66ee6acf0698a7ef22c8209600e954e838f430",
   "harfBuzzVersion": "14.2.1.1",
   "outputs": {
-    "NotoSansJP-Light.ttf": "b71be92e49c6affaccc449feff9749e74cb6183512f8055144f37fa526d31620",
-    "NotoSansJP-Regular.ttf": "831f9f2e83902c5b6335928548477f734a6d73cdeb9f746c74a22a68725b5244",
-    "NotoSansJP-Medium.ttf": "8ef8489163bb61a5b5d675a8ab6d3258c8d7d634f647a5d7a226db51bb610e6f",
-    "NotoSansJP-SemiBold.ttf": "2b1a8edde7a27182fba173ea3adef176a0079625d6c2599b19d200d5fa82cd9f",
-    "NotoSansJP-Bold.ttf": "61a097aa469995e26a5cf90cb83b42ef3083c68200b1358434fdc1126ed108e2",
-    "NotoSansKR-Light.ttf": "0b8af02afe29d43f3f6bffdb7a3ebc520ddd38d6bab9446093bf27151904ae82",
-    "NotoSansKR-Regular.ttf": "345f5baeecc35b16f7ab91aa5d20953a3fa5d7b1843f78edd011093f6850e679",
-    "NotoSansKR-Medium.ttf": "2f8c5a15fc570afffcefc94c14d0cfa1083dbe306a41c6927c4cbe20c5cba834",
-    "NotoSansKR-SemiBold.ttf": "2df659988803cc022290b4d89455fb446cd53b0db4f9e77a8c58d40f4becc140",
-    "NotoSansKR-Bold.ttf": "d37686a1f0ed0b6a702cc6633d85f807593a6a24ff2d3eb93912b2cb014db49b"
+    "NotoSansJP-Light.ttf": "96faf30e7ce624db0265cf66b6f85cab2f3ef3c7d3e549e2ce2f56aba7fc6f9f",
+    "NotoSansJP-Regular.ttf": "c3ad2342c9ba0b9c2130126c0f8c454b7d4f90070aedfd7002efacda75bbc5a1",
+    "NotoSansJP-Medium.ttf": "427ba8e46c31cd988a4a806517af841bb8ab929d6778662c869fb85c58d6587f",
+    "NotoSansJP-SemiBold.ttf": "0fddc2a9f9d439bb173620f7f381f7615e284b8f61ba3e39283ccc7875d68665",
+    "NotoSansJP-Bold.ttf": "e3d0289cd94b109497ffebf4516458b40d1c2073a488096e3827a22b3745ea95",
+    "NotoSansKR-Light.ttf": "b6809bb26dafc4660e230d39a62569c24d6c83cc3ab378f1c835991bbc24a993",
+    "NotoSansKR-Regular.ttf": "4355eccd1924808f78544fd89a42662a4309ffb65989e98e12f5c79742786883",
+    "NotoSansKR-Medium.ttf": "ce2bc1bb20f2019a05497bc46e2b22d688f1b1ff80c49c647402c0b3e47d6947",
+    "NotoSansKR-SemiBold.ttf": "5a40820bdd2449efd6821df15f94350e3e00c12af71879aff2ac32ab35af4c33",
+    "NotoSansKR-Bold.ttf": "18a1940aaaaf73ffb27626d5dbda4eedcfcc9cb583422798143bb0b1e8cec2d0"
   }
 }

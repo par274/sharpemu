@@ -164,6 +164,7 @@
   "PerGame.EnvToggles.Label": "مفاتيح البيئة",
   "PerGame.EnvToggles.Desc": "تجاوز المجموعة العامة من مفاتيح ‎SHARPEMU_*‎ لهذه اللعبة",
   "Options.About": "حول",
+  "About.Tagline": "محاكي تجريبي لجهاز PlayStation 5 لأنظمة Windows وLinux وmacOS",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "الكود المصدري والمشكلات وتطوير المشروع",
   "About.Github.LatestCommitLabel": "أحدث Commit",

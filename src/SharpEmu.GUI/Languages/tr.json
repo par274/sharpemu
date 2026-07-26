@@ -180,6 +180,7 @@
   "PerGame.EnvToggles.Label": "Ortam anahtarları",
   "PerGame.EnvToggles.Desc": "Bu oyun için genel SHARPEMU_* anahtar kümesini geçersiz kıl",
   "Options.About": "Hakkında",
+  "About.Tagline": "Windows, Linux ve macOS için deneysel bir PlayStation 5 emülatörü",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Kaynak kodu, hata kayıtları ve proje geliştirme",
   "About.Github.LatestCommitLabel": "Son Commit",

@@ -164,6 +164,7 @@
   "PerGame.EnvToggles.Label": "環境スイッチ",
   "PerGame.EnvToggles.Desc": "このゲームに対してグローバルのSHARPEMU_*スイッチを上書きします",
   "Options.About": "情報",
+  "About.Tagline": "Windows、Linux、macOS向けの実験的なPlayStation 5エミュレーター",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "ソースコード、Issue、プロジェクトの開発",
   "About.Github.LatestCommitLabel": "最新コミット",

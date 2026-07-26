@@ -6,6 +6,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:SharpEmu.GUI"
+             xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
              x:Class="SharpEmu.GUI.App"
              RequestedThemeVariant="Dark">
 
@@ -32,6 +33,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SolidColorBrush x:Key="InfoBrush" Color="#64A7FF" />
     <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
     <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
+    <FontFamily x:Key="GoogleSans">avares://SharpEmu.GUI/Assets/Fonts#Google Sans</FontFamily>
     <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
 
     <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
@@ -569,11 +571,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="BorderBrush" Value="#0AFFFFFF" />
       <Setter Property="BorderThickness" Value="1" />
     </Style>
-    <Style Selector="Border.optionsInfoRow:pointerover,
-                     Border.optionsInfoRow:focus-within">
-      <Setter Property="Background" Value="#0DFFFFFF" />
-      <Setter Property="BorderBrush" Value="#22FFFFFF" />
-    </Style>
     <Style Selector="ContentControl.optionRow:pointerover /template/ Border#PART_RowSurface,
                      ContentControl.optionRow:focus-within /template/ Border#PART_RowSurface">
       <Setter Property="Background" Value="#0DFFFFFF" />
@@ -595,6 +592,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="MinWidth" Value="156" />
       <Setter Property="MinHeight" Value="44" />
       <Setter Property="Padding" Value="18,0" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="CornerRadius" Value="12" />
       <Setter Property="Background" Value="#12FFFFFF" />
       <Setter Property="BorderBrush" Value="#1FFFFFFF" />
@@ -606,6 +606,57 @@ SPDX-License-Identifier: GPL-2.0-or-later
                      Button.optionAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="#20FFFFFF" />
       <Setter Property="BorderBrush" Value="#42FFFFFF" />
+    </Style>
+    <Style Selector="Button.aboutLinkAction">
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Padding" Value="10,0" />
+      <Setter Property="HorizontalContentAlignment" Value="Right" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#A6FFFFFF" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+      <Setter Property="RenderTransform" Value="none" />
+    </Style>
+    <Style Selector="Button.aboutLinkAction /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="#A6FFFFFF" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.14"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.aboutLinkAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.aboutLinkAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.aboutLinkAction:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.aboutLinkAction:pressed">
+      <Setter Property="RenderTransform" Value="none" />
+    </Style>
+    <Style Selector="svg|Svg.aboutLinkBrandIcon">
+      <Setter Property="Opacity" Value="0.65" />
+      <Setter Property="OpacityMask" Value="White" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.14"
+                            Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.aboutLinkAction:pointerover svg|Svg.aboutLinkBrandIcon,
+                     Button.aboutLinkAction:focus-visible svg|Svg.aboutLinkBrandIcon,
+                     Button.aboutLinkAction:pressed svg|Svg.aboutLinkBrandIcon">
+      <Setter Property="Opacity" Value="1" />
     </Style>
     <Style Selector="Button.gameOptionsLaunch">
       <Setter Property="Width" Value="220" />

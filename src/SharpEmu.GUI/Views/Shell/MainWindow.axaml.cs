@@ -456,7 +456,7 @@ public partial class MainWindow : Window
             });
         };
 
-        LatestCommitHashText.Click += (_, _) =>
+        LatestCommitButton.Click += (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(_latestCommitSha))
             {
@@ -521,8 +521,8 @@ public partial class MainWindow : Window
             "https://api.github.com/repos/sharpemu/sharpemu/commits/main";
 
         _latestCommitSha = null;
-        LatestCommitHashText.Content = "Loading…";
-        LatestCommitHashText.IsEnabled = false;
+        LatestCommitHashText.Text = "Loading…";
+        LatestCommitButton.IsEnabled = false;
 
         try
         {
@@ -532,11 +532,11 @@ public partial class MainWindow : Window
 
             if (!response.IsSuccessStatusCode)
             {
-                LatestCommitHashText.Content =
+                LatestCommitHashText.Text =
                     $"HTTP {(int)response.StatusCode}";
 
                 ToolTip.SetTip(
-                    LatestCommitHashText,
+                    LatestCommitButton,
                     string.IsNullOrWhiteSpace(responseBody)
                         ? response.ReasonPhrase
                         : responseBody);
@@ -546,8 +546,8 @@ public partial class MainWindow : Window
 
             if (responseBody.Length < 7)
             {
-                LatestCommitHashText.Content = "Invalid response";
-                ToolTip.SetTip(LatestCommitHashText, responseBody);
+                LatestCommitHashText.Text = "Invalid response";
+                ToolTip.SetTip(LatestCommitButton, responseBody);
                 return;
             }
 
@@ -555,29 +555,29 @@ public partial class MainWindow : Window
             _latestCommitSha = responseBody;
 
             // Display only the short SHA.
-            LatestCommitHashText.Content =
+            LatestCommitHashText.Text =
                 responseBody[..Math.Min(7, responseBody.Length)];
 
-            LatestCommitHashText.IsEnabled = true;
+            LatestCommitButton.IsEnabled = true;
 
             ToolTip.SetTip(
-                LatestCommitHashText,
+                LatestCommitButton,
                 $"Open commit {_latestCommitSha}");
         }
         catch (TaskCanceledException ex)
         {
-            LatestCommitHashText.Content = "Timeout";
-            ToolTip.SetTip(LatestCommitHashText, ex.Message);
+            LatestCommitHashText.Text = "Timeout";
+            ToolTip.SetTip(LatestCommitButton, ex.Message);
         }
         catch (HttpRequestException ex)
         {
-            LatestCommitHashText.Content = "Connection error";
-            ToolTip.SetTip(LatestCommitHashText, ex.Message);
+            LatestCommitHashText.Text = "Connection error";
+            ToolTip.SetTip(LatestCommitButton, ex.Message);
         }
         catch (Exception ex)
         {
-            LatestCommitHashText.Content = "Error";
-            ToolTip.SetTip(LatestCommitHashText, ex.Message);
+            LatestCommitHashText.Text = "Error";
+            ToolTip.SetTip(LatestCommitButton, ex.Message);
         }
     }
 
@@ -953,8 +953,9 @@ public partial class MainWindow : Window
         GithubDesc.Text = loc.Get("About.Github.Desc");
         DiscordServerLabel.Text = loc.Get("About.Discord.Label");
         DiscordServerDesc.Text = loc.Get("About.Discord.Desc");
-        GithubButton.Content = loc.Get("About.GithubButton");
-        DiscordButton.Content = loc.Get("About.DiscordButton");
+        AboutTagline.Text = loc.Get("About.Tagline");
+        GithubButtonLabel.Text = loc.Get("About.GithubButton");
+        DiscordButtonLabel.Text = loc.Get("About.DiscordButton");
         UpdateLabel.Text = loc.Get("Updater.Label");
         LatestCommitLabel.Text = loc.Get("About.Github.LatestCommitLabel");
         LatestCommitDescription.Text = loc.Get("About.Github.LatestCommitDescription");
@@ -1718,7 +1719,7 @@ public partial class MainWindow : Window
             EnvLogIoToggle,
             EnvLogNpToggle,
         ],
-        5 => [LatestCommitHashText, UpdateButton, GithubButton, DiscordButton],
+        5 => [LatestCommitButton, UpdateButton, GithubButton, DiscordButton],
         _ => [],
     };
 

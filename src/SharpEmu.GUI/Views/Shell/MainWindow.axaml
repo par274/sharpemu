@@ -1016,35 +1016,77 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                     <ScrollViewer x:Name="OptionsAboutPanel"
                                   Classes="optionsSectionPanel">
                       <StackPanel>
+                        <StackPanel HorizontalAlignment="Center"
+                                    Margin="0,12,0,34"
+                                    Spacing="7">
+                          <Border Width="140"
+                                  Height="140"
+                                  CornerRadius="15"
+                                  ClipToBounds="True"
+                                  HorizontalAlignment="Center">
+                            <Image Source="avares://SharpEmu.GUI/Assets/logo.png"
+                                   Stretch="UniformToFill" />
+                          </Border>
+                          <TextBlock Text="SharpEmu"
+                                     FontSize="36"
+                                     FontWeight="SemiBold"
+                                     LetterSpacing="-0.6"
+                                     HorizontalAlignment="Center" />
+                          <TextBlock x:Name="AboutTagline"
+                                     Text="An experimental PlayStation 5 emulator for Windows, Linux and macOS"
+                                     MaxWidth="620"
+                                     FontSize="13"
+                                     FontWeight="Normal"
+                                     Foreground="{StaticResource SettingsDescriptionBrush}"
+                                     TextAlignment="Center"
+                                     TextWrapping="Wrap"
+                                     HorizontalAlignment="Center" />
+                        </StackPanel>
                         <Border Classes="optionsGroup">
                           <StackPanel Spacing="8">
                             <Border Classes="optionsInfoRow">
-                              <Grid ColumnDefinitions="*,Auto">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
                                 <StackPanel VerticalAlignment="Center">
                                   <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="14" FontWeight="Medium" />
                                   <TextBlock x:Name="LatestCommitDescription"
                                              Text="Latest commit on the main branch"
                                              FontSize="11"
                                              FontWeight="Normal"
-                                             Foreground="{StaticResource SettingsDescriptionBrush}" />
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
                                 </StackPanel>
-                                <Button x:Name="LatestCommitHashText"
+                                <Button x:Name="LatestCommitButton"
                                         Grid.Column="1"
-                                        Classes="optionAction"
-                                        Content="Loading…"
-                                        FontFamily="Cascadia Mono,Consolas,monospace"
-                                        IsEnabled="False" />
+                                        Classes="aboutLinkAction"
+                                        IsEnabled="False"
+                                        VerticalAlignment="Center">
+                                  <StackPanel Orientation="Horizontal"
+                                              Spacing="8"
+                                              VerticalAlignment="Center">
+                                    <TextBlock x:Name="LatestCommitHashText"
+                                               Text="Loading…"
+                                               FontFamily="{StaticResource GoogleSans}"
+                                               FontSize="13"
+                                               FontWeight="Medium"
+                                               VerticalAlignment="Center" />
+                                    <TextBlock Classes="materialSymbol compact"
+                                               Text="fork_right" />
+                                  </StackPanel>
+                                </Button>
                               </Grid>
                             </Border>
                             <Border Classes="optionsInfoRow">
-                              <Grid ColumnDefinitions="*,Auto">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
                                 <StackPanel VerticalAlignment="Center">
                                   <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="14" FontWeight="Medium" />
                                   <TextBlock x:Name="UpdateStatusText"
                                              Text="Current build: dev"
                                              FontSize="11"
                                              FontWeight="Normal"
-                                             Foreground="{StaticResource SettingsDescriptionBrush}" />
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
                                 </StackPanel>
                                 <Button x:Name="UpdateButton"
                                         Grid.Column="1"
@@ -1053,35 +1095,67 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                               </Grid>
                             </Border>
                             <Border Classes="optionsInfoRow">
-                              <Grid ColumnDefinitions="*,Auto">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
                                 <StackPanel VerticalAlignment="Center">
                                   <TextBlock x:Name="GithubLabel" Text="GitHub" FontSize="14" FontWeight="Medium" />
                                   <TextBlock x:Name="GithubDesc"
                                              Text="Source code, issues and project development."
                                              FontSize="11"
                                              FontWeight="Normal"
-                                             Foreground="{StaticResource SettingsDescriptionBrush}" />
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
                                 </StackPanel>
                                 <Button x:Name="GithubButton"
                                         Grid.Column="1"
-                                        Classes="optionAction"
-                                        Content="Open" />
+                                        Classes="aboutLinkAction"
+                                        VerticalAlignment="Center">
+                                  <StackPanel Orientation="Horizontal"
+                                              Spacing="8"
+                                              VerticalAlignment="Center">
+                                    <TextBlock x:Name="GithubButtonLabel"
+                                               Text="Contribute on GitHub!"
+                                               FontSize="13"
+                                               FontWeight="Medium"
+                                               VerticalAlignment="Center" />
+                                    <svg:Svg Classes="aboutLinkBrandIcon"
+                                             Path="avares://SharpEmu.GUI/Assets/Icons/GitHub.svg"
+                                             Width="18"
+                                             Height="18" />
+                                  </StackPanel>
+                                </Button>
                               </Grid>
                             </Border>
                             <Border Classes="optionsInfoRow">
-                              <Grid ColumnDefinitions="*,Auto">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
                                 <StackPanel VerticalAlignment="Center">
                                   <TextBlock x:Name="DiscordServerLabel" Text="Discord" FontSize="14" FontWeight="Medium" />
                                   <TextBlock x:Name="DiscordServerDesc"
                                              Text="Join the community, get support and follow development."
                                              FontSize="11"
                                              FontWeight="Normal"
-                                             Foreground="{StaticResource SettingsDescriptionBrush}" />
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
                                 </StackPanel>
                                 <Button x:Name="DiscordButton"
                                         Grid.Column="1"
-                                        Classes="optionAction"
-                                        Content="Join" />
+                                        Classes="aboutLinkAction"
+                                        VerticalAlignment="Center">
+                                  <StackPanel Orientation="Horizontal"
+                                              Spacing="8"
+                                              VerticalAlignment="Center">
+                                    <TextBlock x:Name="DiscordButtonLabel"
+                                               Text="Join our Discord!"
+                                               FontSize="13"
+                                               FontWeight="Medium"
+                                               VerticalAlignment="Center" />
+                                    <svg:Svg Classes="aboutLinkBrandIcon"
+                                             Path="avares://SharpEmu.GUI/Assets/Icons/Discord.svg"
+                                             Width="18"
+                                             Height="18" />
+                                  </StackPanel>
+                                </Button>
                               </Grid>
                             </Border>
                           </StackPanel>

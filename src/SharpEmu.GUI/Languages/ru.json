@@ -165,6 +165,7 @@
   "Dialog.LogFiles": "Логи",
 
   "Options.About": "О программе",
+  "About.Tagline": "Экспериментальный эмулятор PlayStation 5 для Windows, Linux и macOS",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Исходный код, отчёты об ошибках и разработка проекта",
   "About.Github.LatestCommitLabel": "Последний коммит",

@@ -164,6 +164,7 @@
   "PerGame.EnvToggles.Label": "환경 스위치",
   "PerGame.EnvToggles.Desc": "이 게임에 대해 전역 SHARPEMU_* 스위치 설정을 재정의합니다",
   "Options.About": "정보",
+  "About.Tagline": "Windows, Linux 및 macOS용 실험적 PlayStation 5 에뮬레이터",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "소스 코드, 이슈, 프로젝트 개발",
   "About.Github.LatestCommitLabel": "최신 커밋",

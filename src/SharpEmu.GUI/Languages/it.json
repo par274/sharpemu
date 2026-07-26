@@ -169,6 +169,7 @@
   "PerGame.EnvToggles.Label": "Variabili d'ambiente",
   "PerGame.EnvToggles.Desc": "Sovrascrivi l'insieme globale delle opzioni SHARPEMU_* per questo gioco",
   "Options.About": "Informazioni",
+  "About.Tagline": "Un emulatore sperimentale di PlayStation 5 per Windows, Linux e macOS",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Codice sorgente, issue e sviluppo del progetto",
   "About.Github.LatestCommitLabel": "Ultimo commit",

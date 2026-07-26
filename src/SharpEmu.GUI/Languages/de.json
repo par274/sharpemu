@@ -164,6 +164,7 @@
   "PerGame.EnvToggles.Label": "Umgebungsschalter",
   "PerGame.EnvToggles.Desc": "Die globalen SHARPEMU_*-Schalter für dieses Spiel überschreiben",
   "Options.About": "Über",
+  "About.Tagline": "Ein experimenteller PlayStation-5-Emulator für Windows, Linux und macOS",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Quellcode, Issues und Projektentwicklung",
   "About.Github.LatestCommitLabel": "Neuester Commit",

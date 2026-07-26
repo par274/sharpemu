@@ -164,6 +164,7 @@
   "PerGame.EnvToggles.Label": "Miljøkontakter",
   "PerGame.EnvToggles.Desc": "Tilsidesæt det globale sæt SHARPEMU_*-kontakter for dette spil",
   "Options.About": "Om",
+  "About.Tagline": "En eksperimentel PlayStation 5-emulator til Windows, Linux og macOS",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Kildekode, issues og projektudvikling",
   "About.Github.LatestCommitLabel": "Seneste commit",

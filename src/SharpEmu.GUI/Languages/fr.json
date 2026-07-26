@@ -151,6 +151,7 @@
   "Dialog.LogFiles": "Fichiers journaux",
 
   "Options.About": "À propos",
+  "About.Tagline": "Un émulateur expérimental de PlayStation 5 pour Windows, Linux et macOS",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Code source, issues et développement du projet",
   "About.Discord.Label": "Discord",

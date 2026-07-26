@@ -164,6 +164,7 @@
   "PerGame.EnvToggles.Label": "Omgevingsschakelaars",
   "PerGame.EnvToggles.Desc": "Overschrijf de globale set SHARPEMU_*-schakelaars voor deze game",
   "Options.About": "Over",
+  "About.Tagline": "Een experimentele PlayStation 5-emulator voor Windows, Linux en macOS",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Broncode, issues en projectontwikkeling",
   "About.Github.LatestCommitLabel": "Nieuwste commit",
