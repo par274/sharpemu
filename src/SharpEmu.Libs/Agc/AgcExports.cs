@@ -7642,7 +7642,7 @@ public static partial class AgcExports
             var decodedMax = BitConverter.UInt32BitsToSingle(zMaxBits);
             if (float.IsFinite(decodedMin) &&
                 float.IsFinite(decodedMax) &&
-                decodedMax > decodedMin)
+                decodedMax != decodedMin)
             {
                 minDepth = decodedMin;
                 maxDepth = decodedMax;

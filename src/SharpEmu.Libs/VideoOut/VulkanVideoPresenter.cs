@@ -9999,7 +9999,7 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             var minDepth = Math.Clamp(rect.MinDepth, 0f, 1f);
-            var maxDepth = Math.Clamp(rect.MaxDepth, minDepth, 1f);
+            var maxDepth = Math.Clamp(rect.MaxDepth, 0f, 1f);
             return new Viewport(x, y, width, height, minDepth, maxDepth);
         }
 
