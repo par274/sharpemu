@@ -7917,6 +7917,8 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    private static long _checkReachabilityMissTraceCount;
+
     // POSIX access(2)-style path reachability probe used by RAGE EnumerationThread.
     [SysAbiExport(
         Nid = "uWyW3v98sU4",
@@ -7941,6 +7943,16 @@ public static partial class KernelMemoryCompatExports
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        // EnumerationThread probes missing mounts during load; surface guest/host
+        // paths so North Yankton stalls are diagnosable without SHARPEMU_LOG_IO.
+        var miss = Interlocked.Increment(ref _checkReachabilityMissTraceCount);
+        if (miss <= 16 || (miss & (miss - 1)) == 0)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] kernel.check_reachability_miss count={miss} " +
+                $"guest='{guestPath}' host='{hostPath}'");
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
