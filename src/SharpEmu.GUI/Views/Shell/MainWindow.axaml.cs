@@ -2304,6 +2304,16 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Opacity transitions are evaluated by the compositor. Waiting only
+        // for their nominal duration can still reveal the native child before
+        // the fully black frame has actually been presented. Two animation
+        // frames guarantee that at least one opaque frame reaches the screen.
+        await WaitForAnimationFramesAsync(2);
+        if (!IsLaunchTransitionCurrent(generation))
+        {
+            return;
+        }
+
         MainContent.Margin = new Thickness(0);
         RestoreGameViewToFull();
         GameView.Background = Brushes.Black;
@@ -2329,6 +2339,17 @@ public partial class MainWindow : Window
         // Keep a black frame behind the native child. On Stop/exit the child
         // disappears first, then this bridge fades out to the launcher.
         UpdateSessionBarVisibility();
+    }
+
+    private async Task WaitForAnimationFramesAsync(int frameCount)
+    {
+        for (var frame = 0; frame < frameCount; frame++)
+        {
+            var completion = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            RequestAnimationFrame(_ => completion.TrySetResult(true));
+            await completion.Task;
+        }
     }
 
     private bool IsLaunchTransitionCurrent(int generation) =>

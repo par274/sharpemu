@@ -1347,7 +1347,7 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                      Text="Loading…"
                      FontSize="13"
                      FontWeight="Medium"
-                     Foreground="#C7FFFFFF"
+                     Foreground="White"
                      HorizontalAlignment="Center" />
           <ProgressBar Height="4"
                        Background="#24FFFFFF"
@@ -1408,7 +1408,8 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
           <svg:Svg Path="avares://SharpEmu.GUI/Assets/logo.svg"
                    Width="46"
                    Height="46"
-                   Stretch="Uniform" />
+                   Stretch="Uniform"
+                   OpacityMask="White" />
           <TextBlock x:Name="VersionText"
                      Text="v0.0.1"
                      FontSize="10"

@@ -821,8 +821,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Style>
     <Style Selector="Button.optionsNav">
       <Setter Property="Height" Value="61" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
       <Setter Property="Padding" Value="16,0" />
-      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
       <Setter Property="VerticalContentAlignment" Value="Center" />
       <Setter Property="CornerRadius" Value="12" />
       <Setter Property="Background" Value="Transparent" />
@@ -848,11 +849,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Style Selector="Button.optionsNav:pressed">
       <Setter Property="RenderTransform" Value="none" />
     </Style>
+    <!-- Material Symbols Rounded has an asymmetric line box: its visible ink
+         sits about 2.5 px below the line-box center. Bottom padding expands
+         the measured box and moves the ink up while the row stays centered. -->
     <Style Selector="TextBlock.optionsNavIcon">
       <Setter Property="FontSize" Value="20" />
       <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="Foreground" Value="#8FFFFFFF" />
-      <Setter Property="RenderTransform" Value="translateY(-2px)" />
+      <Setter Property="Margin" Value="0" />
+      <Setter Property="Padding" Value="0,0,0,5" />
       <Setter Property="Transitions">
         <Transitions>
           <BrushTransition Property="Foreground"
@@ -866,7 +871,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="FontWeight" Value="Medium" />
       <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="Foreground" Value="#8FFFFFFF" />
-      <Setter Property="RenderTransform" Value="translateY(-2px)" />
       <Setter Property="Transitions">
         <Transitions>
           <BrushTransition Property="Foreground"
