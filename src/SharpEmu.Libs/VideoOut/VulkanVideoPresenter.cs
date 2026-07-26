@@ -457,6 +457,8 @@ internal static unsafe class VulkanVideoPresenter
             : 100_000_000UL;
     private static readonly HashSet<string> _tracedFenceTimeouts = new();
     private static long _guestQueueBackpressureTraceCount;
+    private static long _guestQueueStarvationTraceCount;
+    private static long _guestQueueStarvationLastQueued = -1;
     // Diagnostic: skip every compute dispatch (mistranslated compute shaders
     // run long / GPU-hang and starve the present). Isolates whether the
     // geometry+composite path renders on its own.
@@ -2431,7 +2433,27 @@ internal static unsafe class VulkanVideoPresenter
                         $"incoming_mb={payloadBytes / (1024 * 1024)} " +
                         $"budget_mb={_maxPendingGuestWorkBytes / (1024 * 1024)} " +
                         $"work={work.GetType().Name}" +
-                        GetGuestWorkPayloadBreakdown(work));
+                        GetGuestWorkPayloadBreakdown(work) +
+                        FormatGuestQueueBacklogLocked());
+                }
+
+                // Sustained full-queue backpressure is the North Yankton soft-lock
+                // signature: ordered actions pile up and producers block for seconds.
+                if (_pendingGuestWorkCount >= _maxPendingGuestWorkItems &&
+                    _pendingGuestWorkCount != _guestQueueStarvationLastQueued)
+                {
+                    _guestQueueStarvationLastQueued = _pendingGuestWorkCount;
+                    var starvationCount = Interlocked.Increment(
+                        ref _guestQueueStarvationTraceCount);
+                    if (starvationCount <= 8 || (starvationCount & (starvationCount - 1)) == 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][WARN] vk.guest_queue_starvation " +
+                            $"count={starvationCount} " +
+                            $"queued={_pendingGuestWorkCount} " +
+                            $"work={work.GetType().Name}" +
+                            FormatGuestQueueBacklogLocked());
+                    }
                 }
             }
 
@@ -2721,6 +2743,62 @@ internal static unsafe class VulkanVideoPresenter
                 $" global_lengths=[{string.Join(',', compute.GlobalMemoryBuffers.Select(static buffer => buffer.Length))}]",
             _ => string.Empty,
         };
+    }
+
+    private static string FormatGuestQueueBacklogLocked()
+    {
+        var typeCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var orderedNameCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var queue in _pendingGuestWorkByQueue.Values)
+        {
+            for (var node = queue.First; node is not null; node = node.Next)
+            {
+                var work = node.Value.Work;
+                var typeName = work.GetType().Name;
+                typeCounts[typeName] = typeCounts.GetValueOrDefault(typeName) + 1;
+                if (work is VulkanOrderedGuestAction ordered)
+                {
+                    var prefix = GetOrderedActionDebugPrefix(ordered.DebugName);
+                    orderedNameCounts[prefix] =
+                        orderedNameCounts.GetValueOrDefault(prefix) + 1;
+                }
+            }
+        }
+
+        static string TopEntries(Dictionary<string, int> counts, int limit)
+        {
+            if (counts.Count == 0)
+            {
+                return "-";
+            }
+
+            return string.Join(
+                ',',
+                counts
+                    .OrderByDescending(static entry => entry.Value)
+                    .Take(limit)
+                    .Select(static entry => $"{entry.Key}:{entry.Value}"));
+        }
+
+        return $" types=[{TopEntries(typeCounts, 6)}]" +
+               $" ordered=[{TopEntries(orderedNameCounts, 8)}]";
+    }
+
+    private static string GetOrderedActionDebugPrefix(string debugName)
+    {
+        if (string.IsNullOrEmpty(debugName))
+        {
+            return "(empty)";
+        }
+
+        var span = debugName.AsSpan();
+        var cut = span.IndexOfAny(' ', '=');
+        if (cut <= 0)
+        {
+            cut = Math.Min(span.Length, 48);
+        }
+
+        return debugName[..cut];
     }
 
     private static ulong GetDrawPayloadBytes(VulkanTranslatedGuestDraw draw)
