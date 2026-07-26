@@ -9309,14 +9309,12 @@ public static partial class AgcExports
         // generation-stale when the guest CPU rewrites a CPU-backed image
         // (video planes, streamed font atlases), which routes this draw back
         // through the texel copy below so the refresh path re-uploads.
-        // Skip is only correct while GuestImageWriteTracker can bump the
-        // write generation. With the tracker off (Windows default), known
-        // stays true forever and CPU-updated planes (GTA guest Bink) would
-        // ship empty RgbaPixels after the first upload.
+        // With the write tracker off (Windows default), IsGuestImageUploadKnown
+        // uses a cheap guest-memory probe so static UI can still skip (Dead
+        // Cells menus) while changing CPU content (GTA Bink) forces a copy.
         if (!isStorage &&
             !wantsArrayUpload &&
             descriptor.Address != 0 &&
-            SharpEmu.HLE.GuestImageWriteTracker.Enabled &&
             GuestGpu.Current.IsGuestImageUploadKnown(
                 descriptor.Address,
                 descriptor.Format,
@@ -9426,14 +9424,12 @@ public static partial class AgcExports
         // When the presenter already holds this exact texture identity in
         // its cache, the texel copy below would be discarded on arrival; for
         // scenes that sample large textures every draw this copy dominated
-        // CPU time. The dirty peek closes the race with eviction: a texture
-        // the guest rewrote must ship fresh texels with this draw, because
-        // the render thread evicts the stale cache entry before executing it
-        // (skipping would leave the draw with no pixels and a fallback
-        // texture for the frame — visible flicker on animated textures).
-        // Skip is only correct while GuestImageWriteTracker can report dirty
-        // pages. With the tracker off (Windows default), PeekDirty never
-        // fires and CPU-updated planes (GTA guest Bink) would stay black.
+        // CPU time (Dead Cells menus). The dirty peek closes the race with
+        // eviction when the write tracker is on. With the tracker off,
+        // PeekDirty is always false so a cached identity keeps skipping —
+        // correct for static UI atlases. CPU-updated guest Bink planes are
+        // handled by the upload-known gate above (forced copies when the
+        // tracker cannot invalidate), not by disabling this cache skip.
         var sampler = ToGuestSampler(samplerDescriptor);
         // Track the guest allocation before reading its texels so a CPU
         // rewrite landing after the copy still bumps the write generation.
@@ -9445,7 +9441,6 @@ public static partial class AgcExports
                 descriptor.Address,
                 out var writeGeneration);
         if (!_textureCopySkipDisabled &&
-            SharpEmu.HLE.GuestImageWriteTracker.Enabled &&
             descriptor.Address != 0 &&
             !SharpEmu.HLE.GuestImageWriteTracker.PeekDirty(descriptor.Address) &&
             GuestGpu.Current.IsTextureContentCached(

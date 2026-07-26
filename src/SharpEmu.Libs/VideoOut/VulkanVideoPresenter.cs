@@ -522,6 +522,10 @@ internal static unsafe class VulkanVideoPresenter
     // memory (video frames, streamed atlases) and the upload-known skip in
     // draw translation must ship fresh texels instead of reusing the image.
     private static readonly Dictionary<ulong, long> _cpuBackedUploadGenerations = new();
+    // Sparse guest-memory fingerprints used when the write tracker is off so
+    // upload-known can still skip static UI atlases without missing CPU-updated
+    // video planes (see IsGuestImageUploadKnown).
+    private static readonly Dictionary<ulong, ulong> _untrackedGuestImageContentProbes = new();
     private static readonly Dictionary<(int Handle, int BufferIndex), long>
         _lastOrderedGuestFlipVersions = new();
     private static long _orderedGuestFlipVersionSequence;
@@ -864,6 +868,7 @@ internal static unsafe class VulkanVideoPresenter
         _guestImageWorkSequences.Clear();
         _availableGuestImages.Clear();
         _cpuBackedUploadGenerations.Clear();
+        _untrackedGuestImageContentProbes.Clear();
         _lastOrderedGuestFlipVersions.Clear();
         _orderedGuestFlipVersionSequence = 0;
         _pendingGuestImageUploads.Clear();
@@ -1957,6 +1962,7 @@ internal static unsafe class VulkanVideoPresenter
             return false;
         }
 
+        ulong probeByteCount = 0;
         lock (_gate)
         {
             var known =
@@ -1982,8 +1988,98 @@ internal static unsafe class VulkanVideoPresenter
                 return false;
             }
 
+            if (SharpEmu.HLE.GuestImageWriteTracker.Enabled)
+            {
+                return true;
+            }
+
+            if (_guestImageExtents.TryGetValue(address, out var extent))
+            {
+                probeByteCount = extent.ByteCount;
+            }
+        }
+
+        // Tracker off: availability never goes generation-stale. A sparse
+        // guest-memory probe lets static upload-known textures keep skipping
+        // (Dead Cells menus) while CPU-rewritten planes (GTA Bink) fall through
+        // to a full texel copy when the probe changes.
+        return IsUntrackedGuestImageContentUnchanged(address, probeByteCount);
+    }
+
+    private static bool IsUntrackedGuestImageContentUnchanged(ulong address, ulong byteCount)
+    {
+        var memory = _guestMemory;
+        if (memory is null || byteCount == 0)
+        {
+            // No probe possible — preserve the historical skip so UI stays
+            // cheap; video planes normally have extents registered.
             return true;
         }
+
+        var probe = ComputeSparseGuestContentProbe(memory, address, byteCount);
+        lock (_gate)
+        {
+            if (!_untrackedGuestImageContentProbes.TryGetValue(address, out var previous))
+            {
+                _untrackedGuestImageContentProbes[address] = probe;
+                return true;
+            }
+
+            if (previous == probe)
+            {
+                return true;
+            }
+
+            _untrackedGuestImageContentProbes[address] = probe;
+            return false;
+        }
+    }
+
+    private static ulong ComputeSparseGuestContentProbe(
+        SharpEmu.HLE.ICpuMemory memory,
+        ulong address,
+        ulong byteCount)
+    {
+        Span<byte> sample = stackalloc byte[64];
+        ulong hash = 14695981039346656037UL;
+        Span<ulong> offsets = stackalloc ulong[3];
+        var offsetCount = 0;
+        offsets[offsetCount++] = 0;
+        if (byteCount > 128)
+        {
+            offsets[offsetCount++] = byteCount / 2;
+        }
+
+        if (byteCount > 64)
+        {
+            offsets[offsetCount++] = byteCount - 64;
+        }
+
+        for (var o = 0; o < offsetCount; o++)
+        {
+            var offset = offsets[o];
+            if (offset >= byteCount)
+            {
+                continue;
+            }
+
+            var length = (int)Math.Min(64UL, byteCount - offset);
+            if (!memory.TryRead(address + offset, sample[..length]))
+            {
+                hash ^= 0x9E3779B97F4A7C15UL + offset;
+                continue;
+            }
+
+            for (var i = 0; i < length; i++)
+            {
+                hash ^= sample[i];
+                hash *= 1099511628211UL;
+            }
+
+            hash ^= (ulong)length + offset;
+        }
+
+        return hash ^ byteCount;
     }
 
     public static bool TrySubmitGuestImageBlit(
@@ -17381,6 +17477,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 _availableGuestImages.Clear();
                 _cpuBackedUploadGenerations.Clear();
+                _untrackedGuestImageContentProbes.Clear();
                 _lastOrderedGuestFlipVersions.Clear();
             }
             DestroySwapchainResources();
