@@ -1,4 +1,4 @@
-﻿<!--
+<!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
@@ -39,6 +39,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <UsingTask TaskName="SharpEmu.SourceGenerators.GenerateAerolibBinaryTask"
              TaskFactory="TaskHostFactory"
+             Runtime="NET"
              AssemblyFile="$(SharpEmuAerolibTaskAssembly)" />
 
   <!-- Runs after ResolveProjectReferences (which builds the task assembly) and before
