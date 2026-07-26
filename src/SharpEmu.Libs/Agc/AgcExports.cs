@@ -1022,7 +1022,11 @@ public static partial class AgcExports
         var geometryShaderAddress = ctx[CpuRegister.Rcx];
         var primitiveType = (uint)ctx[CpuRegister.R8];
 
-        if (cxRegistersAddress == 0 || ucRegistersAddress == 0 || hullShaderAddress != 0 || geometryShaderAddress == 0)
+        // Hull is optional: tessellation pipelines (GTA fused HS, Ghost of Yōtei)
+        // pass a non-null hull-state block here. Geometry-derived CX/UC writes
+        // stay the same; the hull stage itself is not modelled yet, so it is
+        // only recorded in the trace (#583).
+        if (cxRegistersAddress == 0 || ucRegistersAddress == 0 || geometryShaderAddress == 0)
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
@@ -1044,7 +1048,9 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAgc($"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} gs=0x{geometryShaderAddress:X16} type={shaderType} prim=0x{primitiveType:X8}");
+        TraceAgc(
+            $"agc.create_prim_state cx=0x{cxRegistersAddress:X16} uc=0x{ucRegistersAddress:X16} " +
+            $"hull=0x{hullShaderAddress:X16} gs=0x{geometryShaderAddress:X16} type={shaderType} prim=0x{primitiveType:X8}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
