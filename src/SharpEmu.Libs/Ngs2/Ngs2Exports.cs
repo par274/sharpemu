@@ -214,7 +214,11 @@ public static class Ngs2Exports
         var outHandleAddress = ctx[CpuRegister.Rdx];
         lock (StateGate)
         {
-            if (!Racks.ContainsKey(rackHandle))
+            if (rackHandle == 0 && !Racks.ContainsKey(0))
+            {
+                Racks[0] = new RackState(SystemHandle: 0, RackId: 0);
+            }
+            else if (!Racks.ContainsKey(rackHandle))
             {
                 return SetReturn(ctx, OrbisNgs2ErrorInvalidRackHandle);
             }
