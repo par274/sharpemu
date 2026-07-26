@@ -23,6 +23,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     <BaseIntermediateOutputPath>$(RepoRoot)artifacts/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
     <BaseOutputPath>$(RepoRoot)artifacts/bin/</BaseOutputPath>
+    <BaseIntermediateOutputPath Condition="'$(MSBuildProjectName)' == 'SharpEmu.GUI.FontSubsetter'">$(RepoRoot)artifacts/tools/font-subsetter/obj/</BaseIntermediateOutputPath>
+    <BaseOutputPath Condition="'$(MSBuildProjectName)' == 'SharpEmu.GUI.FontSubsetter'">$(RepoRoot)artifacts/tools/font-subsetter/bin/</BaseOutputPath>
 
     <AppendConfigurationToOutputPath>true</AppendConfigurationToOutputPath>
     <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>

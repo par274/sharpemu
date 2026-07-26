@@ -402,7 +402,6 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                       <TextBlock Text="{Binding Name}"
                                  FontSize="42"
                                  FontWeight="SemiBold"
-                                 LineHeight="54"
                                  TextTrimming="CharacterEllipsis" />
                       <TextBlock Text="{Binding Path}"
                                  MaxWidth="680"

@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <!-- Required by the source-generated LibraryImport stubs in the linked
          controller readers below. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <SharpEmuFontSubsetterProject>$(MSBuildThisFileDirectory)Build\FontSubsetter\SharpEmu.GUI.FontSubsetter.csproj</SharpEmuFontSubsetterProject>
   </PropertyGroup>
 
   <!-- Dependency-free; provides the BuildInfo provenance shown in the
@@ -22,16 +23,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
     <ProjectReference Include="..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
+    <ProjectReference Include="Build\FontSubsetter\SharpEmu.GUI.FontSubsetter.csproj"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+    <!-- The nested build helper is compiled by its own project, not into the
+         launcher assembly. -->
+    <Compile Remove="Build\FontSubsetter\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Avalonia" />
     <PackageReference Include="Avalonia.Desktop" />
-    <PackageReference Include="Avalonia.Fonts.Inter" />
     <PackageReference Include="Avalonia.Themes.Fluent" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="ReactiveUI.Avalonia" />
@@ -51,6 +57,19 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <AvaloniaResource Include="..\..\assets\images\commit-icon.png" Link="Assets/commit-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\pic0.png" Link="Assets/pic0.png" />
     <AvaloniaResource Include="Assets\Fonts\GoogleSans-*.ttf" />
+    <!-- Keep generated resources explicit so a missing TTF can be recreated
+         before resource processing and still participate in the same build. -->
+    <AvaloniaResource Include="
+        Assets\Fonts\NotoSansJP-Light.ttf;
+        Assets\Fonts\NotoSansJP-Regular.ttf;
+        Assets\Fonts\NotoSansJP-Medium.ttf;
+        Assets\Fonts\NotoSansJP-SemiBold.ttf;
+        Assets\Fonts\NotoSansJP-Bold.ttf;
+        Assets\Fonts\NotoSansKR-Light.ttf;
+        Assets\Fonts\NotoSansKR-Regular.ttf;
+        Assets\Fonts\NotoSansKR-Medium.ttf;
+        Assets\Fonts\NotoSansKR-SemiBold.ttf;
+        Assets\Fonts\NotoSansKR-Bold.ttf" />
     <AvaloniaResource Include="Assets\Fonts\MaterialSymbolsRounded-400.ttf" />
     <None Include="..\..\LICENSES\OFL-1.1.txt"
           Link="licenses\OFL-1.1.txt"
@@ -64,4 +83,23 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <LogicalName>Languages.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
+
+  <!-- The C# helper performs its own content-hash check, so ordinary builds
+       stay offline and return immediately. Upstream fonts are downloaded only
+       after the CJK translations, generator, or generated TTFs change. -->
+  <Target Name="UpdateNotoCjkFontSubsets"
+          BeforeTargets="PrepareResources"
+          DependsOnTargets="ResolveProjectReferences"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(SharpEmuSkipNotoSubsetUpdate)' != 'true'">
+    <MSBuild Projects="$(SharpEmuFontSubsetterProject)"
+             Targets="GetTargetPath"
+             BuildInParallel="false">
+      <Output TaskParameter="TargetOutputs"
+              ItemName="_SharpEmuFontSubsetterAssembly" />
+    </MSBuild>
+    <Error Condition="'@(_SharpEmuFontSubsetterAssembly)' == ''"
+           Text="Could not resolve the SharpEmu GUI font subsetter." />
+    <Exec Command="dotnet &quot;@(_SharpEmuFontSubsetterAssembly->'%(FullPath)')&quot; &quot;$(RepoRoot)&quot;"
+          WorkingDirectory="$(MSBuildProjectDirectory)" />
+  </Target>
 </Project>

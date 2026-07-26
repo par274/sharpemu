@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Animation.Easings;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Rendering.Composition;
 using Avalonia.Rendering.Composition.Animations;
 using Avalonia.VisualTree;
@@ -179,9 +180,11 @@ public sealed class PersistentPageHost : Panel
             var isActive = index == selected;
 
             child.IsVisible = true;
-            child.IsEnabled = isActive;
             child.IsHitTestVisible = isActive;
             child.Focusable = isActive;
+            KeyboardNavigation.SetTabNavigation(
+                child,
+                isActive ? KeyboardNavigationMode.Continue : KeyboardNavigationMode.None);
             child.ZIndex = isActive ? 2 : index == selected - 1 ? 1 : 0;
             child.Opacity = isActive ? 1 : 0;
             ApplyMotionLayerState(child, index, selected);

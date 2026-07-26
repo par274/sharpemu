@@ -45,7 +45,6 @@ public static class GuiLauncher
     public static AppBuilder BuildAvaloniaApp()
         => AppBuilder.Configure<App>()
             .UsePlatformDetect()
-            .WithInterFont()
             .UseReactiveUI(_ => { })
             .RegisterReactiveUIViewsFromEntryAssembly()
             .LogToTrace();

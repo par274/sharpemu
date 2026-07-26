@@ -4,6 +4,7 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using Avalonia.Media;
 
 namespace SharpEmu.GUI;
 
@@ -17,6 +18,13 @@ namespace SharpEmu.GUI;
 public sealed class Localization : INotifyPropertyChanged
 {
     public static Localization Instance { get; } = new();
+
+    private static readonly FontFamily GoogleSans =
+        new("avares://SharpEmu.GUI/Assets/Fonts#Google Sans");
+    private static readonly FontFamily JapaneseLauncherFont =
+        new("avares://SharpEmu.GUI/Assets/Fonts#Noto Sans JP, Google Sans");
+    private static readonly FontFamily KoreanLauncherFont =
+        new("avares://SharpEmu.GUI/Assets/Fonts#Noto Sans KR, Google Sans");
 
     public sealed record LanguageInfo(string Code, string NativeName)
     {
@@ -86,9 +94,24 @@ public sealed class Localization : INotifyPropertyChanged
             {
                 _currentCode = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(LauncherFontFamily));
             }
         }
     }
+
+    /// <summary>
+    /// Font chain inherited by the entire launcher. Japanese and Korean switch
+    /// the UI to the matching Noto Sans family; every other locale uses Google
+    /// Sans. Google Sans remains the fallback for glyphs omitted from the
+    /// compact CJK subsets.
+    /// </summary>
+    public FontFamily LauncherFontFamily =>
+        CurrentCode.ToLowerInvariant() switch
+        {
+            "ja" => JapaneseLauncherFont,
+            "ko" => KoreanLauncherFont,
+            _ => GoogleSans,
+        };
 
     public string Get(string key)
     {

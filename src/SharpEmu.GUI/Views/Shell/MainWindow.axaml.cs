@@ -1607,8 +1607,7 @@ public partial class MainWindow : Window
         {
             SetStateClass(buttons[index], "active", index == section);
             SetStateClass(panels[index], "active", index == section);
-            panels[index].IsEnabled = index == section;
-            panels[index].IsHitTestVisible = index == section;
+            SetPanelInteraction(panels[index], index == section);
         }
 
         SetStateClass(GameOptionsBackNav, "active", active: false);
@@ -1674,8 +1673,7 @@ public partial class MainWindow : Window
             var active = index == section;
             SetStateClass(buttons[index], "active", active);
             SetStateClass(panels[index], "active", active);
-            panels[index].IsEnabled = active;
-            panels[index].IsHitTestVisible = active;
+            SetPanelInteraction(panels[index], active);
         }
 
         if (focusNavigation)
@@ -1683,6 +1681,17 @@ public partial class MainWindow : Window
             buttons[section].BringIntoView();
             buttons[section].Focus(NavigationMethod.Directional);
         }
+    }
+
+    private static void SetPanelInteraction(Control panel, bool isActive)
+    {
+        // Keep the visual tree enabled while it fades. IsEnabled propagates to
+        // every descendant and activates Fluent's :disabled colors before the
+        // transition has finished, which appears as a one-frame color flash.
+        panel.IsHitTestVisible = isActive;
+        KeyboardNavigation.SetTabNavigation(
+            panel,
+            isActive ? KeyboardNavigationMode.Continue : KeyboardNavigationMode.None);
     }
 
     private void SetOptionsNavIndicator(int section)
