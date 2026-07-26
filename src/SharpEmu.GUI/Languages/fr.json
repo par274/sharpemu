@@ -107,6 +107,7 @@
   "Launch.Idle": "Inactif",
   "Launch.Console": "Console",
   "Launch.Launch": "Lancer",
+  "Launch.Loading": "Chargement…",
   "Launch.Stop": "Arrêter",
   "Launch.Running": "En cours d’exécution — {0}",
   "Launch.Stopping": "Arrêt en cours…",

@@ -123,6 +123,7 @@
   "Launch.Idle": "Idle",
   "Launch.Console": "Console",
   "Launch.Launch": "Launch",
+  "Launch.Loading": "Loading…",
   "Launch.Stop": "Stop",
   "Launch.Running": "Running — {0}",
   "Launch.Stopping": "Stopping…",

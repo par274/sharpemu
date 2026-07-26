@@ -121,6 +121,7 @@
   "Launch.Idle": "Ожидание",
   "Launch.Console": "Консоль",
   "Launch.Launch": "Запустить",
+  "Launch.Loading": "Загрузка…",
   "Launch.Stop": "Остановить",
   "Launch.Running": "Запущено - {0}",
   "Launch.Stopping": "Остановка…",

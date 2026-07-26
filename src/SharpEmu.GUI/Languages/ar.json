@@ -98,6 +98,7 @@
   "Launch.Idle": "خامل",
   "Launch.Console": "نافذة السجلات",
   "Launch.Launch": "تشغيل",
+  "Launch.Loading": "جارٍ التحميل…",
   "Launch.Stop": "إيقاف",
   "Launch.Running": "قيد التشغيل — {0}",
   "Launch.Stopping": "جارٍ الإيقاف...",

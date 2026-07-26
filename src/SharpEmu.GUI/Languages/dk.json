@@ -98,6 +98,7 @@
   "Launch.Idle": "Inaktiv",
   "Launch.Console": "Konsol",
   "Launch.Launch": "Start",
+  "Launch.Loading": "Indlæser…",
   "Launch.Stop": "Stop",
   "Launch.Running": "Kører — {0}",
   "Launch.Stopping": "Stopper…",

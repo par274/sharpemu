@@ -27,6 +27,8 @@ using VkSemaphore = Silk.NET.Vulkan.Semaphore;
 
 namespace SharpEmu.Libs.VideoOut;
 
+internal readonly record struct VulkanPresentRect(uint X, uint Y, uint Width, uint Height);
+
 internal readonly record struct VulkanRenderTargetFormat(
     Format Format,
     Gen5PixelOutputKind OutputKind)
@@ -109,6 +111,43 @@ internal readonly record struct VulkanGuestQueueIdentity(
 
 internal static unsafe class VulkanVideoPresenter
 {
+    internal static VulkanPresentRect CalculateAspectFitRect(
+        uint sourceWidth,
+        uint sourceHeight,
+        uint destinationWidth,
+        uint destinationHeight)
+    {
+        if (sourceWidth == 0 ||
+            sourceHeight == 0 ||
+            destinationWidth == 0 ||
+            destinationHeight == 0)
+        {
+            return default;
+        }
+
+        if ((ulong)sourceWidth * destinationHeight >
+            (ulong)destinationWidth * sourceHeight)
+        {
+            var height = Math.Max(
+                1u,
+                (uint)((ulong)destinationWidth * sourceHeight / sourceWidth));
+            return new VulkanPresentRect(
+                0,
+                (destinationHeight - height) / 2,
+                destinationWidth,
+                height);
+        }
+
+        var width = Math.Max(
+            1u,
+            (uint)((ulong)destinationHeight * sourceWidth / sourceHeight));
+        return new VulkanPresentRect(
+            (destinationWidth - width) / 2,
+            0,
+            width,
+            destinationHeight);
+    }
+
     // Standalone CLI launches use a desktop-sized surface. The embedded GUI
     // always takes its dimensions from the native child control instead.
     private const uint DefaultWindowWidth = 1920;
@@ -13709,7 +13748,7 @@ internal static unsafe class VulkanVideoPresenter
                 pixels = presentation.Width == _extent.Width && presentation.Height == _extent.Height
                     ? sourcePixels
                     : _hostSurface is not null
-                    ? ScaleBgraCoverBilinear(
+                    ? ScaleBgraAspectFitBilinear(
                         sourcePixels,
                         presentation.Width,
                         presentation.Height,
@@ -16240,43 +16279,74 @@ internal static unsafe class VulkanVideoPresenter
                 encodeForPresent ? 3u : 2u,
                 barriers);
 
-            var sourceX = 0u;
-            var sourceY = 0u;
-            var sourceWidth = source.Width;
-            var sourceHeight = source.Height;
+            var blitDestination = encodeForPresent
+                ? encodeImage
+                : _swapchainImages[imageIndex];
+            // Embedded presentation is aspect-fit: clear the whole destination
+            // to opaque black, then blit the complete guest frame into a
+            // centered rectangle. This produces pillar/letterboxing instead
+            // of the previous object-fit:cover crop on maximized launchers.
             if (_hostSurface is not null)
             {
-                // The embedded GUI fills its game surface like CSS
-                // object-fit: cover. Preserve the guest aspect ratio and crop
-                // only the excess instead of distorting every video frame.
-                var sourceIsWider = (ulong)sourceWidth * _extent.Height >
-                                     (ulong)_extent.Width * sourceHeight;
-                if (sourceIsWider)
+                var black = new ClearColorValue(0f, 0f, 0f, 1f);
+                var destinationRange = ColorSubresourceRange();
+                _vk.CmdClearColorImage(
+                    _commandBuffer,
+                    blitDestination,
+                    ImageLayout.TransferDstOptimal,
+                    &black,
+                    1,
+                    &destinationRange);
+                var clearToBlit = new ImageMemoryBarrier
                 {
-                    sourceWidth = Math.Max(1u, (uint)((ulong)sourceHeight * _extent.Width / _extent.Height));
-                    sourceX = (source.Width - sourceWidth) / 2;
-                }
-                else
-                {
-                    sourceHeight = Math.Max(1u, (uint)((ulong)sourceWidth * _extent.Height / _extent.Width));
-                    sourceY = (source.Height - sourceHeight) / 2;
-                }
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = blitDestination,
+                    SubresourceRange = destinationRange,
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    PipelineStageFlags.TransferBit,
+                    PipelineStageFlags.TransferBit,
+                    0,
+                    0,
+                    null,
+                    0,
+                    null,
+                    1,
+                    &clearToBlit);
             }
+
+            var destinationRect = _hostSurface is null
+                ? new VulkanPresentRect(0, 0, _extent.Width, _extent.Height)
+                : CalculateAspectFitRect(
+                    source.Width,
+                    source.Height,
+                    _extent.Width,
+                    _extent.Height);
 
             var sourceOffsets = new ImageBlit.SrcOffsetsBuffer
             {
-                Element0 = new Offset3D(checked((int)sourceX), checked((int)sourceY), 0),
+                Element0 = new Offset3D(0, 0, 0),
                 Element1 = new Offset3D(
-                    checked((int)(sourceX + sourceWidth)),
-                    checked((int)(sourceY + sourceHeight)),
+                    checked((int)source.Width),
+                    checked((int)source.Height),
                     1),
             };
             var destinationOffsets = new ImageBlit.DstOffsetsBuffer
             {
-                Element0 = new Offset3D(0, 0, 0),
+                Element0 = new Offset3D(
+                    checked((int)destinationRect.X),
+                    checked((int)destinationRect.Y),
+                    0),
                 Element1 = new Offset3D(
-                    checked((int)_extent.Width),
-                    checked((int)_extent.Height),
+                    checked((int)(destinationRect.X + destinationRect.Width)),
+                    checked((int)(destinationRect.Y + destinationRect.Height)),
                     1),
             };
             var region = new ImageBlit
@@ -16299,9 +16369,11 @@ internal static unsafe class VulkanVideoPresenter
             // must blend neighbours or it silently drops every Nth source
             // row/column, which shreds 1-2px features in the guest frame.
             var isIntegerUpscale =
-                sourceWidth != 0 && sourceHeight != 0 &&
-                _extent.Width >= sourceWidth && _extent.Height >= sourceHeight &&
-                _extent.Width % sourceWidth == 0 && _extent.Height % sourceHeight == 0;
+                source.Width != 0 && source.Height != 0 &&
+                destinationRect.Width >= source.Width &&
+                destinationRect.Height >= source.Height &&
+                destinationRect.Width % source.Width == 0 &&
+                destinationRect.Height % source.Height == 0;
             _vk.CmdBlitImage(
                 _commandBuffer,
                 source.Image,
@@ -16657,7 +16729,7 @@ internal static unsafe class VulkanVideoPresenter
             return destination;
         }
 
-        private static byte[] ScaleBgraCoverBilinear(
+        private static byte[] ScaleBgraAspectFitBilinear(
             byte[] source,
             uint sourceWidth,
             uint sourceHeight,
@@ -16665,37 +16737,50 @@ internal static unsafe class VulkanVideoPresenter
             uint height)
         {
             var destination = new byte[checked((int)(width * height * 4))];
-            var sourceIsWider = (ulong)sourceWidth * height > (ulong)width * sourceHeight;
-            var cropWidth = sourceIsWider
-                ? Math.Max(1u, (uint)((ulong)sourceHeight * width / height))
-                : sourceWidth;
-            var cropHeight = sourceIsWider
-                ? sourceHeight
-                : Math.Max(1u, (uint)((ulong)sourceWidth * height / width));
-            var offsetX = (sourceWidth - cropWidth) / 2;
-            var offsetY = (sourceHeight - cropHeight) / 2;
-            var maxSourceX = offsetX + cropWidth - 1;
-            var maxSourceY = offsetY + cropHeight - 1;
-
-            for (uint y = 0; y < height; y++)
+            for (var index = 3; index < destination.Length; index += 4)
             {
-                for (uint x = 0; x < width; x++)
+                destination[index] = byte.MaxValue;
+            }
+
+            var destinationRect = CalculateAspectFitRect(
+                sourceWidth,
+                sourceHeight,
+                width,
+                height);
+            var maxSourceX = sourceWidth - 1;
+            var maxSourceY = sourceHeight - 1;
+
+            for (uint y = 0; y < destinationRect.Height; y++)
+            {
+                for (uint x = 0; x < destinationRect.Width; x++)
                 {
-                    var destinationOffset = checked((int)(((ulong)y * width + x) * 4));
+                    var destinationOffset = checked((int)(
+                        ((ulong)(destinationRect.Y + y) * width +
+                         destinationRect.X + x) * 4));
                     float blue = 0;
                     float green = 0;
                     float red = 0;
                     float alpha = 0;
                     for (var sampleY = 0; sampleY < 2; sampleY++)
                     {
-                        var scaledY = offsetY + (((y + ((sampleY + 0.5f) / 2)) * cropHeight) / height) - 0.5f;
-                        var sourceY0 = (uint)Math.Clamp((int)MathF.Floor(scaledY), (int)offsetY, (int)maxSourceY);
+                        var scaledY =
+                            ((y + ((sampleY + 0.5f) / 2)) * sourceHeight /
+                             destinationRect.Height) - 0.5f;
+                        var sourceY0 = (uint)Math.Clamp(
+                            (int)MathF.Floor(scaledY),
+                            0,
+                            (int)maxSourceY);
                         var sourceY1 = Math.Min(sourceY0 + 1, maxSourceY);
                         var fractionY = scaledY - MathF.Floor(scaledY);
                         for (var sampleX = 0; sampleX < 2; sampleX++)
                         {
-                            var scaledX = offsetX + (((x + ((sampleX + 0.5f) / 2)) * cropWidth) / width) - 0.5f;
-                            var sourceX0 = (uint)Math.Clamp((int)MathF.Floor(scaledX), (int)offsetX, (int)maxSourceX);
+                            var scaledX =
+                                ((x + ((sampleX + 0.5f) / 2)) * sourceWidth /
+                                 destinationRect.Width) - 0.5f;
+                            var sourceX0 = (uint)Math.Clamp(
+                                (int)MathF.Floor(scaledX),
+                                0,
+                                (int)maxSourceX);
                             var sourceX1 = Math.Min(sourceX0 + 1, maxSourceX);
                             var fractionX = scaledX - MathF.Floor(scaledX);
                             var sourceOffset00 = checked((int)(((ulong)sourceY0 * sourceWidth + sourceX0) * 4));

@@ -98,6 +98,7 @@
   "Launch.Idle": "Bereit",
   "Launch.Console": "Konsole",
   "Launch.Launch": "Starten",
+  "Launch.Loading": "Wird geladen…",
   "Launch.Stop": "Stoppen",
   "Launch.Running": "Läuft -- {0}",
   "Launch.Stopping": "Wird beendet…",

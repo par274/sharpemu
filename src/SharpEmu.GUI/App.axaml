@@ -35,6 +35,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
     <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
     <FontFamily x:Key="GoogleSans">avares://SharpEmu.GUI/Assets/Fonts#Google Sans</FontFamily>
+    <FontFamily x:Key="JetBrainsMono">avares://SharpEmu.GUI/Assets/Fonts/JetBrainsMono-Regular.ttf#JetBrains Mono</FontFamily>
     <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
 
     <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
@@ -513,9 +514,34 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="HorizontalContentAlignment" Value="Center" />
       <Setter Property="VerticalContentAlignment" Value="Center" />
     </Style>
-    <Style Selector="Button.playButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="#F0F1F5" />
+    <Style Selector="Button.playButton /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.playButton TextBlock#LaunchButtonLabel">
       <Setter Property="Foreground" Value="#111111" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.playButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.playButton:pointerover TextBlock#LaunchButtonLabel">
+      <Setter Property="Foreground" Value="White" />
     </Style>
 
     <!-- Round per-game options button sitting next to the launch button. -->
@@ -527,6 +553,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Background" Value="#12FFFFFF" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ToggleButton.optionsCircle /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
     </Style>
     <Style Selector="ToggleButton.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter,
                      ToggleButton.optionsCircle:checked /template/ ContentPresenter#PART_ContentPresenter">
@@ -560,6 +598,129 @@ SPDX-License-Identifier: GPL-2.0-or-later
                      ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="#1FFFFFFF" />
       <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.consoleAction">
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Padding" Value="14,0" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#9FFFFFFF" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+    </Style>
+    <Style Selector="Button.consoleAction /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.consoleAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.consoleAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="CheckBox.consoleAutoScroll">
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Padding" Value="15,0" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#B8FFFFFF" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border x:Name="PART_ConsoleAutoScrollBackground"
+                  MinHeight="{TemplateBinding MinHeight}"
+                  Padding="{TemplateBinding Padding}"
+                  Background="{TemplateBinding Background}"
+                  CornerRadius="{TemplateBinding CornerRadius}"
+                  BorderBrush="Transparent"
+                  BorderThickness="0">
+            <Grid ColumnDefinitions="Auto,12,20">
+              <ContentPresenter Grid.Column="0"
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                VerticalContentAlignment="Center" />
+              <Border x:Name="PART_ConsoleAutoScrollIndicator"
+                      Grid.Column="2"
+                      Width="20"
+                      Height="20"
+                      VerticalAlignment="Center"
+                      Background="#1FFFFFFF"
+                      BorderBrush="Transparent"
+                      BorderThickness="0"
+                      CornerRadius="6">
+                <TextBlock x:Name="PART_ConsoleAutoScrollGlyph"
+                           Classes="materialSymbol compact"
+                           Text="check"
+                           FontSize="15"
+                           Foreground="#111111"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           IsHitTestVisible="False"
+                           Opacity="0"
+                           RenderTransform="scale(0.6)" />
+              </Border>
+            </Grid>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="CheckBox.consoleAutoScroll /template/ Border#PART_ConsoleAutoScrollBackground">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="CheckBox.consoleAutoScroll:pointerover /template/ Border#PART_ConsoleAutoScrollBackground,
+                     CheckBox.consoleAutoScroll:focus-visible /template/ Border#PART_ConsoleAutoScrollBackground">
+      <Setter Property="Background" Value="#20FFFFFF" />
+    </Style>
+    <Style Selector="CheckBox.consoleAutoScroll /template/ Border#PART_ConsoleAutoScrollIndicator">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="CheckBox.consoleAutoScroll:checked /template/ Border#PART_ConsoleAutoScrollIndicator">
+      <Setter Property="Background" Value="White" />
+    </Style>
+    <Style Selector="CheckBox.consoleAutoScroll /template/ TextBlock#PART_ConsoleAutoScrollGlyph">
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.14"
+                            Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.18"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="CheckBox.consoleAutoScroll:checked /template/ TextBlock#PART_ConsoleAutoScrollGlyph">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
     </Style>
 
     <Style Selector="Button.icon">
@@ -662,6 +823,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="Height" Value="61" />
       <Setter Property="Padding" Value="16,0" />
       <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
       <Setter Property="CornerRadius" Value="12" />
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
@@ -704,6 +866,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="FontWeight" Value="Medium" />
       <Setter Property="VerticalAlignment" Value="Center" />
       <Setter Property="Foreground" Value="#8FFFFFFF" />
+      <Setter Property="RenderTransform" Value="translateY(-2px)" />
       <Setter Property="Transitions">
         <Transitions>
           <BrushTransition Property="Foreground"
@@ -1021,6 +1184,67 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="BorderBrush" Value="#14FFFFFF" />
       <Setter Property="BorderThickness" Value="1" />
     </Style>
+    <Style Selector="TextBox.consoleSearch">
+      <Setter Property="MinWidth" Value="180" />
+      <Setter Property="MaxWidth" Value="288" />
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Padding" Value="14,0" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#E8FFFFFF" />
+      <Setter Property="PlaceholderForeground" Value="#8FFFFFFF" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="TextAlignment" Value="Left" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="PlaceholderForeground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBox.consoleSearch /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBox.consoleSearch:pointerover /template/ Border#PART_BorderElement,
+                     TextBox.consoleSearch:focus /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#20FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <Style Selector="TextBlock.consoleSearchIcon">
+      <Setter Property="Margin" Value="14,0,8,0" />
+      <Setter Property="Foreground" Value="#8FFFFFFF" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBox.consoleSearch:pointerover TextBlock.consoleSearchIcon,
+                     TextBox.consoleSearch:focus TextBlock.consoleSearchIcon">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="TextBox.consoleSearch:pointerover,
+                     TextBox.consoleSearch:focus">
+      <Setter Property="PlaceholderForeground" Value="White" />
+    </Style>
 
     <!-- Rounded selectors used by both global and per-game settings. The native
          ComboBox template remains intact for keyboard, focus, and XY/gamepad navigation. -->
@@ -1292,7 +1516,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Style Selector="ListBox.console">
       <Setter Property="Background" Value="#D6060606" />
       <Setter Property="BorderThickness" Value="0" />
-      <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, monospace" />
+      <Setter Property="FontFamily" Value="{StaticResource JetBrainsMono}" />
       <Setter Property="FontSize" Value="12" />
     </Style>
     <Style Selector="ListBox.console ListBoxItem">

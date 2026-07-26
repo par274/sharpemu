@@ -98,6 +98,7 @@
   "Launch.Idle": "대기 중",
   "Launch.Console": "콘솔",
   "Launch.Launch": "실행",
+  "Launch.Loading": "불러오는 중…",
   "Launch.Stop": "중지",
   "Launch.Running": "실행 중 — {0}",
   "Launch.Stopping": "중지 중…",

@@ -34,38 +34,32 @@ public sealed class ConsoleWindow : Window
         Title = loc.Get("Console.WindowTitle");
         Width = 980;
         Height = 620;
-        MinWidth = 520;
-        MinHeight = 320;
-        Background = new SolidColorBrush(Color.Parse("#0D1017"));
+        MinWidth = 760;
+        MinHeight = 380;
+        Background = new SolidColorBrush(Color.Parse("#0C0C0C"));
         Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://SharpEmu.GUI/Assets/SharpEmu.ico")));
 
         _searchBox = new TextBox
         {
+            Classes = { "consoleSearch" },
             PlaceholderText = loc.Get("Console.SearchWatermark"),
-            Width = 320,
-            Margin = new Thickness(0, 0, 12, 0),
+            Width = 288,
+            InnerLeftContent = new TextBlock
+            {
+                Classes = { "materialSymbol", "compact", "consoleSearchIcon" },
+                Text = "search",
+            },
         };
         _autoScrollCheck = new CheckBox
         {
+            Classes = { "consoleAutoScroll" },
             Content = loc.Get("Console.AutoScroll"),
             IsChecked = autoScroll,
             FontSize = 12,
-            Margin = new Thickness(0, 0, 12, 0),
             VerticalAlignment = VerticalAlignment.Center,
         };
-        var copyButton = new Button
-        {
-            Classes = { "ghost" },
-            Content = loc.Get("Console.Copy"),
-            Padding = new Thickness(10, 4),
-            Margin = new Thickness(0, 0, 8, 0),
-        };
-        var clearButton = new Button
-        {
-            Classes = { "ghost" },
-            Content = loc.Get("Console.Clear"),
-            Padding = new Thickness(10, 4),
-        };
+        var copyButton = CreateActionButton("content_copy", loc.Get("Console.Copy"));
+        var clearButton = CreateActionButton("delete_sweep", loc.Get("Console.Clear"));
         copyButton.Click += async (_, _) => await CopyAsync();
         clearButton.Click += (_, _) => clear();
         _searchBox.TextChanged += (_, _) => RefreshVisibleLines();
@@ -74,8 +68,9 @@ public sealed class ConsoleWindow : Window
         {
             Classes = { "console" },
             ItemsSource = _visibleLines,
-            BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Color.Parse("#232B3A")),
+            Padding = new Thickness(0, 0, 0, 12),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            BorderBrush = new SolidColorBrush(Color.Parse("#12FFFFFF")),
             ItemTemplate = new FuncDataTemplate<LogLine>((_, _) =>
             {
                 var text = new TextBlock { TextWrapping = TextWrapping.NoWrap };
@@ -85,30 +80,38 @@ public sealed class ConsoleWindow : Window
             }),
         };
 
+        var actions = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Spacing = 10,
+            Children =
+            {
+                copyButton,
+                clearButton,
+            },
+        };
+
+        var header = new Grid
+        {
+            Margin = new Thickness(18, 14),
+            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"),
+            ColumnSpacing = 10,
+            Children =
+            {
+                _searchBox.WithGridColumn(0),
+                _autoScrollCheck.WithGridColumn(1),
+                actions.WithGridColumn(3),
+            },
+        };
+
         Content = new Grid
         {
-            Margin = new Thickness(12),
             RowDefinitions = new RowDefinitions("Auto,*"),
             Children =
             {
-                new Grid
-                {
-                    Margin = new Thickness(0, 0, 0, 8),
-                    ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"),
-                    Children =
-                    {
-                        new TextBlock
-                        {
-                            Classes = { "sectionTitle" },
-                            Text = loc.Get("Console.Title"),
-                            VerticalAlignment = VerticalAlignment.Center,
-                        },
-                        _searchBox.WithGridColumn(1),
-                        _autoScrollCheck.WithGridColumn(2),
-                        copyButton.WithGridColumn(3),
-                        clearButton.WithGridColumn(4),
-                    },
-                },
+                header,
                 _list.WithGridRow(1),
             },
         };
@@ -116,6 +119,33 @@ public sealed class ConsoleWindow : Window
         lines.CollectionChanged += OnLinesChanged;
         Closed += (_, _) => lines.CollectionChanged -= OnLinesChanged;
         RefreshVisibleLines();
+    }
+
+    private static Button CreateActionButton(string icon, string text)
+    {
+        return new Button
+        {
+            Classes = { "consoleAction" },
+            Content = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Center,
+                Spacing = 8,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Classes = { "materialSymbol", "compact" },
+                        Text = icon,
+                    },
+                    new TextBlock
+                    {
+                        Text = text,
+                        VerticalAlignment = VerticalAlignment.Center,
+                    },
+                },
+            },
+        };
     }
 
     private void OnLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)

@@ -98,6 +98,7 @@
   "Launch.Idle": "待機中",
   "Launch.Console": "コンソール",
   "Launch.Launch": "起動",
+  "Launch.Loading": "読み込み中…",
   "Launch.Stop": "停止",
   "Launch.Running": "実行中 — {0}",
   "Launch.Stopping": "停止中…",

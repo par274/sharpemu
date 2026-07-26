@@ -98,6 +98,7 @@
   "Launch.Idle": "Boşta",
   "Launch.Console": "Konsol",
   "Launch.Launch": "Başlat",
+  "Launch.Loading": "Yükleniyor…",
   "Launch.Stop": "Durdur",
   "Launch.Running": "Çalışıyor — {0}",
   "Launch.Stopping": "Durduruluyor…",

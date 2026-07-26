@@ -107,6 +107,7 @@
   "Launch.Idle": "Tétlen",
   "Launch.Console": "Konzol",
   "Launch.Launch": "Inditás",
+  "Launch.Loading": "Betöltés…",
   "Launch.Stop": "Leállítás",
   "Launch.Running": "Fut — {0}",
   "Launch.Stopping": "Leállítás…",

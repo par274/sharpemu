@@ -41,8 +41,8 @@ public partial class MainWindow : Window
 
     // Shell navigation is ViewModel-owned. Remaining feature-specific event
     // handlers are kept here only until their corresponding view is extracted.
-    private const double LaunchBlurRadius = 12;
-    private const double BlurTransitionSeconds = 0.24;
+    private const int LaunchIndicatorExitMilliseconds = 220;
+    private const int LaunchBlackoutEnterMilliseconds = 360;
 
     private static readonly IBrush DefaultLineBrush = new SolidColorBrush(Color.Parse("#C7CFDE"));
     private static readonly IBrush DimLineBrush = new SolidColorBrush(Color.Parse("#6B7488"));
@@ -63,13 +63,6 @@ public partial class MainWindow : Window
     // ConsoleList and the few remaining imperative reads.
     private AvaloniaList<LogLine> _consoleLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
-    private readonly DispatcherTimer _libraryBlurTimer;
-    private BlurEffect? _libraryBlur;
-    private double _libraryBlurStartRadius;
-    private double _libraryBlurTargetRadius;
-    private long _libraryBlurStartedAt;
-    private bool _clearLibraryBlurWhenComplete;
-
     // Backed by the shared ISettingsService so the OptionsViewModel and the
     // window mutate the same instance; resolved from the container in OnOpened.
     private GuiSettings _settings = GuiSettings.Load();
@@ -82,6 +75,8 @@ public partial class MainWindow : Window
     private bool _isRunning;
     private bool _isStopping;
     private bool _awaitingFirstFrame;
+    private bool _isGameSurfaceTransitioning;
+    private int _launchPresentationGeneration;
     private int _autoScrollTicks;
     private Updater.UpdateInfo? _availableUpdate;
     private string _updateStatusKey = "Updater.Status.Ready";
@@ -100,10 +95,6 @@ public partial class MainWindow : Window
     // plain window color remains the fallback when the asset fails to load.
     private Bitmap? _defaultBackdrop;
 
-    // Whether the native loading/closing popup should be showing; it is a
-    // desktop-topmost popup, so it closes while the launcher is in the
-    // background or minimized and reopens from this flag on activation.
-    private bool _sessionLoadingActive;
     private bool _isGameSettingsOpen;
     private bool _isLoadingGameSettings;
     private bool _addFolderInProgress;
@@ -205,25 +196,14 @@ public partial class MainWindow : Window
         };
         _consoleFlushTimer.Start();
 
-        _libraryBlurTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(16),
-        };
-        _libraryBlurTimer.Tick += (_, _) => AdvanceLibraryBlur();
-
         Closed += (_, _) => _emulatorService.Stop();
 
         // Native popups float above every window on the desktop; they must
         // follow the launcher into the background or a minimized state.
-        Activated += (_, _) =>
-        {
-            UpdateSessionBarVisibility();
-            SessionLoadingPopup.IsOpen = _sessionLoadingActive;
-        };
+        Activated += (_, _) => UpdateSessionBarVisibility();
         Deactivated += (_, _) =>
         {
             SessionBarPopup.IsOpen = false;
-            SessionLoadingPopup.IsOpen = false;
         };
 
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
@@ -946,14 +926,14 @@ public partial class MainWindow : Window
         AutoUpdateRow.Label = loc.Get("Updater.Auto.Label");
         AutoUpdateRow.Description = loc.Get("Updater.Auto.Desc");
 
-        ConsoleSectionTitle.Text = loc.Get("Console.Title");
         ConsoleSearchBox.PlaceholderText = loc.Get("Console.SearchWatermark");
         AutoScrollCheck.Content = loc.Get("Console.AutoScroll");
-        DetachConsoleButton.Content = loc.Get("Console.Split");
-        CopyLogButton.Content = loc.Get("Console.Copy");
-        ClearLogButton.Content = loc.Get("Console.Clear");
+        DetachConsoleButtonLabel.Text = loc.Get("Console.Split");
+        CopyLogButtonLabel.Text = loc.Get("Console.Copy");
+        ClearLogButtonLabel.Text = loc.Get("Console.Clear");
 
         LaunchButtonLabel.Text = loc.Get("Launch.Launch");
+        LaunchLoadingLabel.Text = loc.Get("Launch.Loading");
         SessionConsoleButtonLabel.Text = loc.Get("Launch.Console");
         SessionStopButtonLabel.Text = loc.Get("Launch.Stop");
 
@@ -1137,7 +1117,6 @@ public partial class MainWindow : Window
     {
         _settings.Save();
         _consoleFlushTimer.Stop();
-        _libraryBlurTimer.Stop();
         _gamepadTimer.Stop();
         _sndPreview.Stop();
         _discord?.Dispose();
@@ -2033,18 +2012,10 @@ public partial class MainWindow : Window
             if (WindowState == WindowState.Minimized)
             {
                 _sndPreview.Pause();
-                if (SessionLoadingPopup is { } popup)
-                {
-                    popup.IsOpen = false;
-                }
             }
             else
             {
                 _sndPreview.Resume();
-                if (SessionLoadingPopup is { } popup)
-                {
-                    popup.IsOpen = _sessionLoadingActive;
-                }
             }
         }
     }
@@ -2179,6 +2150,7 @@ public partial class MainWindow : Window
         _session.OnLaunchPrepared(displayName, resolvedTitleId);
         StatusText.Text = Localization.Instance.Format("Launch.Running", displayName);
         StatusBarRight.Text = Localization.Instance.Format("Status.Running", displayName);
+        BeginLaunchPresentation();
         UpdateRunButtons();
         UpdateDiscordPresence();
 
@@ -2218,7 +2190,6 @@ public partial class MainWindow : Window
         SessionStopButton.IsEnabled = false;
         SessionHintText.Text = Localization.Instance.Get("Launch.Stopping");
         SessionF11Badge.IsVisible = false;
-        ShowSessionLoading("Closing game", "Waiting for the emulation session to exit...");
         _emulatorService.Stop();
         _runningGameName = null;
         _runningGameTitleId = null;
@@ -2303,35 +2274,67 @@ public partial class MainWindow : Window
 
         Dispatcher.UIThread.Post(() =>
         {
-            if (_isRunning && !_isStopping)
+            if (_isRunning &&
+                !_isStopping &&
+                _awaitingFirstFrame &&
+                !_isGameSurfaceTransitioning)
             {
-                _awaitingFirstFrame = false;
-                ClearLibraryBlur();
-                MainContent.Margin = new Thickness(0);
-                RestoreGameViewToFull();
-                GameView.Background = Brushes.Black;
-                GameView.IsHitTestVisible = true;
-                PagesHost.IsVisible = false;
-                LibraryToolbar.IsVisible = false;
-                ContentToolbar.IsVisible = false;
-                HideSessionLoading();
-                UpdateSessionBarVisibility();
-
-                // Defer so the layout pass from the margin change above settles first.
-                Dispatcher.UIThread.Post(() =>
-                {
-                    if (!_isRunning || _isStopping)
-                    {
-                        return;
-                    }
-
-                    _gameSurfaceHost?.RefreshSurfaceSize();
-                    _gameSurfaceHost?.SetPresentationVisible(true);
-                    _gameSurfaceHost?.SetCursorAutoHide(true);
-                });
+                _isGameSurfaceTransitioning = true;
+                _ = TransitionToGameSurfaceAsync(_launchPresentationGeneration);
             }
         });
     }
+
+    private async Task TransitionToGameSurfaceAsync(int generation)
+    {
+        // First let the loading label and progress bar leave as one unit.
+        CompleteLaunchPresentation();
+        await Task.Delay(LaunchIndicatorExitMilliseconds);
+        if (!IsLaunchTransitionCurrent(generation))
+        {
+            return;
+        }
+
+        // The game surface is still hidden here. Fade only the retained key art
+        // and its masks to black so no launcher or native frame can flash.
+        LaunchBlackout.Opacity = 1;
+        await Task.Delay(LaunchBlackoutEnterMilliseconds);
+        if (!IsLaunchTransitionCurrent(generation))
+        {
+            return;
+        }
+
+        MainContent.Margin = new Thickness(0);
+        RestoreGameViewToFull();
+        GameView.Background = Brushes.Black;
+        GameView.IsHitTestVisible = true;
+        PagesHost.IsVisible = false;
+        LibraryToolbar.IsVisible = false;
+        ContentToolbar.IsVisible = false;
+
+        // Let the full-size native child receive its final layout before it is
+        // mapped. It has already rendered a frame while hidden.
+        await Dispatcher.UIThread.InvokeAsync(
+            () => _gameSurfaceHost?.RefreshSurfaceSize(),
+            DispatcherPriority.Render);
+        if (!IsLaunchTransitionCurrent(generation))
+        {
+            return;
+        }
+
+        _gameSurfaceHost?.SetPresentationVisible(true);
+        _gameSurfaceHost?.SetCursorAutoHide(true);
+        _awaitingFirstFrame = false;
+        _isGameSurfaceTransitioning = false;
+        // Keep a black frame behind the native child. On Stop/exit the child
+        // disappears first, then this bridge fades out to the launcher.
+        UpdateSessionBarVisibility();
+    }
+
+    private bool IsLaunchTransitionCurrent(int generation) =>
+        generation == _launchPresentationGeneration &&
+        _isRunning &&
+        !_isStopping;
 
     private GameSurfaceHost EnsureGameSurfaceHost()
     {
@@ -2407,11 +2410,9 @@ public partial class MainWindow : Window
         GameView.Background = Brushes.Transparent;
         GameView.IsHitTestVisible = false;
         host.SetPresentationVisible(false);
-        AnimateLibraryBlur(LaunchBlurRadius);
         SessionHintText.Text = "Fullscreen";
         SessionF11Badge.IsVisible = true;
         UpdateSessionBarVisibility();
-        ShowSessionLoading("Loading game", "Preparing the emulation session...");
     }
 
     private void HideGameView()
@@ -2427,96 +2428,69 @@ public partial class MainWindow : Window
         GameView.IsVisible = false;
         GameView.IsHitTestVisible = true;
         SessionBarPopup.IsOpen = false;
-        HideSessionLoading();
-        AnimateLibraryBlur(0, clearWhenComplete: true);
         MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
         PagesHost.IsVisible = true;
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
+        RestoreLaunchPresentation();
         // Game art when the source still holds it, otherwise the bundled
         // default; a bare color only when neither is available.
         BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
     }
 
-    private void AnimateLibraryBlur(double targetRadius, bool clearWhenComplete = false)
+    /// <summary>
+    /// Turns the launcher into a quiet loading canvas while the native surface
+    /// is still parked offscreen. Opacity and scale transitions live in XAML,
+    /// so changing state here never removes the pre-rendered pages from the
+    /// visual tree or pushes their controls through a disabled theme state.
+    /// </summary>
+    private void BeginLaunchPresentation()
     {
-        _libraryBlur ??= new BlurEffect();
-        PagesHost.Effect = _libraryBlur;
+        _launchPresentationGeneration++;
+        _isGameSurfaceTransitioning = false;
+        PagesHost.IsVisible = true;
+        PagesHost.IsHitTestVisible = false;
+        PagesHost.Opacity = 0;
+        TitleBar.IsHitTestVisible = false;
+        TitleBar.Opacity = 0;
+        SetBackdropLaunchScale(1.035);
+        LaunchBlackout.Opacity = 0;
+        LaunchProgressHost.Opacity = 1;
+    }
 
-        _libraryBlurStartRadius = _libraryBlur.Radius;
-        _libraryBlurTargetRadius = Math.Max(0, targetRadius);
-        _libraryBlurStartedAt = Stopwatch.GetTimestamp();
-        _clearLibraryBlurWhenComplete = clearWhenComplete && _libraryBlurTargetRadius == 0;
+    /// <summary>
+    /// Starts the exit half of the launch sequence. The native surface remains
+    /// hidden while this group fades; the blackout bridge follows only after
+    /// the transition duration has elapsed.
+    /// </summary>
+    private void CompleteLaunchPresentation()
+    {
+        LaunchProgressHost.Opacity = 0;
+    }
 
-        if (Math.Abs(_libraryBlurStartRadius - _libraryBlurTargetRadius) < 0.01)
+    private void RestoreLaunchPresentation()
+    {
+        _launchPresentationGeneration++;
+        _isGameSurfaceTransitioning = false;
+        LaunchProgressHost.Opacity = 0;
+        LaunchBlackout.Opacity = 0;
+        SetBackdropLaunchScale(1);
+        PagesHost.Opacity = 1;
+        PagesHost.IsHitTestVisible = true;
+        TitleBar.Opacity = 1;
+        TitleBar.IsHitTestVisible = true;
+    }
+
+    private void SetBackdropLaunchScale(double scale)
+    {
+        if (BackdropLayer.RenderTransform is not ScaleTransform backdropScale)
         {
-            CompleteLibraryBlur();
             return;
         }
 
-        _libraryBlurTimer.Start();
-    }
-
-    private void AdvanceLibraryBlur()
-    {
-        if (_libraryBlur is null)
-        {
-            _libraryBlurTimer.Stop();
-            return;
-        }
-
-        var elapsed = (Stopwatch.GetTimestamp() - _libraryBlurStartedAt) /
-                      (double)Stopwatch.Frequency;
-        var progress = Math.Clamp(elapsed / BlurTransitionSeconds, 0, 1);
-        // Cubic ease-out gives the loading transition a quick response while
-        // keeping the final change of sharpness unobtrusive.
-        var easedProgress = 1 - Math.Pow(1 - progress, 3);
-        _libraryBlur.Radius = _libraryBlurStartRadius +
-                              ((_libraryBlurTargetRadius - _libraryBlurStartRadius) * easedProgress);
-
-        if (progress >= 1)
-        {
-            CompleteLibraryBlur();
-        }
-    }
-
-    private void CompleteLibraryBlur()
-    {
-        _libraryBlurTimer.Stop();
-        if (_libraryBlur is not null)
-        {
-            _libraryBlur.Radius = _libraryBlurTargetRadius;
-        }
-
-        if (_clearLibraryBlurWhenComplete)
-        {
-            PagesHost.Effect = null;
-            _libraryBlur = null;
-            _clearLibraryBlurWhenComplete = false;
-        }
-    }
-
-    private void ClearLibraryBlur()
-    {
-        _libraryBlurTimer.Stop();
-        _libraryBlur = null;
-        _clearLibraryBlurWhenComplete = false;
-        PagesHost.Effect = null;
-    }
-
-    private void ShowSessionLoading(string title, string detail)
-    {
-        SessionLoadingTitle.Text = title;
-        SessionLoadingDetail.Text = detail;
-        _sessionLoadingActive = true;
-        SessionLoadingPopup.IsOpen = IsActive && WindowState != WindowState.Minimized;
-    }
-
-    private void HideSessionLoading()
-    {
-        _sessionLoadingActive = false;
-        SessionLoadingPopup.IsOpen = false;
+        backdropScale.ScaleX = scale;
+        backdropScale.ScaleY = scale;
     }
 
     private void ReturnToLibraryWhileStopping()
@@ -2527,22 +2501,21 @@ public partial class MainWindow : Window
         }
 
         // Keep the native child alive until the session exits, but hide it
-        // immediately. Destroying it while Vulkan still owns the surface can
-        // crash the GUI; parking it in the 1x1 corner lets the library
-        // recover — and stay clickable — while the native closing popup
-        // reports teardown progress.
+        // immediately. The already-opaque blackout remains behind it, then
+        // RestoreLaunchPresentation fades that bridge away to the library.
+        // Destroying the native child while Vulkan owns it can crash the GUI.
         _gameSurfaceHost?.SetPresentationVisible(false);
         _awaitingFirstFrame = false;
         ParkGameViewOffscreen();
         GameView.Background = Brushes.Transparent;
         GameView.IsHitTestVisible = false;
         SessionBarPopup.IsOpen = false;
-        AnimateLibraryBlur(LaunchBlurRadius);
         MainContent.Margin = new Thickness(0);
         ContentToolbar.IsVisible = true;
         PagesHost.IsVisible = true;
         LibraryToolbar.IsVisible = true;
         SearchBox.IsVisible = false;
+        RestoreLaunchPresentation();
         BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
         UpdateRunButtons();
         Console.Error.WriteLine("[GUI][INFO] Library restored while embedded session is closing.");
