@@ -149,7 +149,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </ItemsPanelTemplate>
             </ListBox.ItemsPanel>
             <ListBox.ItemTemplate>
-              <DataTemplate>
+              <DataTemplate x:DataType="local:GameEntry" x:CompileBindings="True">
                 <StackPanel Width="128" Height="172" Spacing="7">
                   <Border Classes="coverShadow" Width="128" Height="128">
                     <Border Classes="coverClip">
@@ -512,7 +512,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
                    BorderBrush="{StaticResource CardBorderBrush}" CornerRadius="0,0,12,12">
             <ListBox.ItemTemplate>
-              <DataTemplate>
+              <DataTemplate x:DataType="local:LogLine" x:CompileBindings="True">
                 <TextBlock Text="{Binding Text}" Foreground="{Binding Brush}" TextWrapping="NoWrap" />
               </DataTemplate>
             </ListBox.ItemTemplate>
@@ -528,7 +528,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <!-- Selected game cover thumbnail -->
             <Border Grid.Column="0" Classes="coverClip" Width="56" Height="56" CornerRadius="8"
                     VerticalAlignment="Center">
-              <Panel x:Name="SelectedCoverPanel">
+              <Panel x:Name="SelectedCoverPanel"
+                     x:DataType="local:GameEntry"
+                     x:CompileBindings="True">
                 <Border Background="{Binding PlaceholderBrush, FallbackValue={x:Null}}"
                         IsVisible="{Binding !HasCover, FallbackValue=False}">
                   <TextBlock Text="{Binding Initials}" FontSize="20" FontWeight="Bold"
@@ -549,7 +551,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 <!-- Title id / version / size badges, right next to the
                      title. The title's own MaxWidth (not a "*" column) is
                      what keeps them from drifting to the far right. -->
-                <StackPanel Grid.Column="1" x:Name="SelectedBadgesRow" Orientation="Horizontal" Spacing="6"
+                <StackPanel Grid.Column="1" x:Name="SelectedBadgesRow"
+                            x:DataType="local:GameEntry"
+                            x:CompileBindings="True"
+                            Orientation="Horizontal" Spacing="6"
                             IsVisible="False" VerticalAlignment="Center">
                   <Border Classes="pill" IsVisible="{Binding HasTitleId, FallbackValue=False}">
                     <TextBlock Text="{Binding TitleId}" FontSize="10" FontWeight="SemiBold"
