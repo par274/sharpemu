@@ -820,7 +820,7 @@ internal static unsafe class GnmTiling
     // the full 16-bit interleave (32 PopCounts) for every element.
     private static uint PatternAxisTerm(uint coordinate, AddressBit[] pattern, bool useX)
     {
-        uint offset = 0;
+        var offset = 0u;
         for (var bit = 0; bit < pattern.Length; bit++)
         {
             var mask = useX ? pattern[bit].XMask : pattern[bit].YMask;

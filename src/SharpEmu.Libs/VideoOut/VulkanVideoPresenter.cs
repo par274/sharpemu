@@ -1897,6 +1897,70 @@ internal static unsafe class VulkanVideoPresenter
     // instead of showing a fallback pattern.
     private static volatile SharpEmu.HLE.ICpuMemory? _guestMemory;
 
+    // The live presenter instance, published while its Run loop is active. The
+    // GDS buffer lives on this instance; the DMA path (AgcExports) reaches its
+    // host mapping through the static wrappers below, always from the presenter
+    // thread where the mapping is created and mutated.
+    private static volatile Presenter? _activePresenter;
+
+    // GDS is 64 KiB. Guest DMA and dispatch-dimension reads that target an
+    // address below this belong to the GDS, not guest virtual memory.
+    internal const ulong GdsAddressLimit = 0x10000;
+
+    internal static bool TryReadGdsDword(uint byteOffset, out uint value)
+    {
+        var presenter = _activePresenter;
+        if (presenter is null)
+        {
+            value = 0;
+            return false;
+        }
+
+        return presenter.TryReadGdsDword(byteOffset, out value);
+    }
+
+    internal static bool TryReadGds(uint byteOffset, Span<byte> destination) =>
+        _activePresenter is { } presenter && presenter.TryReadGds(byteOffset, destination);
+
+    // Fence all submitted guest GPU work before the CPU reads a ds_append
+    // counter out of the host-coherent GDS mapping. Without this the DMA that
+    // copies the counter into an indirect-dispatch argument runs before the
+    // culling compute has finished writing it and reads the reset value (0),
+    // starving the dispatch (zero-dimension). Safe only on the presenter thread,
+    // which is where the ordered DMA side effect executes.
+    internal static void FlushGpuWorkForGdsReadback() =>
+        _activePresenter?.WaitForSubmittedGuestGpuWork();
+
+    internal static bool TryGetComputeWorkGroupLimits(
+        out uint maxSizeX,
+        out uint maxSizeY,
+        out uint maxSizeZ,
+        out uint maxInvocations)
+    {
+        var presenter = _activePresenter;
+        if (presenter is null)
+        {
+            maxSizeX = 0;
+            maxSizeY = 0;
+            maxSizeZ = 0;
+            maxInvocations = 0;
+            return false;
+        }
+
+        return presenter.TryGetComputeWorkGroupLimits(
+            out maxSizeX,
+            out maxSizeY,
+            out maxSizeZ,
+            out maxInvocations);
+    }
+
+    internal static bool TryWriteGds(uint byteOffset, ReadOnlySpan<byte> source) =>
+        _activePresenter is { } presenter && presenter.TryWriteGds(byteOffset, source);
+
+    internal static bool TryFillGds(uint byteOffset, uint value, int lengthBytes) =>
+        _activePresenter is { } presenter &&
+        presenter.TryFillGds(byteOffset, value, lengthBytes);
+
     internal static void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
         _guestMemory = memory;
 
@@ -11275,6 +11339,195 @@ internal static unsafe class VulkanVideoPresenter
             Check(_vk.AllocateMemory(_device, &memoryInfo, null, out memory), "vkAllocateMemory");
             Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory");
             return buffer;
+        }
+
+        // Lazily create the singleton GDS buffer, its descriptor set layout, an
+        // empty set-0 placeholder layout, and the persistent descriptor set that
+        // binds the buffer. Called before a compute pipeline layout is built so
+        // set 1 can be referenced, and before the set is bound at dispatch time.
+        private void EnsureGdsResources()
+        {
+            if (_gdsDescriptorSet.Handle != 0)
+            {
+                return;
+            }
+
+            _gdsBuffer = CreateBuffer(
+                GdsByteSize,
+                BufferUsageFlags.StorageBufferBit |
+                    BufferUsageFlags.TransferSrcBit |
+                    BufferUsageFlags.TransferDstBit,
+                MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
+                out _gdsMemory);
+            void* mapped;
+            Check(
+                _vk.MapMemory(_device, _gdsMemory, 0, GdsByteSize, 0, &mapped),
+                "vkMapMemory(gds)");
+            _gdsMapped = mapped;
+            new Span<byte>(_gdsMapped, (int)GdsByteSize).Clear();
+
+            // Descriptor set layout for set 1: a single storage buffer visible to
+            // compute. Also create an empty layout to stand in for set 0 when a
+            // GDS-using compute shader has no set-0 bindings, since Vulkan
+            // requires every lower set index to be present in the layout array.
+            var gdsBinding = new DescriptorSetLayoutBinding
+            {
+                Binding = 0,
+                DescriptorType = DescriptorType.StorageBuffer,
+                DescriptorCount = 1,
+                StageFlags = ShaderStageFlags.ComputeBit,
+            };
+            var gdsLayoutInfo = new DescriptorSetLayoutCreateInfo
+            {
+                SType = StructureType.DescriptorSetLayoutCreateInfo,
+                BindingCount = 1,
+                PBindings = &gdsBinding,
+            };
+            Check(
+                _vk.CreateDescriptorSetLayout(
+                    _device,
+                    &gdsLayoutInfo,
+                    null,
+                    out _gdsDescriptorSetLayout),
+                "vkCreateDescriptorSetLayout(gds)");
+
+            var emptyLayoutInfo = new DescriptorSetLayoutCreateInfo
+            {
+                SType = StructureType.DescriptorSetLayoutCreateInfo,
+                BindingCount = 0,
+            };
+            Check(
+                _vk.CreateDescriptorSetLayout(
+                    _device,
+                    &emptyLayoutInfo,
+                    null,
+                    out _emptyDescriptorSetLayout),
+                "vkCreateDescriptorSetLayout(empty)");
+
+            var poolSize = new DescriptorPoolSize
+            {
+                Type = DescriptorType.StorageBuffer,
+                DescriptorCount = 1,
+            };
+            var poolInfo = new DescriptorPoolCreateInfo
+            {
+                SType = StructureType.DescriptorPoolCreateInfo,
+                MaxSets = 1,
+                PoolSizeCount = 1,
+                PPoolSizes = &poolSize,
+            };
+            Check(
+                _vk.CreateDescriptorPool(_device, &poolInfo, null, out _gdsDescriptorPool),
+                "vkCreateDescriptorPool(gds)");
+
+            var gdsLayout = _gdsDescriptorSetLayout;
+            var allocateInfo = new DescriptorSetAllocateInfo
+            {
+                SType = StructureType.DescriptorSetAllocateInfo,
+                DescriptorPool = _gdsDescriptorPool,
+                DescriptorSetCount = 1,
+                PSetLayouts = &gdsLayout,
+            };
+            Check(
+                _vk.AllocateDescriptorSets(_device, &allocateInfo, out _gdsDescriptorSet),
+                "vkAllocateDescriptorSets(gds)");
+
+            var bufferInfo = new DescriptorBufferInfo
+            {
+                Buffer = _gdsBuffer,
+                Offset = 0,
+                Range = GdsByteSize,
+            };
+            var write = new WriteDescriptorSet
+            {
+                SType = StructureType.WriteDescriptorSet,
+                DstSet = _gdsDescriptorSet,
+                DstBinding = 0,
+                DescriptorCount = 1,
+                DescriptorType = DescriptorType.StorageBuffer,
+                PBufferInfo = &bufferInfo,
+            };
+            _vk.UpdateDescriptorSets(_device, 1, &write, 0, null);
+        }
+
+        // CPU-side view of the GDS mapping used by the DMA path (AgcExports) to
+        // reset counters each frame and copy them into indirect-dispatch args.
+        // Returns false until the device has been picked, so callers keep the
+        // guest workgroup shape rather than reshaping it against zeroed limits.
+        internal bool TryGetComputeWorkGroupLimits(
+            out uint maxSizeX,
+            out uint maxSizeY,
+            out uint maxSizeZ,
+            out uint maxInvocations)
+        {
+            maxSizeX = _maxComputeWorkGroupSizeX;
+            maxSizeY = _maxComputeWorkGroupSizeY;
+            maxSizeZ = _maxComputeWorkGroupSizeZ;
+            maxInvocations = _maxComputeWorkGroupInvocations;
+            return maxInvocations != 0;
+        }
+
+        // Returns false when the GDS has not been created yet (no compute shader
+        // has needed it), in which case the DMA falls back to guest memory.
+        internal bool TryReadGdsDword(uint byteOffset, out uint value)
+        {
+            if (_gdsMapped == null || byteOffset + sizeof(uint) > GdsByteSize)
+            {
+                value = 0;
+                return false;
+            }
+
+            value = Unsafe.ReadUnaligned<uint>(
+                (byte*)_gdsMapped + (byteOffset & (GdsByteSize - 1)));
+            return true;
+        }
+
+        internal bool TryReadGds(uint byteOffset, Span<byte> destination)
+        {
+            if (_gdsMapped == null ||
+                (ulong)byteOffset + (ulong)destination.Length > GdsByteSize)
+            {
+                return false;
+            }
+
+            new Span<byte>((byte*)_gdsMapped + byteOffset, destination.Length)
+                .CopyTo(destination);
+            return true;
+        }
+
+        internal bool TryWriteGds(uint byteOffset, ReadOnlySpan<byte> source)
+        {
+            if (_gdsMapped == null ||
+                (ulong)byteOffset + (ulong)source.Length > GdsByteSize)
+            {
+                return false;
+            }
+
+            source.CopyTo(new Span<byte>((byte*)_gdsMapped + byteOffset, source.Length));
+            return true;
+        }
+
+        internal bool TryFillGds(uint byteOffset, uint value, int lengthBytes)
+        {
+            if (_gdsMapped == null ||
+                (ulong)byteOffset + (ulong)lengthBytes > GdsByteSize)
+            {
+                return false;
+            }
+
+            var span = new Span<byte>((byte*)_gdsMapped + byteOffset, lengthBytes);
+            if (value == 0)
+            {
+                span.Clear();
+                return true;
+            }
+
+            for (var index = 0; index + sizeof(uint) <= lengthBytes; index += sizeof(uint))
+            {
+                Unsafe.WriteUnaligned(ref span[index], value);
+            }
+
+            return true;
         }
 
         private void CreateStagingBuffer(ulong size)

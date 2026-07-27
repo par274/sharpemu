@@ -147,7 +147,8 @@ public static partial class Gen5SpirvTranslator
         int totalGlobalBufferCount = -1,
         int initialScalarBufferIndex = -1,
         uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1)
+        ulong storageBufferOffsetAlignment = 1,
+        bool linearizeWorkGroup = false)
     {
         var context = new CompilationContext(
             Gen5SpirvStage.Compute,
@@ -162,7 +163,8 @@ public static partial class Gen5SpirvTranslator
             0,
             initialScalarBufferIndex,
             waveLaneCount: waveLaneCount,
-            storageBufferOffsetAlignment: storageBufferOffsetAlignment);
+            storageBufferOffsetAlignment: storageBufferOffsetAlignment,
+            linearizeWorkGroup: linearizeWorkGroup);
         return context.TryCompile(out shader, out error);
     }
 
@@ -229,6 +231,18 @@ public static partial class Gen5SpirvTranslator
         private readonly uint _localSizeX;
         private readonly uint _localSizeY;
         private readonly uint _localSizeZ;
+
+        // GCN allows up to 1024 threads on any single workgroup axis, but
+        // Vulkan devices commonly cap the Z axis far lower (64 on the hardware
+        // this was found on), so a guest workgroup like 1x1x256 is legal on
+        // the console and rejected on the host even though its 256 total
+        // invocations are well inside maxComputeWorkGroupInvocations. When set,
+        // the entry point declares a flat (X*Y*Z, 1, 1) workgroup instead and
+        // the guest's own x/y/z are unpacked from the linear invocation index.
+        // x varies fastest, which is the order the hardware itself uses to
+        // build waves, so lane composition -- and therefore every subgroup and
+        // LDS access -- is unchanged.
+        private readonly bool _linearizeWorkGroup;
         private readonly int _globalBufferBase;
         private readonly int _totalGlobalBufferCount;
         private readonly int _imageBindingBase;
@@ -351,7 +365,8 @@ public static partial class Gen5SpirvTranslator
             IReadOnlyList<uint>? pixelInputCntl = null,
             int requiredVertexOutputCount = 0,
             uint waveLaneCount = 32,
-            ulong storageBufferOffsetAlignment = 1)
+            ulong storageBufferOffsetAlignment = 1,
+            bool linearizeWorkGroup = false)
         {
             _stage = stage;
             _requiredVertexOutputCount = requiredVertexOutputCount;
@@ -366,6 +381,7 @@ public static partial class Gen5SpirvTranslator
             _localSizeX = localSizeX;
             _localSizeY = localSizeY;
             _localSizeZ = localSizeZ;
+            _linearizeWorkGroup = linearizeWorkGroup;
             _globalBufferBase = globalBufferBase;
             _totalGlobalBufferCount = totalGlobalBufferCount < 0
                 ? evaluation.GlobalMemoryBindings.Count
@@ -666,9 +682,9 @@ public static partial class Gen5SpirvTranslator
                     _module.AddExecutionMode(
                         main,
                         SpirvExecutionMode.LocalSize,
-                        _localSizeX,
-                        _localSizeY,
-                        _localSizeZ);
+                        _linearizeWorkGroup ? _localSizeX * _localSizeY * _localSizeZ : _localSizeX,
+                        _linearizeWorkGroup ? 1u : _localSizeY,
+                        _linearizeWorkGroup ? 1u : _localSizeZ);
                 }
 
                 var attributeCount = _stage == Gen5SpirvStage.Vertex
@@ -1328,6 +1344,55 @@ public static partial class Gen5SpirvTranslator
             }
         }
 
+        // The guest's local invocation id for one axis. Without linearisation
+        // this is just the matching component of the host builtin; with it, the
+        // host workgroup is flat and the component has to be unpacked from the
+        // linear index. Sizes are compile-time constants, so the folds below
+        // keep the common 1-wide axes from emitting a division at all.
+        private uint GetGuestLocalInvocationComponent(uint localId, uint component)
+        {
+            if (!_linearizeWorkGroup)
+            {
+                return _module.AddInstruction(
+                    SpirvOp.CompositeExtract,
+                    _uintType,
+                    localId,
+                    component);
+            }
+
+            var linear = _module.AddInstruction(
+                SpirvOp.CompositeExtract,
+                _uintType,
+                localId,
+                0);
+            var stride = component switch
+            {
+                0 => 1u,
+                1 => _localSizeX,
+                _ => _localSizeX * _localSizeY,
+            };
+            var extent = component switch
+            {
+                0 => _localSizeX,
+                1 => _localSizeY,
+                _ => _localSizeZ,
+            };
+            if (extent == 1)
+            {
+                return UInt(0);
+            }
+
+            var value = stride == 1
+                ? linear
+                : _module.AddInstruction(SpirvOp.UDiv, _uintType, linear, UInt(stride));
+
+            // The highest axis needs no wrap: the linear index cannot reach
+            // stride * extent.
+            return component == 2
+                ? value
+                : _module.AddInstruction(SpirvOp.UMod, _uintType, value, UInt(extent));
+        }
+
         private void DeclareVertexInputs()
         {
             foreach (var input in _evaluation.VertexInputs ?? [])
@@ -1483,11 +1548,7 @@ public static partial class Gen5SpirvTranslator
                 var invocationInBounds = _module.ConstantBool(true);
                 for (uint component = 0; component < 3; component++)
                 {
-                    var localComponent = _module.AddInstruction(
-                        SpirvOp.CompositeExtract,
-                        _uintType,
-                        localId,
-                        component);
+                    var localComponent = GetGuestLocalInvocationComponent(localId, component);
                     StoreV(component, localComponent, guardWithExec: false);
 
                     var groupComponent = _module.AddInstruction(

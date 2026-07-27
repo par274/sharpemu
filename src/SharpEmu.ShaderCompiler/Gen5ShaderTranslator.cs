@@ -1038,78 +1038,106 @@ public static class Gen5ShaderTranslator
         var src0 = word & 0x1FF;
         sizeDwords = src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
-        name = opcode switch
-        {
-            0x00 => "VCmpFF32",
-            0x01 => "VCmpLtF32",
-            0x02 => "VCmpEqF32",
-            0x03 => "VCmpLeF32",
-            0x04 => "VCmpGtF32",
-            0x05 => "VCmpLgF32",
-            0x06 => "VCmpGeF32",
-            0x07 => "VCmpOF32",
-            0x08 => "VCmpUF32",
-            0x09 => "VCmpNgeF32",
-            0x0A => "VCmpNlgF32",
-            0x0B => "VCmpNgtF32",
-            0x0C => "VCmpNleF32",
-            0x0D => "VCmpNeqF32",
-            0x0E => "VCmpNltF32",
-            0x0F => "VCmpTruF32",
-            0x10 => "VCmpxFF32",
-            0x11 => "VCmpxLtF32",
-            0x12 => "VCmpxEqF32",
-            0x13 => "VCmpxLeF32",
-            0x14 => "VCmpxGtF32",
-            0x15 => "VCmpxLgF32",
-            0x16 => "VCmpxGeF32",
-            0x17 => "VCmpxOF32",
-            0x18 => "VCmpxUF32",
-            0x19 => "VCmpxNgeF32",
-            0x1A => "VCmpxNlgF32",
-            0x1B => "VCmpxNgtF32",
-            0x1C => "VCmpxNleF32",
-            0x1D => "VCmpxNeqF32",
-            0x1E => "VCmpxNltF32",
-            0x1F => "VCmpxTruF32",
-            0x80 => "VCmpFI32",
-            0x81 => "VCmpLtI32",
-            0x82 => "VCmpEqI32",
-            0x83 => "VCmpLeI32",
-            0x84 => "VCmpGtI32",
-            0x85 => "VCmpNeI32",
-            0x86 => "VCmpGeI32",
-            0x87 => "VCmpTI32",
-            0x88 => "VCmpClassF32",
-            0x90 => "VCmpxFI32",
-            0x91 => "VCmpxLtI32",
-            0x92 => "VCmpxEqI32",
-            0x93 => "VCmpxLeI32",
-            0x94 => "VCmpxGtI32",
-            0x95 => "VCmpxNeI32",
-            0x96 => "VCmpxGeI32",
-            0x97 => "VCmpxTI32",
-            0xC0 => "VCmpFU32",
-            0xC1 => "VCmpLtU32",
-            0xC2 => "VCmpEqU32",
-            0xC3 => "VCmpLeU32",
-            0xC4 => "VCmpGtU32",
-            0xC5 => "VCmpNeU32",
-            0xC6 => "VCmpGeU32",
-            0xC7 => "VCmpTU32",
-            0xD0 => "VCmpxFU32",
-            0xD1 => "VCmpxLtU32",
-            0xD2 => "VCmpxEqU32",
-            0xD3 => "VCmpxLeU32",
-            0xD4 => "VCmpxGtU32",
-            0xD5 => "VCmpxNeU32",
-            0xD6 => "VCmpxGeU32",
-            0xD7 => "VCmpxTU32",
-            _ => string.Empty,
-        };
+        name = GetVopcName(opcode);
 
         return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
     }
+
+    // Comparison opcode names, shared by the native VOPC encoding and by
+    // VOP3-encoded compares: VOP3 reuses this exact numbering for its
+    // opcodes below 0x100 (0x100 and up are the promoted VOP2/VOP1 ops).
+    // Returns an empty name for opcodes this decoder does not model, which
+    // both callers report as an unknown-vopc decode failure.
+    private static string GetVopcName(uint opcode) => opcode switch
+    {
+        0x00 => "VCmpFF32",
+        0x01 => "VCmpLtF32",
+        0x02 => "VCmpEqF32",
+        0x03 => "VCmpLeF32",
+        0x04 => "VCmpGtF32",
+        0x05 => "VCmpLgF32",
+        0x06 => "VCmpGeF32",
+        0x07 => "VCmpOF32",
+        0x08 => "VCmpUF32",
+        0x09 => "VCmpNgeF32",
+        0x0A => "VCmpNlgF32",
+        0x0B => "VCmpNgtF32",
+        0x0C => "VCmpNleF32",
+        0x0D => "VCmpNeqF32",
+        0x0E => "VCmpNltF32",
+        0x0F => "VCmpTruF32",
+        0x10 => "VCmpxFF32",
+        0x11 => "VCmpxLtF32",
+        0x12 => "VCmpxEqF32",
+        0x13 => "VCmpxLeF32",
+        0x14 => "VCmpxGtF32",
+        0x15 => "VCmpxLgF32",
+        0x16 => "VCmpxGeF32",
+        0x17 => "VCmpxOF32",
+        0x18 => "VCmpxUF32",
+        0x19 => "VCmpxNgeF32",
+        0x1A => "VCmpxNlgF32",
+        0x1B => "VCmpxNgtF32",
+        0x1C => "VCmpxNleF32",
+        0x1D => "VCmpxNeqF32",
+        0x1E => "VCmpxNltF32",
+        0x1F => "VCmpxTruF32",
+        0x80 => "VCmpFI32",
+        0x81 => "VCmpLtI32",
+        0x82 => "VCmpEqI32",
+        0x83 => "VCmpLeI32",
+        0x84 => "VCmpGtI32",
+        0x85 => "VCmpNeI32",
+        0x86 => "VCmpGeI32",
+        0x87 => "VCmpTI32",
+        0x88 => "VCmpClassF32",
+        0x90 => "VCmpxFI32",
+        0x91 => "VCmpxLtI32",
+        0x92 => "VCmpxEqI32",
+        0x93 => "VCmpxLeI32",
+        0x94 => "VCmpxGtI32",
+        0x95 => "VCmpxNeI32",
+        0x96 => "VCmpxGeI32",
+        0x97 => "VCmpxTI32",
+        0xC0 => "VCmpFU32",
+        0xC1 => "VCmpLtU32",
+        0xC2 => "VCmpEqU32",
+        0xC3 => "VCmpLeU32",
+        0xC4 => "VCmpGtU32",
+        0xC5 => "VCmpNeU32",
+        0xC6 => "VCmpGeU32",
+        0xC7 => "VCmpTU32",
+        0xD0 => "VCmpxFU32",
+        0xD1 => "VCmpxLtU32",
+        0xD2 => "VCmpxEqU32",
+        0xD3 => "VCmpxLeU32",
+        0xD4 => "VCmpxGtU32",
+        0xD5 => "VCmpxNeU32",
+        0xD6 => "VCmpxGeU32",
+        0xD7 => "VCmpxTU32",
+        // 64-bit unsigned compares. Anchored on KytyPS5's PS5 opcode table
+        // (VectorAluOps.cpp), which lists 0xE5 as V_CMP_NE_U64; the eight-entry
+        // ordering F/LT/EQ/LE/GT/NE/GE/T is the same one both that table and
+        // this one already use for the I32 group at 0x80 and the U32 groups at
+        // 0xC0/0xD0, so the rest of the block follows from that single anchor.
+        0xE0 => "VCmpFU64",
+        0xE1 => "VCmpLtU64",
+        0xE2 => "VCmpEqU64",
+        0xE3 => "VCmpLeU64",
+        0xE4 => "VCmpGtU64",
+        0xE5 => "VCmpNeU64",
+        0xE6 => "VCmpGeU64",
+        0xE7 => "VCmpTU64",
+        0xF0 => "VCmpxFU64",
+        0xF1 => "VCmpxLtU64",
+        0xF2 => "VCmpxEqU64",
+        0xF3 => "VCmpxLeU64",
+        0xF4 => "VCmpxGtU64",
+        0xF5 => "VCmpxNeU64",
+        0xF6 => "VCmpxGeU64",
+        0xF7 => "VCmpxTU64",
+        _ => string.Empty,
+    };
 
     private static bool DecodeVop3(
         uint word,
@@ -1125,6 +1153,19 @@ public static class Gen5ShaderTranslator
         var src2 = (extra >> 18) & 0x1FF;
         sizeDwords = src0 == 0xFF || src1 == 0xFF || src2 == 0xFF ? 3u : 2u;
         error = string.Empty;
+        if (opcode < 0x100)
+        {
+            // VOP3 opcodes below 0x100 are VOPC compares promoted to the VOP3
+            // encoding, which is what a compiler emits when the compare needs
+            // an SGPR-pair destination other than VCC or the source modifiers
+            // only VOP3 carries. Nothing routed them anywhere before, so every
+            // such instruction failed to decode and took its whole shader with
+            // it (Ghost of Yotei: cs=0x80003CB200, one of only two shaders in
+            // the title using DS_APPEND, died on 0x0E4 at pc=0xD8).
+            name = GetVopcName(opcode);
+            return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
+        }
+
         name = isVop3B
             ? opcode switch
             {
@@ -2037,11 +2078,15 @@ public static class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
                 destinations = [Gen5Operand.Vector(word & 0xFF)];
-                if (opcode == "VReadlaneB32")
+                if (opcode == "VReadlaneB32" ||
+                    opcode.StartsWith("VCmp", StringComparison.Ordinal))
                 {
                     // V_READLANE uses the VOP3A vdst byte even though the
                     // destination register is scalar. Bits 8-14 are the
-                    // distinct sdst field used by VOP3B encodings.
+                    // distinct sdst field used by VOP3B encodings. A compare
+                    // promoted to VOP3 writes its lane mask through the same
+                    // vdst byte, which is the whole reason to encode it this
+                    // way instead of VOPC (which is hardwired to VCC).
                     destinations = [Gen5Operand.Scalar(word & 0xFF)];
                 }
                 var isVop3B = IsVop3BOpcode((word >> 16) & 0x3FF);

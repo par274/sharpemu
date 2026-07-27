@@ -101,7 +101,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         int totalGlobalBufferCount = -1,
         int initialScalarBufferIndex = -1,
         uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1)
+        ulong storageBufferOffsetAlignment = 1,
+        bool linearizeWorkGroup = false)
     {
         shader = null;
         if (!Gen5SpirvTranslator.TryCompileComputeShader(
@@ -115,7 +116,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
                 totalGlobalBufferCount,
                 initialScalarBufferIndex,
                 waveLaneCount,
-                storageBufferOffsetAlignment))
+                storageBufferOffsetAlignment,
+                linearizeWorkGroup))
         {
             return false;
         }
@@ -123,6 +125,17 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         shader = new VulkanCompiledGuestShader(compiled.Spirv);
         return true;
     }
+
+    public bool TryGetComputeWorkGroupLimits(
+        out uint maxSizeX,
+        out uint maxSizeY,
+        out uint maxSizeZ,
+        out uint maxInvocations) =>
+        VulkanVideoPresenter.TryGetComputeWorkGroupLimits(
+            out maxSizeX,
+            out maxSizeY,
+            out maxSizeZ,
+            out maxInvocations);
 
     public IGuestCompiledShader GetDepthOnlyFragmentShader() =>
         DepthOnlyFragmentShader;

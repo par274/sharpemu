@@ -68,7 +68,19 @@ internal interface IGuestGpuBackend
         int totalGlobalBufferCount = -1,
         int initialScalarBufferIndex = -1,
         uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1);
+        ulong storageBufferOffsetAlignment = 1,
+        bool linearizeWorkGroup = false);
+
+    /// <summary>
+    /// Reports the device's compute workgroup limits so a caller can tell a
+    /// guest workgroup the host cannot declare as-is from one it must reject
+    /// outright. Returns false when no device is available yet.
+    /// </summary>
+    bool TryGetComputeWorkGroupLimits(
+        out uint maxSizeX,
+        out uint maxSizeY,
+        out uint maxSizeZ,
+        out uint maxInvocations);
 
     /// <summary>Returns the backend's no-color-output fragment shader.</summary>
     IGuestCompiledShader GetDepthOnlyFragmentShader();

@@ -153,6 +153,59 @@ public static class Gen5ShaderScalarEvaluator
     public static bool WasEmptySrtScalarPointerFallback(ulong shaderAddress) =>
         _emptySrtScalarPointerFallbacks.ContainsKey(shaderAddress);
 
+    // Diagnostic (Yotei Hi-Z investigation): TryDecodeBufferDescriptor only
+    // ever sees the 4 words already sitting in scalarRegisters -- it has no
+    // idea which guest address they were loaded FROM, so a "dummy" V#
+    // descriptor (base pointing at the raw heap origin, 0 records) can't be
+    // traced back to "which table slot in guest memory held this, and was a
+    // PM4 write supposed to overwrite it before this dispatch". This records
+    // the source address of every scalar load's destination register
+    // (TryExecuteScalarLoad, thread-local since the interpreter runs one
+    // shader invocation per call on a given thread) so the buffer-descriptor
+    // warning path below can report it. Zero cost when disabled (no dictionary
+    // allocated, no writes) -- gate is checked before the .this[] write, not
+    // after. Opt-in: SHARPEMU_TRACE_SCALAR_DESCRIPTOR_SOURCE=1.
+    private static readonly bool _traceScalarDescriptorSource =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_SCALAR_DESCRIPTOR_SOURCE"),
+            "1",
+            StringComparison.Ordinal);
+
+    // Investigation aid: report where the descriptor of one specific buffer was
+    // loaded from. SHARPEMU_TRACE_DESCRIPTOR_BASE=0x50050C0000
+    private static readonly ulong? _traceDescriptorBaseAddress =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DESCRIPTOR_BASE") is { } baseText &&
+        ulong.TryParse(
+            baseText.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? baseText[2..] : baseText,
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsedBase)
+            ? parsedBase
+            : null;
+
+    [ThreadStatic]
+    private static Dictionary<uint, ulong>? _lastScalarLoadSourceAddress;
+
+    // Public counterpart of the table_slot lookup the buffer-descriptor trace
+    // above already does inline: T# (image) descriptors are resolved by
+    // AgcExports.cs, in a different assembly, so that call site needs its own
+    // way to ask "what guest address was scalar register N's descriptor last
+    // loaded from" for a given Gen5ImageBinding.Control.ScalarResource. Same
+    // thread-local map, same caveat: valid only when queried from the thread
+    // that ran the evaluation, immediately after it returns -- exactly how the
+    // existing inline buffer-descriptor trace already uses it.
+    public static bool TryGetLastScalarLoadSourceAddress(uint scalarRegister, out ulong sourceAddress)
+    {
+        if (_lastScalarLoadSourceAddress is { } sourceMap &&
+            sourceMap.TryGetValue(scalarRegister, out sourceAddress))
+        {
+            return true;
+        }
+
+        sourceAddress = 0;
+        return false;
+    }
+
     // Uniform forward branches select material/resource bodies that remain
     // statically present in the translated shader. Discover the skipped body's
     // descriptors by default; SHARPEMU_CFG_RESOURCE_DISCOVERY=0 is a diagnostic
@@ -740,11 +793,43 @@ public static class Gen5ShaderScalarEvaluator
                         data = new byte[Math.Max(dataLength, sizeof(uint))];
                         dataLength = data.Length;
                         dataPooled = false;
+                        var tableSlotAddress =
+                            _traceScalarDescriptorSource &&
+                            _lastScalarLoadSourceAddress is { } sourceMap &&
+                            sourceMap.TryGetValue(bufferMemory.ScalarResource, out var slotAddress)
+                                ? $"0x{slotAddress:X16}"
+                                : "unknown (set SHARPEMU_TRACE_SCALAR_DESCRIPTOR_SOURCE=1)";
                         Console.Error.WriteLine(
                             $"[LOADER][WARN] AGC buffer read unavailable; using zero buffer " +
                             $"pc=0x{instruction.Pc:X} address=0x{bufferDescriptor.BaseAddress:X16} " +
                             $"bytes={bufferDescriptor.SizeBytes} guest_writeback=disabled " +
+                            $"table_slot_address={tableSlotAddress} " +
                             $"s{bufferMemory.ScalarResource}=[{descriptorWords}]");
+                    }
+
+                    if (_traceDescriptorBaseAddress == bufferDescriptor.BaseAddress &&
+                        bufferDescriptor.BaseAddress != 0)
+                    {
+                        // Investigation aid: a guest GPU address is allocated at
+                        // runtime, so the only way back to the code that owns a
+                        // buffer is the guest memory slot its descriptor was
+                        // loaded from. Reporting that slot turns "nobody writes
+                        // this buffer" into an address a memory watch can act on.
+                        Console.Error.WriteLine(
+                            $"[LOADER][TRACE] agc.descriptor_source " +
+                            $"base=0x{bufferDescriptor.BaseAddress:X16} " +
+                            $"pc=0x{instruction.Pc:X} " +
+                            $"stride={bufferDescriptor.Stride} " +
+                            $"records={bufferDescriptor.NumRecords} " +
+                            $"writable={writable} " +
+                            $"table_slot=" +
+                            (_lastScalarLoadSourceAddress is { } descriptorSources &&
+                             descriptorSources.TryGetValue(
+                                 bufferMemory.ScalarResource,
+                                 out var descriptorSlot)
+                                ? $"0x{descriptorSlot:X16}"
+                                : "unknown") +
+                            $" s{bufferMemory.ScalarResource}");
                     }
 
                     var binding = new Gen5GlobalMemoryBinding(
@@ -2316,6 +2401,11 @@ public static class Gen5ShaderScalarEvaluator
             }
 
             scalarRegisters[destination.Value] = value;
+            if (_traceScalarDescriptorSource || _traceDescriptorBaseAddress.HasValue)
+            {
+                (_lastScalarLoadSourceAddress ??= new Dictionary<uint, ulong>())[destination.Value] =
+                    address + (ulong)(index * sizeof(uint));
+            }
         }
 
         return true;

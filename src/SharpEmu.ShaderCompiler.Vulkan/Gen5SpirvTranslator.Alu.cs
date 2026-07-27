@@ -1725,6 +1725,31 @@ public static partial class Gen5SpirvTranslator
 
                 condition = _module.AddInstruction(operation, _boolType, left, right);
             }
+            else if (opcode.EndsWith("U64", StringComparison.Ordinal))
+            {
+                // 64-bit compares read a register pair per operand;
+                // GetRawSource64 already assembles one from either a scalar or
+                // a vector pair.
+                var left = GetRawSource64(instruction, 0);
+                var right = GetRawSource64(instruction, 1);
+                var operation = opcode switch
+                {
+                    "VCmpEqU64" or "VCmpxEqU64" => SpirvOp.IEqual,
+                    "VCmpNeU64" or "VCmpxNeU64" => SpirvOp.INotEqual,
+                    "VCmpLtU64" or "VCmpxLtU64" => SpirvOp.ULessThan,
+                    "VCmpLeU64" or "VCmpxLeU64" => SpirvOp.ULessThanEqual,
+                    "VCmpGtU64" or "VCmpxGtU64" => SpirvOp.UGreaterThan,
+                    "VCmpGeU64" or "VCmpxGeU64" => SpirvOp.UGreaterThanEqual,
+                    _ => SpirvOp.Nop,
+                };
+                if (operation == SpirvOp.Nop)
+                {
+                    error = $"unsupported integer compare {opcode}";
+                    return false;
+                }
+
+                condition = _module.AddInstruction(operation, _boolType, left, right);
+            }
             else if (opcode is not ("VCmpClassF32" or "VCmpxClassF32"))
             {
                 var left = GetRawSource(instruction, 0);
@@ -1802,10 +1827,18 @@ public static partial class Gen5SpirvTranslator
             }
             else
             {
+                // VOPC is hardwired to VCC (106); SDWA and the VOP3 encoding
+                // both add an explicit SGPR-pair destination, which is the
+                // reason a compiler reaches for them in the first place.
+                // Writing VCC anyway would corrupt whatever mask the shader
+                // parked there and lose the compare the consumer reads.
                 var compareDestination = instruction.Control is Gen5SdwaControl
                     { ScalarDestination: { } scalarDestination }
                     ? scalarDestination
-                    : 106u;
+                    : instruction.Destinations.Count > 0 &&
+                      instruction.Destinations[0].Kind == Gen5OperandKind.ScalarRegister
+                        ? instruction.Destinations[0].Value
+                        : 106u;
                 StoreWaveMask(compareDestination, activeCondition);
             }
 

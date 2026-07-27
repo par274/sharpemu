@@ -107,9 +107,14 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         int totalGlobalBufferCount = -1,
         int initialScalarBufferIndex = -1,
         uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1)
+        ulong storageBufferOffsetAlignment = 1,
+        bool linearizeWorkGroup = false)
     {
         shader = null;
+        // Metal has no equivalent of Vulkan's 64-invocation Z-dimension limit
+        // that motivates linearizeWorkGroup, so the MSL translator keeps
+        // emitting the guest's own x/y/z shape unchanged.
+        _ = linearizeWorkGroup;
         // Wave64 compute is emulated by the translator: cross-lane ops bridge
         // the two 32-wide Apple simdgroups of a guest wave through threadgroup
         // scratch, and wave-agnostic kernels run per-thread unchanged.
@@ -131,6 +136,22 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
 
         shader = new MetalCompiledGuestShader(compiled);
         return true;
+    }
+
+    public bool TryGetComputeWorkGroupLimits(
+        out uint maxSizeX,
+        out uint maxSizeY,
+        out uint maxSizeZ,
+        out uint maxInvocations)
+    {
+        // No device-limit query wired up on the Metal path yet, and Metal
+        // does not need the Vulkan-specific reshaping this feeds -- reporting
+        // "unavailable" keeps callers on the guest's own workgroup shape.
+        maxSizeX = 0;
+        maxSizeY = 0;
+        maxSizeZ = 0;
+        maxInvocations = 0;
+        return false;
     }
 
     public IGuestCompiledShader GetDepthOnlyFragmentShader() =>
