@@ -430,20 +430,54 @@ public static class Gen5ShaderTranslator
     {
         ValidateDppControlVectors();
         program = new Gen5ShaderProgram(address, []);
+        var pendingPcs = new Queue<uint>();
+        var decodedInstructions = new Dictionary<uint, Gen5ShaderInstruction>();
+        // Tracks every dword occupied by a decoded instruction.
+        var occupiedWords = new HashSet<uint>();
+        var endProgramFound = false;
+        var scheduledPcs = new HashSet<uint>();
         error = string.Empty;
+
+        void QueuePc(uint pc)
+        {
+            if (scheduledPcs.Add(pc))
+            {
+                pendingPcs.Enqueue(pc);
+            }
+        }
+
         if (address == 0)
         {
             error = "missing";
             return false;
         }
 
-        var instructions = new List<Gen5ShaderInstruction>();
-        var instructionCount = 0;
-        for (uint pc = 0; instructionCount < MaxInstructions;)
+        QueuePc(0);
+
+        while (pendingPcs.Count > 0)
         {
+            var pc = pendingPcs.Dequeue();
+
+            if (decodedInstructions.ContainsKey(pc))
+            {
+                continue;
+            }
+
+            if (decodedInstructions.Count >= MaxInstructions)
+            {
+                error = "instruction-limit";
+                return false;
+            }
+
             if (!TryReadUInt32(ctx, address + pc, out var word))
             {
                 error = $"read-failed pc=0x{pc:X}";
+                return false;
+            }
+
+            if (occupiedWords.Contains(pc))
+            {
+                error = $"branch-target-mid-instruction pc=0x{pc:X}";
                 return false;
             }
 
@@ -460,6 +494,16 @@ public static class Gen5ShaderTranslator
                 return false;
             }
 
+            for (uint wordIndex = 0; wordIndex < sizeDwords; wordIndex++)
+            {
+                var wordPc = pc + wordIndex * sizeof(uint);
+                if (!occupiedWords.Add(wordPc))
+                {
+                    error = $"instruction-overlap pc=0x{wordPc:X}";
+                    return false;
+                }
+            }
+
             var words = new uint[sizeDwords];
             words[0] = word;
             for (uint wordIndex = 1; wordIndex < sizeDwords; wordIndex++)
@@ -472,22 +516,63 @@ public static class Gen5ShaderTranslator
             }
 
             var instruction = CreateInstruction(pc, encoding, name, words);
-            if (instruction.Control is Gen5GlobalMemoryControl
-                {
-                    UsesFlatAddress: true,
-                })
-            {
-                instruction = ResolveFlatAddressBase(instructions, instruction);
-            }
-            instructions.Add(instruction);
-            instructionCount++;
-
-            pc += sizeDwords * sizeof(uint);
+            decodedInstructions.Add(pc, instruction);
+            var fallThroughPc = pc + sizeDwords * sizeof(uint);
             if (string.Equals(name, "SEndpgm", StringComparison.Ordinal))
-            {
-                program = new Gen5ShaderProgram(address, instructions);
-                return true;
+                {
+                endProgramFound = true;
             }
+            else if (string.Equals(name, "SBranch", StringComparison.Ordinal) ||
+                     name.StartsWith("SCbranch", StringComparison.Ordinal))
+            {
+                var offsetDwords = unchecked((short)(word & 0xFFFF));
+                var target = fallThroughPc + offsetDwords * sizeof(uint);
+                if (target < 0 || target > uint.MaxValue)
+                {
+                    error = $"branch-target-invalid pc=0x{pc:X}";
+                    return false;
+            }
+
+                var targetPc = (uint)target;
+                if (string.Equals(name, "SBranch", StringComparison.Ordinal))
+            {
+                    QueuePc(targetPc);
+                }
+                else
+                {
+                    QueuePc(fallThroughPc);
+                    QueuePc(targetPc);
+                }
+            }
+            else
+            {
+                var opcode = instruction.Opcode;
+                if (string.Equals(opcode, "SSetpcB64", StringComparison.Ordinal) ||
+                    string.Equals(opcode, "SSwappcB64", StringComparison.Ordinal))
+                {
+                    // Indirect PC targets come from runtime SGPR state and cannot be resolved by
+                    // the static decoder.
+                    error = $"indirect-control-flow pc=0x{pc:X} op={opcode}";
+                    return false;
+                }
+
+                QueuePc(fallThroughPc);
+            }
+        }
+
+        var decoded = decodedInstructions
+                      .OrderBy(entry => entry.Key)
+                      .Select(entry => entry.Value)
+                      .ToArray();
+
+        var shaderInstructions = decoded
+                                 .Select((instruction, index) => ResolveFlatAddressBase(decoded, index, instruction))
+                                 .ToArray();
+        program = new Gen5ShaderProgram(address, shaderInstructions);
+
+        if (endProgramFound)
+        {
+            return true;
         }
 
         error = "unterminated";
@@ -1662,7 +1747,8 @@ public static class Gen5ShaderTranslator
     };
 
     private static Gen5ShaderInstruction ResolveFlatAddressBase(
-        IReadOnlyList<Gen5ShaderInstruction> precedingInstructions,
+        IReadOnlyList<Gen5ShaderInstruction> instructions,
+        int instructionIndex,
         Gen5ShaderInstruction instruction)
     {
         if (instruction.Control is not Gen5GlobalMemoryControl
@@ -1670,11 +1756,13 @@ public static class Gen5ShaderTranslator
                 UsesFlatAddress: true,
             } control ||
             !TryFindVectorDefinition(
-                precedingInstructions,
+                instructions,
+                instructionIndex,
                 control.VectorAddress,
                 out var lowDefinition) ||
             !TryFindVectorDefinition(
-                precedingInstructions,
+                instructions,
+                instructionIndex,
                 control.VectorAddress + 1,
                 out var highDefinition))
         {
@@ -1716,10 +1804,11 @@ public static class Gen5ShaderTranslator
 
     private static bool TryFindVectorDefinition(
         IReadOnlyList<Gen5ShaderInstruction> instructions,
+        int instructionIndex,
         uint register,
         out Gen5ShaderInstruction definition)
     {
-        for (var index = instructions.Count - 1; index >= 0; index--)
+        for (var index = instructionIndex - 1; index >= 0; index--)
         {
             var candidate = instructions[index];
             foreach (var destination in candidate.Destinations)
