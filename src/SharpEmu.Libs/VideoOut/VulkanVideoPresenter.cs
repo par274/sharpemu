@@ -1927,6 +1927,7 @@ internal static unsafe class VulkanVideoPresenter
 
         var voidType = module.TypeVoid();
         var boolType = module.TypeBool();
+        var uintType = module.TypeInt(32, signed: false);
         var floatType = module.TypeFloat(32);
         var vec2Type = module.TypeVector(floatType, 2);
         var vec3Type = module.TypeVector(floatType, 3);
@@ -1948,6 +1949,23 @@ internal static unsafe class VulkanVideoPresenter
             module.TypePointer(
                 SpirvStorageClass.UniformConstant,
                 sampledImageType);
+        var opacityPushStruct = module.TypeStruct(floatType);
+        module.AddDecoration(opacityPushStruct, SpirvDecoration.Block);
+        module.AddMemberDecoration(
+            opacityPushStruct,
+            0,
+            SpirvDecoration.Offset,
+            0);
+        var opacityPushPointer = module.TypePointer(
+            SpirvStorageClass.PushConstant,
+            opacityPushStruct);
+        var opacityMemberPointer = module.TypePointer(
+            SpirvStorageClass.PushConstant,
+            floatType);
+        var opacityPush = module.AddGlobalVariable(
+            opacityPushPointer,
+            SpirvStorageClass.PushConstant);
+        module.AddName(opacityPush, "overlay");
 
         var attribute =
             module.AddGlobalVariable(inputVec4Pointer, SpirvStorageClass.Input);
@@ -2091,6 +2109,28 @@ internal static unsafe class VulkanVideoPresenter
                 6);
         }
 
+        var opacityPointer = module.AddInstruction(
+            SpirvOp.AccessChain,
+            opacityMemberPointer,
+            opacityPush,
+            module.Constant(uintType, 0));
+        var opacity = module.AddInstruction(
+            SpirvOp.Load,
+            floatType,
+            opacityPointer);
+        var opacityVector = module.AddInstruction(
+            SpirvOp.CompositeConstruct,
+            vec4Type,
+            opacity,
+            opacity,
+            opacity,
+            opacity);
+        color = module.AddInstruction(
+            SpirvOp.FMul,
+            vec4Type,
+            color,
+            opacityVector);
+
         module.AddStatement(SpirvOp.Store, output, color);
         module.AddStatement(SpirvOp.Return);
         module.EndFunction();
@@ -2098,7 +2138,7 @@ internal static unsafe class VulkanVideoPresenter
             SpirvExecutionModel.Fragment,
             main,
             "main",
-            [attribute, texture, output]);
+            [attribute, texture, opacityPush, output]);
         module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
         return module.Build();
     }
@@ -5759,11 +5799,19 @@ internal static unsafe class VulkanVideoPresenter
         private void CreateGameOverlayPipeline()
         {
             var setLayout = _gameOverlayDescriptorSetLayout;
+            var opacityPushRange = new PushConstantRange
+            {
+                StageFlags = ShaderStageFlags.FragmentBit,
+                Offset = 0,
+                Size = sizeof(float),
+            };
             var pipelineLayoutInfo = new PipelineLayoutCreateInfo
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
                 SetLayoutCount = 1,
                 PSetLayouts = &setLayout,
+                PushConstantRangeCount = 1,
+                PPushConstantRanges = &opacityPushRange,
             };
             Check(
                 _vk.CreatePipelineLayout(
@@ -5905,6 +5953,7 @@ internal static unsafe class VulkanVideoPresenter
                     _gameOverlayFrameSequence,
                     out var visible,
                     out var sequence,
+                    out var opacity,
                     out var copied))
             {
                 return;
@@ -6015,6 +6064,13 @@ internal static unsafe class VulkanVideoPresenter
                 &descriptorSet,
                 0,
                 null);
+            _vk.CmdPushConstants(
+                _commandBuffer,
+                _gameOverlayPipelineLayout,
+                ShaderStageFlags.FragmentBit,
+                0,
+                sizeof(float),
+                &opacity);
             _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
             _vk.CmdEndRenderPass(_commandBuffer);
         }

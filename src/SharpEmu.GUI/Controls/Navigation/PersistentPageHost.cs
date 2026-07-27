@@ -8,6 +8,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Rendering.Composition;
 using Avalonia.Rendering.Composition.Animations;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 
 namespace SharpEmu.GUI.Controls.Navigation;
@@ -18,17 +19,20 @@ namespace SharpEmu.GUI.Controls.Navigation;
 /// animated foreground layers.
 /// </summary>
 /// <remarks>
-/// No child is collapsed during ordinary navigation. Every page is measured,
-/// arranged and attached for the lifetime of the host, so navigation never
-/// constructs a view or pays its first layout pass. Only the selected page
-/// participates in hit testing. Avalonia opacity is intentionally used for the
-/// complete subtree: applying composition opacity only to the root proxy can
-/// leave independently composed descendants visible on some render backends.
-/// Page roots never move or scale; marked content layers provide the depth
-/// motion without shifting the page coordinate system.
+/// Pages stay attached for the lifetime of the host, but an inactive page is
+/// collapsed after its cross-fade so it no longer participates in layout,
+/// rendering or animation ticks. Only the selected page participates in hit
+/// testing. Avalonia opacity is intentionally used for the complete subtree:
+/// applying composition opacity only to the root proxy can leave independently
+/// composed descendants visible on some render backends. Page roots never move
+/// or scale; marked content layers provide the depth motion without shifting
+/// the page coordinate system.
 /// </remarks>
 public sealed class PersistentPageHost : Panel
 {
+    private static readonly TimeSpan PageTransitionDuration =
+        TimeSpan.FromMilliseconds(260);
+
     public static readonly StyledProperty<int> SelectedIndexProperty =
         AvaloniaProperty.Register<PersistentPageHost, int>(
             nameof(SelectedIndex),
@@ -40,6 +44,8 @@ public sealed class PersistentPageHost : Panel
             nameof(ParallaxTarget));
 
     private bool _compositionReady;
+    private int _presentedIndex = -1;
+    private int _pageStateGeneration;
 
     public PersistentPageHost()
     {
@@ -83,7 +89,7 @@ public sealed class PersistentPageHost : Panel
 
         if (change.Property == SelectedIndexProperty)
         {
-            ApplyPageState();
+            ApplyPageState(animate: true);
             ApplyBackdropState(animate: true);
         }
         else if (change.Property == ParallaxTargetProperty)
@@ -140,7 +146,7 @@ public sealed class PersistentPageHost : Panel
         }
 
         InitializeBackdropComposition();
-        ApplyPageState();
+        ApplyPageState(animate: false);
         ApplyBackdropState(animate: false);
 
         foreach (var child in Children)
@@ -166,7 +172,7 @@ public sealed class PersistentPageHost : Panel
         }
     }
 
-    private void ApplyPageState()
+    private void ApplyPageState(bool animate)
     {
         if (Children.Count == 0)
         {
@@ -174,12 +180,15 @@ public sealed class PersistentPageHost : Panel
         }
 
         var selected = Math.Clamp(SelectedIndex, 0, Children.Count - 1);
+        var outgoing = animate ? _presentedIndex : -1;
+        var generation = ++_pageStateGeneration;
         for (var index = 0; index < Children.Count; index++)
         {
             var child = Children[index];
             var isActive = index == selected;
+            var isOutgoing = index == outgoing && outgoing != selected;
 
-            child.IsVisible = true;
+            child.IsVisible = isActive || isOutgoing;
             child.IsHitTestVisible = isActive;
             child.Focusable = isActive;
             KeyboardNavigation.SetTabNavigation(
@@ -189,6 +198,26 @@ public sealed class PersistentPageHost : Panel
             child.Opacity = isActive ? 1 : 0;
             ApplyMotionLayerState(child, index, selected);
         }
+
+        _presentedIndex = selected;
+        if (outgoing < 0 || outgoing == selected)
+        {
+            return;
+        }
+
+        DispatcherTimer.RunOnce(
+            () =>
+            {
+                if (generation != _pageStateGeneration ||
+                    outgoing == _presentedIndex ||
+                    outgoing >= Children.Count)
+                {
+                    return;
+                }
+
+                Children[outgoing].IsVisible = false;
+            },
+            PageTransitionDuration);
     }
 
     private static void ApplyMotionLayerState(Control page, int pageIndex, int selectedIndex)
@@ -257,7 +286,7 @@ public sealed class PersistentPageHost : Panel
             new DoubleTransition
             {
                 Property = OpacityProperty,
-                Duration = TimeSpan.FromMilliseconds(260),
+                Duration = PageTransitionDuration,
                 Easing = new CubicEaseOut(),
             },
         ];

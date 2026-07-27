@@ -24,8 +24,6 @@ public partial class GameOverlayView : UserControl, IDisposable
         TimeSpan.FromMilliseconds(220);
     private static readonly TimeSpan ExitAnimationDuration =
         TimeSpan.FromMilliseconds(220);
-    private static readonly TimeSpan InteractionAnimationDuration =
-        TimeSpan.FromMilliseconds(150);
 
     private const double BottomMargin = 28;
     private const double BottomRowHeight = 64;
@@ -45,7 +43,6 @@ public partial class GameOverlayView : UserControl, IDisposable
     private int _focusedAction;
     private int _hoveredAction = -1;
     private bool _pointerNavigationActive;
-    private int _interactionGeneration;
     private int _presentationGeneration;
     private int _renderGeneration;
     private TaskCompletionSource<bool>? _hideCompletion;
@@ -55,6 +52,7 @@ public partial class GameOverlayView : UserControl, IDisposable
     private int _framePixelHeight;
     private double _renderScaling = 1;
     private double _drawingScale = 1;
+    private double _overlayOpacity = 1;
     private SKBitmap? _renderBitmap;
     private SKCanvas? _renderCanvas;
 
@@ -76,8 +74,18 @@ public partial class GameOverlayView : UserControl, IDisposable
         };
         _clockTimer.Tick += (_, _) =>
         {
+            var previousTime = _viewModel.CurrentTime;
+            var previousSessionDuration = _viewModel.SessionDuration;
+            var previousRecentDuration = _viewModel.RecentDuration;
+            var previousCanExit = _viewModel.CanExit;
             _viewModel.Refresh(DateTimeOffset.Now);
-            QueueRender();
+            if (previousTime != _viewModel.CurrentTime ||
+                previousSessionDuration != _viewModel.SessionDuration ||
+                previousRecentDuration != _viewModel.RecentDuration ||
+                previousCanExit != _viewModel.CanExit)
+            {
+                QueueRender();
+            }
         };
     }
 
@@ -103,7 +111,8 @@ public partial class GameOverlayView : UserControl, IDisposable
         _viewModel.Refresh(DateTimeOffset.Now);
         if (!wasPresented)
         {
-            OverlayRoot.Opacity = 0;
+            _overlayOpacity = 0;
+            _frameWriter.SetOpacity(0);
         }
 
         IsVisible = true;
@@ -111,12 +120,13 @@ public partial class GameOverlayView : UserControl, IDisposable
         _clockTimer.Start();
         FocusAction(0);
         SyncTo(gameView);
+        QueueRender();
         if (!wasPresented)
         {
             VisibilityChanged?.Invoke(true);
         }
 
-        _ = AnimateShowAsync(generation, startFromHidden: !wasPresented);
+        _ = AnimateShowAsync(generation);
     }
 
     public void HideOverlay(bool activateOwner = true)
@@ -143,7 +153,6 @@ public partial class GameOverlayView : UserControl, IDisposable
         var completion = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         _hideCompletion = completion;
-        QueueRender();
         _ = AnimateHideAsync(generation, completion);
         return completion.Task;
     }
@@ -169,24 +178,37 @@ public partial class GameOverlayView : UserControl, IDisposable
             return;
         }
 
-        _renderScaling = TopLevel.GetTopLevel(gameView)?.RenderScaling ?? 1;
-        _surfacePixelWidth = Math.Max(
+        var renderScaling = TopLevel.GetTopLevel(gameView)?.RenderScaling ?? 1;
+        var surfacePixelWidth = Math.Max(
             1,
-            (int)Math.Round(gameView.Bounds.Width * _renderScaling));
-        _surfacePixelHeight = Math.Max(
+            (int)Math.Round(gameView.Bounds.Width * renderScaling));
+        var surfacePixelHeight = Math.Max(
             1,
-            (int)Math.Round(gameView.Bounds.Height * _renderScaling));
+            (int)Math.Round(gameView.Bounds.Height * renderScaling));
 
-        (_framePixelWidth, _framePixelHeight) =
+        var (framePixelWidth, framePixelHeight) =
             VulkanOverlayFrameWriter.GetFrameSize(
-                _surfacePixelWidth,
-                _surfacePixelHeight);
+                surfacePixelWidth,
+                surfacePixelHeight);
         var frameScale = Math.Min(
-            _framePixelWidth / (double)_surfacePixelWidth,
-            _framePixelHeight / (double)_surfacePixelHeight);
-        _drawingScale = _renderScaling * frameScale;
+            framePixelWidth / (double)surfacePixelWidth,
+            framePixelHeight / (double)surfacePixelHeight);
+        var drawingScale = renderScaling * frameScale;
+        var changed =
+            _surfacePixelWidth != surfacePixelWidth ||
+            _surfacePixelHeight != surfacePixelHeight ||
+            _framePixelWidth != framePixelWidth ||
+            _framePixelHeight != framePixelHeight ||
+            Math.Abs(_drawingScale - drawingScale) > double.Epsilon;
 
-        if (_isPresented)
+        _renderScaling = renderScaling;
+        _surfacePixelWidth = surfacePixelWidth;
+        _surfacePixelHeight = surfacePixelHeight;
+        _framePixelWidth = framePixelWidth;
+        _framePixelHeight = framePixelHeight;
+        _drawingScale = drawingScale;
+
+        if (_isPresented && changed)
         {
             QueueRender();
         }
@@ -274,7 +296,6 @@ public partial class GameOverlayView : UserControl, IDisposable
         _isPresented = false;
         _isHiding = false;
         Interlocked.Increment(ref _presentationGeneration);
-        Interlocked.Increment(ref _interactionGeneration);
         Interlocked.Increment(ref _renderGeneration);
         _hideCompletion?.TrySetResult(false);
         _hideCompletion = null;
@@ -286,15 +307,8 @@ public partial class GameOverlayView : UserControl, IDisposable
         _frameWriter.Dispose();
     }
 
-    private async Task AnimateShowAsync(
-        int generation,
-        bool startFromHidden)
+    private async Task AnimateShowAsync(int generation)
     {
-        if (startFromHidden)
-        {
-            QueueRender();
-        }
-
         await AnimateOpacityAsync(
             generation,
             1,
@@ -333,7 +347,7 @@ public partial class GameOverlayView : UserControl, IDisposable
         TimeSpan duration,
         bool easeInOut)
     {
-        var startOpacity = OverlayRoot.Opacity;
+        var startOpacity = _overlayOpacity;
         var startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
         double progress;
         do
@@ -352,14 +366,15 @@ public partial class GameOverlayView : UserControl, IDisposable
             var easedProgress = easeInOut
                 ? EaseInOutCubic(progress)
                 : EaseOutCubic(progress);
-            OverlayRoot.Opacity =
+            _overlayOpacity =
                 startOpacity +
                 ((targetOpacity - startOpacity) * easedProgress);
-            QueueRender();
+            _frameWriter.SetOpacity((float)_overlayOpacity);
         }
         while (progress < 1);
 
-        OverlayRoot.Opacity = targetOpacity;
+        _overlayOpacity = targetOpacity;
+        _frameWriter.SetOpacity((float)targetOpacity);
     }
 
     private Task WaitForAnimationFrameAsync()
@@ -407,7 +422,6 @@ public partial class GameOverlayView : UserControl, IDisposable
         if (changed && _isPresented)
         {
             QueueRender();
-            StartInteractionAnimation();
         }
     }
 
@@ -428,7 +442,6 @@ public partial class GameOverlayView : UserControl, IDisposable
         if (changed && _isPresented)
         {
             QueueRender();
-            StartInteractionAnimation();
         }
     }
 
@@ -446,31 +459,6 @@ public partial class GameOverlayView : UserControl, IDisposable
         ExitButton.Classes.Set(
             "hovered",
             _pointerNavigationActive && _hoveredAction == 1);
-    }
-
-    private void StartInteractionAnimation()
-    {
-        var generation = Interlocked.Increment(ref _interactionGeneration);
-        _ = PumpInteractionFramesAsync(generation);
-    }
-
-    private async Task PumpInteractionFramesAsync(int generation)
-    {
-        var startedAt = System.Diagnostics.Stopwatch.GetTimestamp();
-        do
-        {
-            await WaitForAnimationFrameAsync();
-            if (_disposed ||
-                !_isPresented ||
-                generation != _interactionGeneration)
-            {
-                return;
-            }
-
-            QueueRender();
-        }
-        while (System.Diagnostics.Stopwatch.GetElapsedTime(startedAt) <
-            InteractionAnimationDuration);
     }
 
     private void QueueRender()

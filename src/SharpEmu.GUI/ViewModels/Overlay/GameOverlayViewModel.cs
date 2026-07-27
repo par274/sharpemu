@@ -11,9 +11,10 @@ using ReactiveUI.SourceGenerators;
 using SharpEmu.GUI.Services.Abstractions;
 
 /// <summary>
-/// Presentation state for the persistent in-game overlay. The window drives a
-/// one-second tick while visible; duration calculation and localization stay
-/// out of its visual code.
+/// Presentation state for the persistent in-game overlay. The window samples
+/// time once per second while visible, but republishes pixels only when one of
+/// the displayed minute/hour values changes. Duration calculation and
+/// localization stay out of its visual code.
 /// </summary>
 public partial class GameOverlayViewModel : ReactiveObject
 {

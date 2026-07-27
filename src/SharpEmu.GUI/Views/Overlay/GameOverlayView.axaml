@@ -54,16 +54,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="CornerRadius" Value="0" />
       <Setter Property="HorizontalContentAlignment" Value="Center" />
       <Setter Property="VerticalContentAlignment" Value="Center" />
-      <Setter Property="Transitions">
-        <Transitions>
-          <BrushTransition Property="Background"
-                           Duration="0:0:0.14"
-                           Easing="CubicEaseOut" />
-          <BrushTransition Property="Foreground"
-                           Duration="0:0:0.14"
-                           Easing="CubicEaseOut" />
-        </Transitions>
-      </Setter>
     </Style>
     <Style Selector="Button.overlayAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
                      Button.overlayAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
@@ -154,6 +144,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
           </Border>
           <Image Source="{Binding GamePoster}"
                  Stretch="UniformToFill"
+                 RenderOptions.BitmapInterpolationMode="LowQuality"
                  IsVisible="{Binding HasPoster}" />
         </Grid>
       </Border>

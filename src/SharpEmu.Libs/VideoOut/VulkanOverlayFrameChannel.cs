@@ -20,6 +20,7 @@ public sealed unsafe class VulkanOverlayFrameWriter : IDisposable
     private readonly MemoryMappedViewAccessor _view;
     private byte* _memory;
     private long _sequence;
+    private long _pixelSequence;
     private int _activeBuffer;
     private bool _disposed;
 
@@ -52,6 +53,10 @@ public sealed unsafe class VulkanOverlayFrameWriter : IDisposable
 
         WriteInt32(VulkanOverlayFrameProtocol.MagicOffset, VulkanOverlayFrameProtocol.Magic);
         WriteInt32(VulkanOverlayFrameProtocol.VersionOffset, VulkanOverlayFrameProtocol.Version);
+        WriteInt32(
+            VulkanOverlayFrameProtocol.OpacityBitsOffset,
+            BitConverter.SingleToInt32Bits(1));
+        Volatile.Write(ref PixelSequence, 0);
         Volatile.Write(ref Sequence, 0);
     }
 
@@ -103,10 +108,30 @@ public sealed unsafe class VulkanOverlayFrameWriter : IDisposable
         WriteInt32(VulkanOverlayFrameProtocol.HeightOffset, height);
         WriteInt32(VulkanOverlayFrameProtocol.StrideOffset, packedStride);
         WriteInt32(VulkanOverlayFrameProtocol.BufferIndexOffset, nextBuffer);
+        Volatile.Write(ref PixelSequence, ++_pixelSequence);
         WriteInt32(
             VulkanOverlayFrameProtocol.FlagsOffset,
             visible ? VulkanOverlayFrameProtocol.VisibleFlag : 0);
         _activeBuffer = nextBuffer;
+        Volatile.Write(ref Sequence, ++_sequence);
+    }
+
+    /// <summary>
+    /// Updates the compositor opacity without republishing the pixel buffer.
+    /// This keeps presentation animations on the GPU side of the process
+    /// boundary.
+    /// </summary>
+    public void SetOpacity(float opacity)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!float.IsFinite(opacity))
+        {
+            throw new ArgumentOutOfRangeException(nameof(opacity));
+        }
+
+        WriteInt32(
+            VulkanOverlayFrameProtocol.OpacityBitsOffset,
+            BitConverter.SingleToInt32Bits(Math.Clamp(opacity, 0, 1)));
         Volatile.Write(ref Sequence, ++_sequence);
     }
 
@@ -157,6 +182,9 @@ public sealed unsafe class VulkanOverlayFrameWriter : IDisposable
     private ref long Sequence =>
         ref *(long*)(_memory + VulkanOverlayFrameProtocol.SequenceOffset);
 
+    private ref long PixelSequence =>
+        ref *(long*)(_memory + VulkanOverlayFrameProtocol.PixelSequenceOffset);
+
     private void AcquirePointer()
     {
         byte* pointer = null;
@@ -173,6 +201,7 @@ internal sealed unsafe class VulkanOverlayFrameReader : IDisposable
     private readonly MemoryMappedFile _mapping;
     private readonly MemoryMappedViewAccessor _view;
     private byte* _memory;
+    private long _copiedPixelSequence = -1;
     private bool _disposed;
 
     private VulkanOverlayFrameReader(
@@ -258,11 +287,13 @@ internal sealed unsafe class VulkanOverlayFrameReader : IDisposable
         long previousSequence,
         out bool visible,
         out long sequence,
+        out float opacity,
         out bool copied)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         visible = false;
         sequence = previousSequence;
+        opacity = 1;
         copied = false;
 
         var requiredBytes = checked(
@@ -282,6 +313,17 @@ internal sealed unsafe class VulkanOverlayFrameReader : IDisposable
             var height = ReadInt32(VulkanOverlayFrameProtocol.HeightOffset);
             var stride = ReadInt32(VulkanOverlayFrameProtocol.StrideOffset);
             var bufferIndex = ReadInt32(VulkanOverlayFrameProtocol.BufferIndexOffset);
+            var pixelSequence = Volatile.Read(ref PixelSequence);
+            opacity = BitConverter.Int32BitsToSingle(
+                ReadInt32(VulkanOverlayFrameProtocol.OpacityBitsOffset));
+            if (!float.IsFinite(opacity))
+            {
+                opacity = 1;
+            }
+            else
+            {
+                opacity = Math.Clamp(opacity, 0, 1);
+            }
 
             visible = (flags & VulkanOverlayFrameProtocol.VisibleFlag) != 0;
             sequence = before;
@@ -303,6 +345,11 @@ internal sealed unsafe class VulkanOverlayFrameReader : IDisposable
                 return true;
             }
 
+            if (pixelSequence == _copiedPixelSequence)
+            {
+                return before == Volatile.Read(ref Sequence);
+            }
+
             fixed (byte* destinationPointer = destination)
             {
                 Buffer.MemoryCopy(
@@ -314,6 +361,7 @@ internal sealed unsafe class VulkanOverlayFrameReader : IDisposable
 
             if (before == Volatile.Read(ref Sequence))
             {
+                _copiedPixelSequence = pixelSequence;
                 copied = true;
                 return true;
             }
@@ -345,6 +393,9 @@ internal sealed unsafe class VulkanOverlayFrameReader : IDisposable
     private ref long Sequence =>
         ref *(long*)(_memory + VulkanOverlayFrameProtocol.SequenceOffset);
 
+    private ref long PixelSequence =>
+        ref *(long*)(_memory + VulkanOverlayFrameProtocol.PixelSequenceOffset);
+
     private int ReadInt32(int offset) =>
         Volatile.Read(ref *(int*)(_memory + offset));
 }
@@ -352,7 +403,7 @@ internal sealed unsafe class VulkanOverlayFrameReader : IDisposable
 internal static class VulkanOverlayFrameProtocol
 {
     public const int Magic = 0x534F564C; // "LVOS", little-endian.
-    public const int Version = 1;
+    public const int Version = 2;
     public const int BytesPerPixel = 4;
     public const int BufferCount = 2;
     public const int MaxWidth = 4096;
@@ -366,6 +417,8 @@ internal static class VulkanOverlayFrameProtocol
     public const int HeightOffset = 24;
     public const int StrideOffset = 28;
     public const int BufferIndexOffset = 32;
+    public const int OpacityBitsOffset = 36;
+    public const int PixelSequenceOffset = 40;
     public const int VisibleFlag = 1;
     public const long FrameBytes = (long)MaxWidth * MaxHeight * BytesPerPixel;
     public const long Capacity = HeaderSize + (FrameBytes * BufferCount);

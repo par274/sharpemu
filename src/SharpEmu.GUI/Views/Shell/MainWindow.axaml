@@ -125,8 +125,9 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
           </Border.Transitions>
         </Border>
 
-        <!-- All three pages stay attached, measured and arranged. Their roots
-             remain stationary; only marked foreground layers animate. -->
+        <!-- All three pages stay attached, while inactive pages collapse after
+             their cross-fade. Roots remain stationary; only marked foreground
+             layers animate. -->
         <navigationControls:PersistentPageHost
             x:Name="PageSurface"
             SelectedIndex="{Binding ActivePageIndex}"
@@ -232,6 +233,7 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                              Classes="libraryCardCover"
                              Classes.ready="{Binding !IsLoading}"
                              Stretch="UniformToFill"
+                             RenderOptions.BitmapInterpolationMode="LowQuality"
                              IsVisible="{Binding HasCover}" />
                       <TextBlock Classes="materialSymbol libraryCardSpinner"
                                  Classes.loading="{Binding IsLoading}"
