@@ -99,7 +99,7 @@ Graphics state spans guest queues and labels, decoded commands, translated shade
 
 `src/SharpEmu.Logging` provides normal logs and runtime summaries. The CLI accepts log-file, log-level, and bounded import-trace options. `src/SharpEmu.Debugger` and `src/SharpEmu.DebugClient` implement the loopback debugger protocol; the CLI hosts the server when requested. Existing logging and debug paths remain primary diagnostics.
 
-The harness adds JSONL lifecycle events only when `--harness-config` is explicitly supplied. Events identify milestones such as metadata load, module load, guest entry, VideoOut open, graphics submission, shader translation, first presentation, exit, and host exception. They supplement logs; they do not replace the debugger or alter guest results.
+The harness adds JSONL lifecycle events only when `--harness-config` is explicitly supplied. Events identify milestones such as metadata load, module load, guest entry, VideoOut open, graphics submission, shader translation, first presentation, exit, and host exception. The first-host-frame milestone proves only the host presentation/capture path; it does not prove a valid guest submission or render. Guest-graphics progress requires separate direct evidence, and a presented splash or key art is not successful game rendering. Events supplement logs; they do not replace the debugger or alter guest results.
 
 ## 9. Tests and tools
 

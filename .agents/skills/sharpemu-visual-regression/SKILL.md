@@ -20,7 +20,8 @@ Accept one run ID for diagnosis or before/after run IDs for comparison. Require 
 4. For two runs, run `visual compare --before <before-id> --after <after-id>`. Reject silent baseline replacement and report incompatible source or resolution.
 5. Compare luminance, near-black/white percentages, alpha anomalies, difference hash, changed-pixel ratio, and normalized difference. Metrics are evidence, not a correctness oracle.
 6. Correlate pixels with `events.jsonl`, logs, command/profile, build fingerprint, shader output, and applicable specifications.
-7. Keep screenshots, raw frames, and contact sheets under `.local/`; never add target-game images to Git.
+7. Treat `first-host-frame`, splash, and key-art presentation only as host-path evidence; require separate direct guest submission/render evidence for guest-graphics progress.
+8. Keep screenshots, raw frames, and contact sheets under `.local/`; never add target-game images to Git.
 
 ## Output
 

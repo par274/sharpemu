@@ -74,6 +74,8 @@ Use emulator-native final-swapchain raw capture first. Window client-area captur
 
 Distinguish no frame produced, capture failure, blank frame, frozen sequence, changing but visibly incorrect output, and apparently meaningful output. Use:
 
+`first-host-frame` proves only that the host presentation/capture path produced a frame. It does not prove that the guest submitted or rendered a valid image. Claim guest-graphics progress only from separate direct guest submission/shader evidence; describe splash or key-art presentation as host presentation, never successful game rendering.
+
 ```powershell
 .\scripts\agent-harness.ps1 visual analyze --run <run-id>
 .\scripts\agent-harness.ps1 visual compare --before <before-id> --after <after-id>

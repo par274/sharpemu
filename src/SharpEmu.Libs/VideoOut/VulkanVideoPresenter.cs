@@ -14579,7 +14579,9 @@ internal static unsafe class VulkanVideoPresenter
             if (HarnessTelemetry.IsEnabled)
             {
                 var harnessFrameNumber = ++_harnessFrameNumber;
-                if (HarnessTelemetry.ShouldCaptureNativeFrame(harnessFrameNumber))
+                if (VulkanHarnessCapturePolicy.ShouldRecord(
+                        instrumentationEnabled: true,
+                        HarnessTelemetry.ShouldCaptureNativeFrame(harnessFrameNumber)))
                 {
                     RecordHarnessCapture(imageIndex, harnessFrameNumber);
                 }
@@ -17193,13 +17195,18 @@ internal static unsafe class VulkanVideoPresenter
 
         private void RecordHarnessCapture(uint imageIndex, long frameNumber)
         {
+            VulkanHarnessCapturePolicy.EnsureCaptureFormat(_swapchainFormat);
+            var acquire = VulkanHarnessCapturePolicy.PresentToTransfer;
             var toTransfer = new ImageMemoryBarrier
             {
                 SType = StructureType.ImageMemoryBarrier,
-                SrcAccessMask = AccessFlags.MemoryReadBit,
-                DstAccessMask = AccessFlags.TransferReadBit,
-                OldLayout = ImageLayout.PresentSrcKhr,
-                NewLayout = ImageLayout.TransferSrcOptimal,
+                // The image may have been written by transfer, color-attachment,
+                // or shader work earlier in this command buffer. A conservative
+                // legacy barrier covers those writers before transfer read.
+                SrcAccessMask = acquire.SourceAccess,
+                DstAccessMask = acquire.DestinationAccess,
+                OldLayout = acquire.OldLayout,
+                NewLayout = acquire.NewLayout,
                 SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 Image = _swapchainImages[imageIndex],
@@ -17207,8 +17214,8 @@ internal static unsafe class VulkanVideoPresenter
             };
             _vk.CmdPipelineBarrier(
                 _commandBuffer,
-                PipelineStageFlags.BottomOfPipeBit,
-                PipelineStageFlags.TransferBit,
+                acquire.SourceStage,
+                acquire.DestinationStage,
                 0,
                 0,
                 null,
@@ -17232,13 +17239,17 @@ internal static unsafe class VulkanVideoPresenter
                 _stagingBuffer,
                 1,
                 &copyRegion);
+            var restore = VulkanHarnessCapturePolicy.TransferToPresent;
             var toPresent = new ImageMemoryBarrier
             {
                 SType = StructureType.ImageMemoryBarrier,
-                SrcAccessMask = AccessFlags.TransferReadBit,
-                DstAccessMask = AccessFlags.MemoryReadBit,
-                OldLayout = ImageLayout.TransferSrcOptimal,
-                NewLayout = ImageLayout.PresentSrcKhr,
+                SrcAccessMask = restore.SourceAccess,
+                // Presentation is external to the pipeline. In the legacy API,
+                // BOTTOM_OF_PIPE with no destination access is the equivalent
+                // of synchronization2 NONE before the signal semaphore.
+                DstAccessMask = restore.DestinationAccess,
+                OldLayout = restore.OldLayout,
+                NewLayout = restore.NewLayout,
                 SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 Image = _swapchainImages[imageIndex],
@@ -17246,8 +17257,8 @@ internal static unsafe class VulkanVideoPresenter
             };
             _vk.CmdPipelineBarrier(
                 _commandBuffer,
-                PipelineStageFlags.TransferBit,
-                PipelineStageFlags.BottomOfPipeBit,
+                restore.SourceStage,
+                restore.DestinationStage,
                 0,
                 0,
                 null,
