@@ -46,11 +46,9 @@ public static class Gen5ShaderScalarEvaluator
         _emptySrtScalarPointerFallbacks.ContainsKey(shaderAddress);
 
     // Uniform forward branches select material/resource bodies that remain
-    // statically present in the translated shader. Discover the skipped body's
-    // descriptors by default; SHARPEMU_CFG_RESOURCE_DISCOVERY=0 is a diagnostic
-    // opt-out. Conditional branches are deliberately not forked because their
-    // fall-through is already scanned and forking vector-mask conditions grows
-    // exponentially without adding descriptor coverage.
+    // statically present in the translated shader. Discover descriptors from
+    // the non-selected successor by default; SHARPEMU_CFG_RESOURCE_DISCOVERY=0
+    // is a diagnostic opt-out.
     private static readonly bool _cfgResourceDiscovery =
         !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_CFG_RESOURCE_DISCOVERY"),
@@ -72,10 +70,13 @@ public static class Gen5ShaderScalarEvaluator
     /// </summary>
     public static ArrayPool<byte> GlobalMemoryPool { get; set; } = ArrayPool<byte>.Shared;
 
+    private const uint VccScalarRegister = 106;
+    private const uint ExecScalarRegister = 126;
     private const int ScalarRegisterCount = 256;
     private const int ImageDescriptorDwords = 8;
     private const int SamplerDescriptorDwords = 4;
     private const int MaxGlobalMemoryBindingBytes = 16 * 1024 * 1024;
+    private const int MaxScalarPaths = 1024;
     public static long GlobalMemoryReadCount;
     public static long GlobalMemoryReadBytes;
     public static long GlobalMemoryReadCacheHits;
@@ -139,6 +140,43 @@ public static class Gen5ShaderScalarEvaluator
         return false;
     }
 
+    private static bool TryQueuePath(
+        Stack<ScalarPathState> pendingPaths,
+        HashSet<ScalarPathKey> visitedPaths,
+        uint pc,
+        uint[] registers,
+        ulong pathExecMask,
+        bool pathScc,
+        bool supplemental,
+        out string error)
+    {
+        error = string.Empty;
+        var key = new ScalarPathKey(
+            pc,
+            ComputeScalarStateHash(registers, pathExecMask, pathScc));
+
+        if (visitedPaths.Contains(key))
+        {
+            return true;
+        }
+
+        if (visitedPaths.Count >= MaxScalarPaths)
+        {
+            error = $"scalar-path-limit pc=0x{pc:X} states={visitedPaths.Count} limit={MaxScalarPaths}";
+            return false;
+        }
+
+        visitedPaths.Add(key);
+        pendingPaths.Push(new ScalarPathState(
+            pc,
+            (uint[])registers.Clone(),
+            pathExecMask,
+            pathScc,
+            supplemental));
+
+        return true;
+    }
+
     public static bool TryEvaluate(
         CpuContext ctx,
         Gen5ShaderState state,
@@ -165,11 +203,14 @@ public static class Gen5ShaderScalarEvaluator
         }
 
         var execMask = RdnaWaveMask;
-        WriteScalarPair(scalarRegisters, 106, 0, ref execMask);
-        WriteScalarPair(scalarRegisters, 126, execMask, ref execMask);
+        WriteScalarPair(scalarRegisters, VccScalarRegister, 0, ref execMask);
+        WriteScalarPair(scalarRegisters, ExecScalarRegister, execMask, ref execMask);
         var initialScalarRegisters = (uint[])scalarRegisters.Clone();
 
         var resolved = new List<Gen5ImageBinding>();
+        var instructionIndexByPc = state.Program.Instructions
+                                        .Select((instruction, index) => (instruction.Pc, index))
+                                        .ToDictionary(entry => entry.Pc, entry => entry.index);
         var globalMemoryBindings = new List<Gen5GlobalMemoryBinding>();
         var globalMemoryByAddress = new Dictionary<(uint ScalarAddress, ulong BaseAddress), Gen5GlobalMemoryBinding>();
         var vertexInputBindings = new List<Gen5VertexInputBinding>();
@@ -181,36 +222,22 @@ public static class Gen5ShaderScalarEvaluator
         var finalScalarRegisters = (uint[])scalarRegisters.Clone();
         var pendingPaths = new Stack<ScalarPathState>();
         var visitedPaths = new HashSet<ScalarPathKey>();
-
-        void QueuePath(
-            uint pc,
-            uint[] registers,
-            ulong pathExecMask,
-            bool pathScc,
-            bool supplemental)
-        {
-            var key = new ScalarPathKey(
-                pc,
-                ComputeScalarStateHash(registers, pathExecMask, pathScc));
-            if (visitedPaths.Add(key))
-            {
-                pendingPaths.Push(new ScalarPathState(
-                    pc,
-                    registers,
-                    pathExecMask,
-                    pathScc,
-                    supplemental));
-            }
-        }
+        var regularPathTerminated = false;
 
         if (state.Program.Instructions.Count != 0)
         {
-            QueuePath(
+            if (!TryQueuePath(
+                    pendingPaths,
+                    visitedPaths,
                 state.Program.Instructions[0].Pc,
-                (uint[])scalarRegisters.Clone(),
+                    scalarRegisters,
                 execMask,
                 pathScc: false,
-                supplemental: false);
+                    supplemental: false,
+                    out error))
+            {
+                return false;
+            }
         }
 
         while (pendingPaths.Count != 0)
@@ -219,64 +246,120 @@ public static class Gen5ShaderScalarEvaluator
             scalarRegisters = path.ScalarRegisters;
             execMask = path.ExecMask;
             var scalarConditionCode = path.ScalarConditionCode;
-            uint? skipUntilPc = path.StartPc;
-
-            foreach (var instruction in state.Program.Instructions)
+            var reachedEndpgm = false;
+            if (!instructionIndexByPc.TryGetValue(path.StartPc, out var startIndex))
             {
-                if (skipUntilPc.HasValue)
-                {
-                    if (instruction.Pc < skipUntilPc.Value)
-                    {
-                        continue;
-                    }
+                error = $"scalar-path-start-invalid pc=0x{path.StartPc:X}";
+                return false;
+            }
 
-                    skipUntilPc = null;
-                }
+            for (int i = startIndex; i < state.Program.Instructions.Count; i++)
+            {
+                var instruction = state.Program.Instructions[i];
 
                 if (instruction.Opcode == "SEndpgm")
                 {
+                    reachedEndpgm = true;
                     break;
                 }
 
-                if (instruction.Opcode == "SBranch" &&
-                    TryGetSoppBranchTargetPc(instruction, out var targetPc))
-                {
-                    if (targetPc > instruction.Pc)
+                var branchTransition = EvaluateSoppBranchTransition(
+                    instruction,
+                    scalarConditionCode,
+                    scalarRegisters,
+                    execMask);
+
+                if (branchTransition.IsBranch)
                     {
-                        // The regular scalar evaluation follows the uniform
-                        // branch. Evaluate its skipped fall-through region once
-                        // as supplemental resource discovery: large shaders use
-                        // forward S_BRANCH to select one material/resource body,
-                        // and SPIR-V still needs descriptors for every body that
-                        // remains in the statically translated CFG. Do not fork
-                        // SC_BRANCH targets here; their fall-through regions are
-                        // already visited linearly and forking every vector-mask
-                        // condition causes exponential state growth.
-                        if (_cfgResourceDiscovery)
+                    var offset = unchecked((short)(instruction.Words[0] & 0xFFFF));
+                    var nextPc = (long)instruction.Pc + instruction.Words.Count * sizeof(uint);
+                    var target = nextPc + offset * sizeof(uint);
+                    if (target < 0 || target > uint.MaxValue)
+                    {
+                        error = $"branch-target-invalid pc=0x{instruction.Pc:X}";
+                        return false;
+                    }
+
+                    var targetPc = (uint)target;
+                    var fallthroughPc = instruction.Pc + (uint)(instruction.Words.Count * sizeof(uint));
+
+                    // Conditional branches keep both statically reachable
+                    // successors: the selected successor continues regular
+                    // evaluation, while the alternative is visited once for
+                    // supplemental resource discovery. S_BRANCH has only its
+                    // target successor.
+
+                    if (!instructionIndexByPc.ContainsKey(targetPc))
+                    {
+                        error = $"branch-target-invalid pc=0x{instruction.Pc:X} target=0x{targetPc:X}";
+                        return false;
+                }
+
+                    if (instruction.Opcode == "SBranch")
+                    {
+                        if (!path.Supplemental || targetPc > instruction.Pc)
                         {
-                            var fallthroughPc = instruction.Pc +
-                                (uint)(instruction.Words.Count * sizeof(uint));
-                            QueuePath(
-                                fallthroughPc,
-                                (uint[])scalarRegisters.Clone(),
-                                execMask,
-                                scalarConditionCode,
-                                supplemental: true);
+                            if (!TryQueuePath(
+                                    pendingPaths,
+                                    visitedPaths,
+                                    targetPc,
+                                    scalarRegisters,
+                                    execMask,
+                                    scalarConditionCode,
+                                    supplemental: path.Supplemental,
+                                    out error))
+                {
+                                return false;
+                            }
                         }
 
-                        skipUntilPc = targetPc;
-                        continue;
+                    break;
+                }
+
+                    if (!instructionIndexByPc.ContainsKey(fallthroughPc))
+                    {
+                        error = $"branch-fallthrough-invalid pc=0x{instruction.Pc:X} target=0x{fallthroughPc:X}";
+                        return false;
                     }
 
-                    // One linear pass over a supplemental body is sufficient
-                    // to discover its static memory/image instructions. Do not
-                    // iterate backward branches: loop-varying descriptors need
-                    // runtime descriptor indexing and cannot be represented by
-                    // cloning scalar states for an unbounded number of trips.
-                    if (path.Supplemental)
-                    {
-                        break;
+                    var primaryPc = branchTransition.IsTaken ? targetPc : fallthroughPc;
+                    var secondaryPc = branchTransition.IsTaken ? fallthroughPc : targetPc;
+
+                    if (_cfgResourceDiscovery &&
+                        (!path.Supplemental || secondaryPc > instruction.Pc) &&
+                        secondaryPc != primaryPc)
+                        {
+                        if (!TryQueuePath(
+                                pendingPaths,
+                                visitedPaths,
+                                secondaryPc,
+                                scalarRegisters,
+                                execMask,
+                                scalarConditionCode,
+                                supplemental: true,
+                                out error))
+                        {
+                            return false;
+                        }
                     }
+
+                    if (!path.Supplemental || primaryPc > instruction.Pc)
+                    {
+                        if (!TryQueuePath(
+                                pendingPaths,
+                                visitedPaths,
+                                primaryPc,
+                                scalarRegisters,
+                                execMask,
+                                scalarConditionCode,
+                                supplemental: path.Supplemental,
+                                out error))
+                        {
+                            return false;
+                    }
+                }
+
+                    break;
                 }
 
                 if (instruction.Encoding == Gen5ShaderEncoding.Sopc)
@@ -340,10 +423,13 @@ public static class Gen5ShaderScalarEvaluator
                 var recordBinding =
                     !path.Supplemental ||
                     !HasGlobalMemoryBindingForPc(globalMemoryBindings, instruction.Pc);
-                if (!TryExecuteScalarLoad(ctx, state, instruction, scalarMemory, scalarRegisters, globalMemoryBindings, globalMemoryByAddress, runtimeScalarRegisters, recordBinding, out error))
+                    if (!TryExecuteScalarLoad(ctx, state, instruction, scalarMemory, scalarRegisters,
+                            globalMemoryBindings, globalMemoryByAddress, runtimeScalarRegisters, recordBinding,
+                            out error))
                 {
                     return false;
                 }
+
                 continue;
             }
 
@@ -687,10 +773,17 @@ public static class Gen5ShaderScalarEvaluator
                 }
             }
 
-            if (!path.Supplemental)
+            if (!path.Supplemental && reachedEndpgm)
             {
                 finalScalarRegisters = (uint[])scalarRegisters.Clone();
+                regularPathTerminated = true;
             }
+        }
+
+        if (!regularPathTerminated)
+        {
+            error = "nonterminating-scalar-path";
+            return false;
         }
 
         if (vertexInputBindings.Count != 0)
@@ -903,29 +996,6 @@ public static class Gen5ShaderScalarEvaluator
         descriptor.Stride != 0 &&
         (instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal) ||
          instruction.Opcode.StartsWith("TBufferLoadFormat", StringComparison.Ordinal));
-
-    private static bool TryGetSoppBranchTargetPc(
-        Gen5ShaderInstruction instruction,
-        out uint targetPc)
-    {
-        targetPc = 0;
-        if (instruction.Encoding != Gen5ShaderEncoding.Sopp ||
-            instruction.Words.Count == 0)
-        {
-            return false;
-        }
-
-        var offset = unchecked((short)(instruction.Words[0] & 0xFFFF));
-        var nextPc = (long)instruction.Pc + instruction.Words.Count * sizeof(uint);
-        var target = nextPc + offset * sizeof(uint);
-        if (target < 0 || target > uint.MaxValue)
-        {
-            return false;
-        }
-
-        targetPc = (uint)target;
-        return true;
-    }
 
     private static bool TryResolveVectorConstantBefore(
         Gen5ShaderProgram program,
@@ -2354,6 +2424,33 @@ public static class Gen5ShaderScalarEvaluator
         value = (value >> 4 & 0x0F0F0F0Fu) | ((value & 0x0F0F0F0Fu) << 4);
         value = (value >> 8 & 0x00FF00FFu) | ((value & 0x00FF00FFu) << 8);
         return value >> 16 | value << 16;
+    }
+
+    private static (bool IsBranch, bool IsTaken) EvaluateSoppBranchTransition(
+        Gen5ShaderInstruction instruction,
+        bool isScc,
+        uint[] scalarRegisters,
+        ulong execMask)
+    {
+        if (instruction.Encoding != Gen5ShaderEncoding.Sopp)
+        {
+            return (false, false);
+        }
+
+        var vcc = scalarRegisters[VccScalarRegister] | ((ulong)scalarRegisters[VccScalarRegister + 1] << 32);
+        var activeVcc = vcc & RdnaWaveMask;
+
+        return instruction.Opcode switch
+        {
+            "SBranch" => (true, true),
+            "SCbranchScc0" => (true, !isScc),
+            "SCbranchScc1" => (true, isScc),
+            "SCbranchVccz" => (true, activeVcc == 0),
+            "SCbranchVccnz" => (true, activeVcc != 0),
+            "SCbranchExecz" => (true, execMask == 0),
+            "SCbranchExecnz" => (true, execMask != 0),
+            _ => (false, false)
+        };
     }
 
     private static bool TryCopyRegisters(
