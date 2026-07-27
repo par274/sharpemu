@@ -52,6 +52,7 @@ internal static partial class Program
         finally
         {
             DropConsoleFileMirror();
+            HarnessTelemetry.Shutdown();
             SharpEmuLog.Shutdown();
         }
     }
@@ -250,6 +251,25 @@ internal static partial class Program
             return 1;
         }
 
+        if (!TryGetHarnessConfigArgument(emulatorArgs, out var harnessConfigPath, out var harnessConfigError))
+        {
+            Console.Error.WriteLine($"[LOADER][ERROR] {harnessConfigError}");
+            return 1;
+        }
+        if (!string.IsNullOrWhiteSpace(harnessConfigPath))
+        {
+            try
+            {
+                HarnessTelemetry.Configure(harnessConfigPath);
+                HarnessTelemetry.Emit("session.started", 0, new { processId = Environment.ProcessId });
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine($"[LOADER][ERROR] Invalid harness configuration: {exception.Message}");
+                return 1;
+            }
+        }
+
         HostSessionControl.SetEmbeddedHostSurface(
             hostSurface?.WindowHandle ?? 0,
             hostSurface?.DisplayHandle ?? 0);
@@ -334,6 +354,7 @@ internal static partial class Program
             }
             catch (Exception ex)
             {
+                HarnessTelemetry.Emit("host.exception", null, new { type = ex.GetType().FullName, ex.Message });
                 Console.Error.WriteLine($"[DEBUG] Exception: {ex}");
                 Log.Error("SharpEmu failed to run.", ex);
                 return 3;
@@ -741,6 +762,42 @@ internal static partial class Program
         return false;
     }
 
+    private static bool TryGetHarnessConfigArgument(
+        IReadOnlyList<string> args,
+        out string? path,
+        out string error)
+    {
+        path = null;
+        error = string.Empty;
+        for (var index = 0; index < args.Count; index++)
+        {
+            var argument = args[index];
+            if (string.Equals(argument, "--harness-config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (index + 1 >= args.Count || string.IsNullOrWhiteSpace(args[index + 1]))
+                {
+                    error = "--harness-config requires a local JSON path.";
+                    return false;
+                }
+                path = args[index + 1];
+                return true;
+            }
+
+            const string prefix = "--harness-config=";
+            if (argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                path = argument[prefix.Length..];
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    error = "--harness-config requires a local JSON path.";
+                    return false;
+                }
+                return true;
+            }
+        }
+        return true;
+    }
+
     private static string BuildDefaultLogFilePath(string? ebootPath)
     {
         var baseDirectory = AppContext.BaseDirectory;
@@ -1042,7 +1099,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] [--harness-config=<local-json-path>] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1119,6 +1176,23 @@ internal static partial class Program
             // rejected as an unknown option or mistaken for the eboot path.
             if (string.Equals(argument, "--debug-server", StringComparison.OrdinalIgnoreCase) ||
                 argument.StartsWith("--debug-server=", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (string.Equals(argument, "--harness-config", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 >= args.Length || string.IsNullOrWhiteSpace(args[i + 1]))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    logFilePath = null;
+                    return false;
+                }
+                i++;
+                continue;
+            }
+            if (argument.StartsWith("--harness-config=", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }

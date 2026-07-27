@@ -11,6 +11,7 @@ using Silk.NET.Input;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
+using SharpEmu.Logging;
 using Silk.NET.Vulkan;
 using Silk.NET.Vulkan.Extensions.KHR;
 using Silk.NET.Vulkan.Extensions.EXT;
@@ -3238,6 +3239,7 @@ internal static unsafe class VulkanVideoPresenter
         private Framebuffer[] _framebuffers = [];
         private bool[] _imageInitialized = [];
         private Format _swapchainFormat;
+        private ColorSpaceKHR _swapchainColorSpace;
         private Extent2D _extent;
         private RenderPass _renderPass;
         private PipelineLayout _pipelineLayout;
@@ -3339,6 +3341,10 @@ internal static unsafe class VulkanVideoPresenter
         private bool _tracedPresentedSwapchain;
         private bool _swapchainReadbackPending;
         private long _presentedSwapchainCount;
+        private long _harnessFrameNumber;
+        private bool _harnessCapturePending;
+        private long _harnessCaptureFrameNumber;
+        private bool _harnessFirstFrameEventEmitted;
         private static int _guestImageDumpSequence;
         private readonly System.Collections.Concurrent.ConcurrentQueue<GuestImageResource> _pendingAliasImageDumps = new();
         private bool _deviceLost;
@@ -4832,6 +4838,7 @@ internal static unsafe class VulkanVideoPresenter
 
             var surfaceFormat = ChooseSurfaceFormat(formats);
             _swapchainFormat = surfaceFormat.Format;
+            _swapchainColorSpace = surfaceFormat.ColorSpace;
             _extent = ChooseExtent(capabilities);
             Bink2MovieBridge.SetPresentationSize(_extent.Width, _extent.Height);
             var presentMode = ChoosePresentMode();
@@ -14569,6 +14576,15 @@ internal static unsafe class VulkanVideoPresenter
                 RecordOverlayBlit(imageIndex, frameSlot);
             }
 
+            if (HarnessTelemetry.IsEnabled)
+            {
+                var harnessFrameNumber = ++_harnessFrameNumber;
+                if (HarnessTelemetry.ShouldCaptureNativeFrame(harnessFrameNumber))
+                {
+                    RecordHarnessCapture(imageIndex, harnessFrameNumber);
+                }
+            }
+
             Check(_vk.EndCommandBuffer(_commandBuffer), "vkEndCommandBuffer");
 
             var imageAvailable = _frameImageAvailable[frameSlot];
@@ -14624,15 +14640,27 @@ internal static unsafe class VulkanVideoPresenter
             recreateAfterPresent |= presentResult == Result.SuboptimalKhr;
             VideoOutExports.ReportPresentedFrame();
             PerfOverlay.RecordPresent();
+            if (HarnessTelemetry.IsEnabled && !_harnessFirstFrameEventEmitted)
+            {
+                _harnessFirstFrameEventEmitted = true;
+                HarnessTelemetry.Emit(
+                    "frame.presented",
+                    10,
+                    new { width = _extent.Width, height = _extent.Height, format = _swapchainFormat.ToString() });
+            }
             if (_hostSurface is not null && !_firstHostFramePresented)
             {
                 _firstHostFramePresented = true;
                 NotifyFirstHostFramePresented(_hostSurface);
             }
-            if (_swapchainReadbackPending || !_pendingAliasImageDumps.IsEmpty)
+            if (_harnessCapturePending || _swapchainReadbackPending || !_pendingAliasImageDumps.IsEmpty)
             {
                 // Diagnostics read back GPU memory and need this frame done.
                 WaitFrameSlot(frameSlot);
+                if (_harnessCapturePending)
+                {
+                    WriteHarnessSwapchainReadback();
+                }
                 if (_swapchainReadbackPending)
                 {
                     TraceSwapchainReadback();
@@ -17156,6 +17184,100 @@ internal static unsafe class VulkanVideoPresenter
 						_tracedPresentedSwapchain = false;
 					}
                 }
+            }
+            finally
+            {
+                _vk.UnmapMemory(_device, _stagingMemory);
+            }
+        }
+
+        private void RecordHarnessCapture(uint imageIndex, long frameNumber)
+        {
+            var toTransfer = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = AccessFlags.MemoryReadBit,
+                DstAccessMask = AccessFlags.TransferReadBit,
+                OldLayout = ImageLayout.PresentSrcKhr,
+                NewLayout = ImageLayout.TransferSrcOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = _swapchainImages[imageIndex],
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.BottomOfPipeBit,
+                PipelineStageFlags.TransferBit,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                &toTransfer);
+            var copyRegion = new BufferImageCopy
+            {
+                ImageSubresource = new ImageSubresourceLayers
+                {
+                    AspectMask = ImageAspectFlags.ColorBit,
+                    LayerCount = 1,
+                },
+                ImageExtent = new Extent3D(_extent.Width, _extent.Height, 1),
+            };
+            _vk.CmdCopyImageToBuffer(
+                _commandBuffer,
+                _swapchainImages[imageIndex],
+                ImageLayout.TransferSrcOptimal,
+                _stagingBuffer,
+                1,
+                &copyRegion);
+            var toPresent = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = AccessFlags.TransferReadBit,
+                DstAccessMask = AccessFlags.MemoryReadBit,
+                OldLayout = ImageLayout.TransferSrcOptimal,
+                NewLayout = ImageLayout.PresentSrcKhr,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = _swapchainImages[imageIndex],
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.TransferBit,
+                PipelineStageFlags.BottomOfPipeBit,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                &toPresent);
+            _harnessCapturePending = true;
+            _harnessCaptureFrameNumber = frameNumber;
+        }
+
+        private void WriteHarnessSwapchainReadback()
+        {
+            _harnessCapturePending = false;
+            var byteCount = checked((ulong)_extent.Width * _extent.Height * 4);
+            void* mapped;
+            Check(
+                _vk.MapMemory(_device, _stagingMemory, 0, byteCount, 0, &mapped),
+                "vkMapMemory(harness frame readback)");
+            try
+            {
+                HarnessTelemetry.WriteNativeFrame(
+                    new ReadOnlySpan<byte>(mapped, checked((int)byteCount)),
+                    checked((int)_extent.Width),
+                    checked((int)_extent.Height),
+                    checked((int)_extent.Width * 4),
+                    _swapchainFormat.ToString(),
+                    _harnessCaptureFrameNumber,
+                    _swapchainColorSpace.ToString(),
+                    flipVertical: false);
             }
             finally
             {

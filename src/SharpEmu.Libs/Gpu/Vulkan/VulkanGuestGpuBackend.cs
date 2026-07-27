@@ -15,6 +15,7 @@ namespace SharpEmu.Libs.Gpu.Vulkan;
 /// </summary>
 internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 {
+    private static int _harnessShaderObserved;
     public string BackendName => "Vulkan";
 
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
@@ -399,8 +400,14 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public ulong GuestStorageBufferOffsetAlignment =>
         VulkanVideoPresenter.GuestStorageBufferOffsetAlignment;
 
-    public void CountShaderCompilation() =>
+    public void CountShaderCompilation()
+    {
         VulkanVideoPresenter.CountSpirvCompilation();
+        if (SharpEmu.Logging.HarnessTelemetry.IsEnabled && Interlocked.Exchange(ref _harnessShaderObserved, 1) == 0)
+        {
+            SharpEmu.Logging.HarnessTelemetry.Emit("shader.translation-observed", 9);
+        }
+    }
 
     public (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters() =>
         VulkanVideoPresenter.ReadAndResetPerfCounters();

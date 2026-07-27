@@ -13,6 +13,7 @@ using SharpEmu.Libs.AppContent;
 using SharpEmu.Libs.SaveData;
 using SharpEmu.Libs.Fiber;
 using SharpEmu.Libs.SystemService;
+using SharpEmu.Logging;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
@@ -142,10 +143,24 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         FiberExports.ResetRuntimeState();
         KernelModuleRegistry.Reset();
         var image = LoadImage(normalizedEbootPath);
+        if (HarnessTelemetry.IsEnabled)
+        {
+            HarnessTelemetry.Emit(
+                "metadata.loaded",
+                1,
+                new { image.TitleId, image.Version, image.Title });
+        }
         VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
         SystemServiceExports.ConfigureApplicationInfo(image.TitleId);
         _ = RegisterLoadedModule(normalizedEbootPath, image, isMain: true, isSystemModule: false);
+        if (HarnessTelemetry.IsEnabled)
+        {
+            HarnessTelemetry.Emit(
+                "main-executable.loaded",
+                3,
+                new { image.EntryPoint, mappedRegionCount = image.MappedRegions.Count });
+        }
         KernelRuntimeCompatExports.ConfigureProcessProcParamAddress(image.ProcParamAddress);
         Console.Error.WriteLine($"[RUNTIME] Entry: 0x{image.EntryPoint:X16}");
         var generation = image.ElfHeader.AbiVersion == 2 ? Generation.Gen5 : Generation.Gen4;
@@ -175,11 +190,13 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             LastMilestoneLog = _cpuDispatcher.LastMilestoneLog;
             LastSessionSummary = BuildSessionSummary(_cpuDispatcher.LastSessionSummary);
             LastBasicBlockTrace = _cpuDispatcher.LastBasicBlockTrace;
+            if (HarnessTelemetry.IsEnabled) HarnessTelemetry.Emit("guest.exit", 4, new { result = failedInitializerResult.ToString(), during = "initializer" });
             return failedInitializerResult;
         }
 
         Console.Error.WriteLine($"[RUNTIME] Dispatching, gen: {generation}");
         Console.Error.WriteLine($"[RUNTIME] About to call DispatchEntry with entryPoint=0x{image.EntryPoint:X16}");
+        if (HarnessTelemetry.IsEnabled) HarnessTelemetry.Emit("guest.entry-started", 4, new { image.EntryPoint, generation = generation.ToString() });
 
         var result = _cpuDispatcher.DispatchEntry(
             image.EntryPoint,
@@ -191,6 +208,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         Console.Error.WriteLine($"[RUNTIME] DispatchEntry returned: {result}");
         Console.Error.WriteLine($"[RUNTIME] Dispatch result: {result}");
+        if (HarnessTelemetry.IsEnabled) HarnessTelemetry.Emit("guest.exit", 4, new { result = result.ToString() });
 
         // Stop is a host operation, not an emulation failure. The detailed
         // trace and session-summary builders can traverse a partially torn
@@ -727,6 +745,13 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                     string.Equals(moduleName, "libfmodstudio.prx", StringComparison.OrdinalIgnoreCase);
                 loadedImages.Add(new LoadedModuleImage(modulePath, moduleImage, moduleHandle, startAtBoot));
                 loadedModules++;
+                if (HarnessTelemetry.IsEnabled)
+                {
+                    HarnessTelemetry.Emit(
+                        "module.loaded",
+                        5,
+                        new { module = Path.GetFileName(modulePath), moduleImage.EntryPoint, importCount = moduleImage.ImportStubs.Count });
+                }
 
                 Console.Error.WriteLine(
                     $"[RUNTIME] Loaded module {Path.GetFileName(modulePath)}: entry=0x{moduleImage.EntryPoint:X16}, imports={moduleImage.ImportStubs.Count}, symbols={moduleImage.RuntimeSymbols.Count}");

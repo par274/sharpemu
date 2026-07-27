@@ -7,6 +7,7 @@ using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Audio;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Logging;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
@@ -81,6 +82,8 @@ public static class VideoOutExports
     private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
     private static long _submittedFrameCount;
     private static int _diagnosticFlipCount;
+    private static int _harnessVideoOutOpened;
+    private static int _harnessGraphicsObserved;
     private static readonly int _holdFirstFlipMilliseconds =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_HOLD_FIRST_FLIP_MS"), out var holdMs)
             ? Math.Clamp(holdMs, 0, 60_000)
@@ -98,6 +101,8 @@ public static class VideoOutExports
 
     public static void ConfigureApplicationInfo(string? title, string? titleId, string? version)
     {
+        Interlocked.Exchange(ref _harnessVideoOutOpened, 0);
+        Interlocked.Exchange(ref _harnessGraphicsObserved, 0);
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(title))
         {
@@ -280,6 +285,10 @@ public static class VideoOutExports
                 OpenTimestamp = openedAt,
                 LastVblankTimestamp = openedAt,
             };
+            if (HarnessTelemetry.IsEnabled && Interlocked.Exchange(ref _harnessVideoOutOpened, 1) == 0)
+            {
+                HarnessTelemetry.Emit("video-output.opened", 7, new { handle });
+            }
             return handle;
         }
     }
@@ -1245,6 +1254,13 @@ public static class VideoOutExports
         LoadProgressDiagnostics.TraceGpuWaitSnapshot(ctx.Memory);
         ReportFrameRate(presented: false);
         var diagnosticFlipNumber = Interlocked.Increment(ref _diagnosticFlipCount);
+        if (HarnessTelemetry.IsEnabled && Interlocked.Exchange(ref _harnessGraphicsObserved, 1) == 0)
+        {
+            HarnessTelemetry.Emit(
+                "graphics.submit-observed",
+                8,
+                new { handle, bufferIndex, guestImageSubmitted, guestImageAddress });
+        }
         if (_holdFirstFlipMilliseconds > 0 && diagnosticFlipNumber == _holdFlipNumber)
         {
             Console.Error.WriteLine(
