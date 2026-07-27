@@ -6,6 +6,7 @@ using Avalonia.Collections;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Data;
+using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform;
@@ -40,7 +41,7 @@ public sealed class ConsoleWindow : Window
 
         _searchBox = new TextBox
         {
-            Watermark = loc.Get("Console.SearchWatermark"),
+            PlaceholderText = loc.Get("Console.SearchWatermark"),
             Width = 320,
             Margin = new Thickness(0, 0, 12, 0),
         };

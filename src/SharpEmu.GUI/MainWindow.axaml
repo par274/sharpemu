@@ -8,6 +8,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         xmlns:local="clr-namespace:SharpEmu.GUI"
         xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         x:Class="SharpEmu.GUI.MainWindow"
+        x:CompileBindings="False"
         Title="SharpEmu"
         Width="1280" Height="820"
         MinWidth="980" MinHeight="640"
@@ -15,7 +16,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgBrush}"
         ExtendClientAreaToDecorationsHint="True"
-        ExtendClientAreaChromeHints="PreferSystemChrome"
+        WindowDecorations="Full"
         ExtendClientAreaTitleBarHeightHint="44"
         Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
         KeyDown="OnKeyDown">
@@ -84,7 +85,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
         <StackPanel Grid.Column="2" x:Name="LibraryToolbar" Orientation="Horizontal" Spacing="8"
                     VerticalAlignment="Center">
-          <TextBox x:Name="SearchBox" Watermark="Search library…" Width="240" VerticalAlignment="Center" />
+          <TextBox x:Name="SearchBox" PlaceholderText="Search library…" Width="240" VerticalAlignment="Center" />
           <Button x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder" VerticalAlignment="Center" />
           <Button x:Name="RescanButton" Classes="ghost" Content="⟳ Rescan" VerticalAlignment="Center" />
           <Button x:Name="OpenFileButton" Classes="ghost" Content="Open file…" VerticalAlignment="Center" />
@@ -498,7 +499,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
           <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
             <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle" Text="CONSOLE" VerticalAlignment="Center" />
             <TextBox Grid.Column="1" FontSize="12" Margin="0,0,12,0" x:Name="ConsoleSearchBox"
-                    Watermark="Search..." Width="320" />
+                    PlaceholderText="Search..." Width="320" />
             <CheckBox Grid.Column="2" x:Name="AutoScrollCheck" Content="Auto-scroll" IsChecked="True"
                     FontSize="12" Margin="0,0,12,0" />
             <Button Grid.Column="3" x:Name="DetachConsoleButton" Classes="ghost" Content="Split" FontSize="12"
