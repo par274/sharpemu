@@ -1,0 +1,36 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Shared surfaces: pad hints, section titles, cards and the options panel.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Style Selector="Border.padHint">
+      <Setter Property="Width" Value="28" />
+      <Setter Property="Height" Value="19" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="Background" Value="#D9FFFFFF" />
+    </Style>
+
+    <Style Selector="TextBlock.sectionTitle">
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="Bold" />
+      <Setter Property="LetterSpacing" Value="2" />
+      <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+    </Style>
+
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="#12FFFFFF" />
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="Padding" Value="30,26" />
+    </Style>
+
+    <Style Selector="Border.optionsSurface">
+      <Setter Property="Background" Value="#08FFFFFF" />
+      <Setter Property="CornerRadius" Value="22" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+</Styles>

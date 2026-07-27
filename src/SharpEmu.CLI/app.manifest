@@ -16,6 +16,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <asmv3:application xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
     <asmv3:windowsSettings>
       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <!-- Ask Windows to launch the process on the discrete GPU of hybrid
+           laptops (NVIDIA Optimus / AMD PowerXpress). Without this, the Avalonia
+           render surface runs on the integrated GPU and the desktop frontend
+           feels sluggish. Windows Graphics Settings still override this per-user. -->
+      <gpusPreference xmlns="http://schemas.microsoft.com/SMI/2018/09/WindowsSettings">highPerformance</gpusPreference>
     </asmv3:windowsSettings>
   </asmv3:application>
 </assembly>

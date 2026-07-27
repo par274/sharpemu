@@ -1,0 +1,59 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Control theme for the settings row used by global and per-game options.
+-->
+
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:local="clr-namespace:SharpEmu.GUI">
+    <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
+      <Setter Property="MinHeight" Value="70" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border x:Name="PART_RowSurface"
+                  Classes="settingRowSurface"
+                  Background="#06FFFFFF"
+                  BorderBrush="#0AFFFFFF"
+                  BorderThickness="1"
+                  CornerRadius="14"
+                  Padding="18,12">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
+                <TextBlock x:Name="PART_Label"
+                           Text="{TemplateBinding Label}"
+                           FontSize="14"
+                           FontWeight="Medium"
+                           TextWrapping="Wrap"
+                           Foreground="{StaticResource TextBrush}" />
+                <TextBlock Text="{TemplateBinding Description}"
+                           FontSize="11"
+                           FontWeight="Normal"
+                           Foreground="{StaticResource SettingsDescriptionBrush}"
+                           LineHeight="16"
+                           MaxWidth="690"
+                           HorizontalAlignment="Left"
+                           TextAlignment="Left"
+                           TextWrapping="Wrap"
+                           IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
+                                       Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+              </StackPanel>
+              <StackPanel Grid.Column="1"
+                          Orientation="Horizontal"
+                          Spacing="12"
+                          VerticalAlignment="Center">
+                <ToggleSwitch OnContent="{TemplateBinding OverrideText}"
+                              OffContent="{TemplateBinding OverrideText}"
+                              MinWidth="0"
+                              IsVisible="{TemplateBinding ShowOverride}"
+                              IsChecked="{Binding IsOverridden, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" />
+                <ContentPresenter x:Name="PART_Slot"
+                                  Content="{TemplateBinding Content}"
+                                  VerticalAlignment="Center" />
+              </StackPanel>
+            </Grid>
+          </Border>
+        </ControlTemplate>
+      </Setter>
+    </ControlTheme>
+</ResourceDictionary>

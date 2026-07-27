@@ -71,13 +71,18 @@ public sealed class ConsoleWindow : Window
             Padding = new Thickness(0, 0, 0, 12),
             BorderThickness = new Thickness(0, 1, 0, 0),
             BorderBrush = new SolidColorBrush(Color.Parse("#12FFFFFF")),
-            ItemTemplate = new FuncDataTemplate<LogLine>((_, _) =>
-            {
-                var text = new TextBlock { TextWrapping = TextWrapping.NoWrap };
-                text.Bind(TextBlock.TextProperty, new Binding(nameof(LogLine.Text)));
-                text.Bind(TextBlock.ForegroundProperty, new Binding(nameof(LogLine.Brush)));
-                return text;
-            }),
+            // supportsRecycling lets the panel reuse one TextBlock per realized
+            // row instead of rebuilding the template each time a log line scrolls
+            // into view, and the direct setters avoid reflection-based bindings.
+            ItemTemplate = new FuncDataTemplate<LogLine>(
+                (_, _) =>
+                {
+                    var text = new TextBlock { TextWrapping = TextWrapping.NoWrap };
+                    text.Bind(TextBlock.TextProperty, new Binding(nameof(LogLine.Text)));
+                    text.Bind(TextBlock.ForegroundProperty, new Binding(nameof(LogLine.Brush)));
+                    return text;
+                },
+                supportsRecycling: true),
         };
 
         var actions = new StackPanel

@@ -1,0 +1,83 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Page navigation and per-game options reveal motion.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Top-level page roots remain pinned to their arranged rectangle. Only
+         opacity changes at this level, so independently composed descendants
+         cannot produce a diagonal jump when a page becomes active. -->
+    <Style Selector="Grid.appPage">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+
+    <!-- Page navigation follows the same layered reveal as per-game options:
+         the compact lead and the large body travel independently while the
+         root page remains stationary. Transform animation is render-only and
+         therefore does not trigger a new measure/arrange pass. -->
+    <Style Selector="Panel.pageMotionLead, StackPanel.pageMotionLead">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.32"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Grid.pageMotionBody, Border.pageMotionBody">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.38"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Panel.pageMotionLead.pageBefore, StackPanel.pageMotionLead.pageBefore">
+      <Setter Property="RenderTransform" Value="translateY(-16px)" />
+    </Style>
+    <Style Selector="Grid.pageMotionBody.pageBefore, Border.pageMotionBody.pageBefore">
+      <Setter Property="RenderTransform" Value="translateY(-28px)" />
+    </Style>
+    <Style Selector="Panel.pageMotionLead.pageAfter, StackPanel.pageMotionLead.pageAfter">
+      <Setter Property="RenderTransform" Value="translateY(38px)" />
+    </Style>
+    <Style Selector="Grid.pageMotionBody.pageAfter, Border.pageMotionBody.pageAfter">
+      <Setter Property="RenderTransform" Value="translateY(58px)" />
+    </Style>
+    <Style Selector="StackPanel.selectedDetailsHost">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="Grid.gameOptionsOverlay">
+      <Setter Property="RenderTransform" Value="translateY(96px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="Grid.backdropLayer.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(-92px) scale(1.04)" />
+    </Style>
+    <Style Selector="Panel.carouselHost.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(-18px) scale(1)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="StackPanel.selectedDetailsHost.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(-28px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="Grid.gameOptionsOverlay.gameOptionsOpen">
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="StackPanel.selectedDetailsHost.detailsOut">
+      <Setter Property="RenderTransform" Value="translateY(-9px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="StackPanel.selectedDetailsHost.detailsInStart">
+      <Setter Property="RenderTransform" Value="translateY(11px)" />
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+</Styles>

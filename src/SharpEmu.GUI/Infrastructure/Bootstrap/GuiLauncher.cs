@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Media;
+using Avalonia.Rendering.Composition;
 using Microsoft.Extensions.DependencyInjection;
 using ReactiveUI.Avalonia;
 using SharpEmu.GUI.Services.Infrastructure;
@@ -47,6 +49,25 @@ public static class GuiLauncher
             .UsePlatformDetect()
             .UseReactiveUI(_ => { })
             .RegisterReactiveUIViewsFromEntryAssembly()
+            // The default Skia GPU resource cache (~3 MB) is too small: game
+            // covers and the full-window backdrop are decoded at 720-1600 px
+            // and spill past it, so they get re-uploaded to the GPU on every
+            // invalidation. A larger budget keeps the working set resident in
+            // VRAM, which is the difference between a fluid and a stuttering
+            // library scroll on hybrid-GPU laptops.
+            .With(new SkiaOptions
+            {
+                MaxGpuResourceSizeBytes = 256 * 1024 * 1024,
+            })
+            // Limits repainting to dirty regions instead of the whole frame.
+            // This is the documented mitigation for the "scene is updated on
+            // every scroll tick" issue (AvaloniaUI/Avalonia#6298), which hurt
+            // most on integrated graphics. Safe for hardware-accelerated
+            // backends and essential for software/embedded rendering.
+            .With(new CompositionOptions
+            {
+                UseRegionDirtyRectClipping = true,
+            })
             .LogToTrace();
 
     private static void WriteCrashLog(Exception ex)

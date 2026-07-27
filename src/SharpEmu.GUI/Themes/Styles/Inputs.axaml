@@ -1,0 +1,234 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Text boxes, combo boxes, the animated combo popup and context menus.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Style Selector="TextBox, ComboBox, NumericUpDown">
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+      <Setter Property="BorderBrush" Value="#14FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style Selector="TextBox.consoleSearch">
+      <Setter Property="MinWidth" Value="180" />
+      <Setter Property="MaxWidth" Value="288" />
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Padding" Value="14,0" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#E8FFFFFF" />
+      <Setter Property="PlaceholderForeground" Value="#8FFFFFFF" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="TextAlignment" Value="Left" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="PlaceholderForeground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBox.consoleSearch /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBox.consoleSearch:pointerover /template/ Border#PART_BorderElement,
+                     TextBox.consoleSearch:focus /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="#20FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+    <Style Selector="TextBlock.consoleSearchIcon">
+      <Setter Property="Margin" Value="14,0,8,0" />
+      <Setter Property="Foreground" Value="#8FFFFFFF" />
+      <Setter Property="IsHitTestVisible" Value="False" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBox.consoleSearch:pointerover TextBlock.consoleSearchIcon,
+                     TextBox.consoleSearch:focus TextBlock.consoleSearchIcon">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="TextBox.consoleSearch:pointerover,
+                     TextBox.consoleSearch:focus">
+      <Setter Property="PlaceholderForeground" Value="White" />
+    </Style>
+
+    <!-- Rounded selectors used by both global and per-game settings. The native
+         ComboBox template remains intact for keyboard, focus, and XY/gamepad navigation. -->
+    <Style Selector="ComboBox">
+      <Setter Property="MinHeight" Value="44" />
+      <Setter Property="Padding" Value="17,0,48,0" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Background" Value="#12FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#E8FFFFFF" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="MaxDropDownHeight" Value="360" />
+      <Setter Property="ItemTemplate">
+        <DataTemplate>
+          <TextBlock Text="{Binding}"
+                     TextTrimming="CharacterEllipsis"
+                     TextWrapping="NoWrap"
+                     VerticalAlignment="Center" />
+        </DataTemplate>
+      </Setter>
+    </Style>
+    <Style Selector="ComboBox /template/ Border#Background">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ComboBox:pointerover /template/ Border#Background,
+                     ComboBox:focus-visible /template/ Border#Background,
+                     ComboBox:dropdownopen /template/ Border#Background">
+      <Setter Property="Background" Value="#20FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+    </Style>
+    <Style Selector="ComboBox /template/ PathIcon#DropDownGlyph">
+      <!-- Material Icons Rounded: expand_more. -->
+      <Setter Property="Data" Value="M7.41,8.59 L12,13.17 L16.59,8.59 L18,10 L12,16 L6,10 Z" />
+      <Setter Property="Width" Value="14" />
+      <Setter Property="Height" Value="14" />
+      <Setter Property="Margin" Value="0,0,22,0" />
+      <Setter Property="Foreground" Value="#B8FFFFFF" />
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="rotate(0deg)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.22"
+                                         Easing="CubicEaseOut" />
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.18"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ComboBox:pointerover /template/ PathIcon#DropDownGlyph,
+                     ComboBox:focus-visible /template/ PathIcon#DropDownGlyph,
+                     ComboBox:dropdownopen /template/ PathIcon#DropDownGlyph">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ComboBox:dropdownopen /template/ PathIcon#DropDownGlyph">
+      <Setter Property="RenderTransform" Value="rotate(180deg)" />
+    </Style>
+
+    <Style Selector="Border.animatedComboPopup">
+      <Setter Property="Padding" Value="6" />
+      <Setter Property="Margin" Value="0" />
+      <Setter Property="CornerRadius" Value="18" />
+      <Setter Property="Background" Value="#FC2A2A2A" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="BoxShadow" Value="0 18 44 0 #78000000" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="RenderTransformOrigin" Value="50%,0%" />
+      <Setter Property="RenderTransform" Value="translateY(-7px) scale(0.975)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.15"
+                            Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.18"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.animatedComboPopup.open">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    </Style>
+
+    <Style Selector="ComboBoxItem">
+      <Setter Property="MinHeight" Value="40" />
+      <Setter Property="Margin" Value="0,1" />
+      <Setter Property="Padding" Value="13,0" />
+      <Setter Property="CornerRadius" Value="12" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#C8FFFFFF" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="ComboBoxItem /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background"
+                           Duration="0:0:0.16"
+                           Easing="CubicEaseOut" />
+          <BrushTransition Property="Foreground"
+                           Duration="0:0:0.16"
+                           Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     ComboBoxItem:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ComboBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#22FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ComboBox.languageValue /template/ ContentControl#ContentPresenter">
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="ContextMenu">
+      <Setter Property="Width" Value="390" />
+      <Setter Property="Background" Value="#FA202020" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="8" />
+    </Style>
+    <Style Selector="ContextMenu MenuItem">
+      <Setter Property="MinHeight" Value="50" />
+      <Setter Property="Padding" Value="14,0" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Foreground" Value="#D1FFFFFF" />
+      <Setter Property="FontSize" Value="18" />
+      <Setter Property="FontWeight" Value="Light" />
+    </Style>
+    <Style Selector="ContextMenu MenuItem:pointerover">
+      <Setter Property="Background" Value="#0CFFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ContextMenu Separator">
+      <Setter Property="Background" Value="#14FFFFFF" />
+      <Setter Property="Height" Value="1" />
+      <Setter Property="Margin" Value="14,5" />
+    </Style>
+</Styles>

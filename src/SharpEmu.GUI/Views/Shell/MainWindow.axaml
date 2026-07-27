@@ -190,7 +190,12 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
             </ListBox.ContextMenu>
             <ListBox.ItemsPanel>
               <ItemsPanelTemplate>
-                <StackPanel Orientation="Horizontal" />
+                <!-- VirtualizingStackPanel realizes only the visible tiles plus a
+                     buffer, whereas a horizontal StackPanel materialized every
+                     card (each carrying a BoxShadow + cover Image) for the whole
+                     library. Visually identical rail; cost stops scaling with
+                     library size. -->
+                <VirtualizingStackPanel Orientation="Horizontal" />
               </ItemsPanelTemplate>
             </ListBox.ItemsPanel>
             <ListBox.DataTemplates>
@@ -202,7 +207,17 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                         CornerRadius="7">
                   <Border Classes="coverClip">
                     <Panel>
-                      <Border Background="{Binding PlaceholderBrush}">
+                      <!-- Visible only while there is no cover. Previously the
+                           initials always rendered underneath the cover Image
+                           and relied on z-order to be hidden; that worked when
+                           each tile was freshly created, but container
+                           recycling (VirtualizingStackPanel) reuses one tile for
+                           many games and during the DataContext swap the
+                           initials can bleed through for a frame. Gating on
+                           HasCover makes the placeholder inherently recycling-
+                           safe and also skips drawing a layer under the cover. -->
+                      <Border Background="{Binding PlaceholderBrush}"
+                              IsVisible="{Binding !HasCover}">
                         <TextBlock Classes="libraryCardInitials"
                                    Classes.ready="{Binding !IsLoading}"
                                    Text="{Binding Initials}"
@@ -1381,7 +1396,7 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
       </Border>
     </Grid>
 
-    <!-- 92 px WebUI top bar: brand, centered navigation, utility cluster. -->
+    <!-- 92 px top bar: brand, centered navigation, utility cluster. -->
     <Grid x:Name="TitleBar" Grid.Row="0">
       <Grid.Transitions>
         <Transitions>
