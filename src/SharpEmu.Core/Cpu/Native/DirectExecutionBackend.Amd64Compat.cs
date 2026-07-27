@@ -51,11 +51,10 @@ public sealed partial class DirectExecutionBackend
         // round-trips through the real ucontext, so it works on every supported OS. EXTRQ/
         // INSERTQ additionally read and write an XMM register: on Windows contextRecord is the
         // live CONTEXT the OS resumes the thread from, so touching the Xmm0.. slots is visible
-        // to the guest, and on Linux the bridge copies the mcontext's FXSAVE image into the
-        // Xmm0.. slots and writes them back through sigreturn (_posixXmmContextBridged). On
-        // Darwin the XMM area is still a zeroed scratch buffer - running this there would
-        // silently compute a result from stale bytes and then discard whatever it "wrote", so
-        // the recovery declines until that bridge exists.
+        // to the guest, and on Linux and Darwin the bridge copies the mcontext's XMM image
+        // into the Xmm0.. slots and writes them back through sigreturn (_posixXmmContextBridged).
+        // The flag stays false on any host where that round-trip is not wired up, so the
+        // recovery declines rather than computing from stale bytes and discarding the result.
         return (OperatingSystem.IsWindows() || _posixXmmContextBridged) &&
             TryRecoverSse4aExtractInsert(contextRecord, rip);
     }

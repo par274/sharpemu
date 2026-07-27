@@ -63,6 +63,14 @@ public sealed unsafe partial class DirectExecutionBackend
 	private const int FxsaveXmmOffset = 160;
 	private const int XmmBlockSize = 16 * 16;
 
+	// Darwin embeds x86_float_state64 inline in __darwin_mcontext64 - there is
+	// no fpstate pointer to chase. __es(16) + __ss(168) place the float state
+	// at +184, and __fpu_xmm0 sits 168 bytes into it (reserved + control words
+	// + 8 STMM slots), so xmm0..15 occupy the 256-byte block at mcontext+352.
+	// GetPosixRegisterBase returns that mcontext for macOS, so the XMM block is
+	// read and written in place rather than through Linux's fpstate indirection.
+	private const int DarwinMcontextXmmOffset = 352;
+
 	// Byte offsets of the general registers relative to GetPosixRegisterBase,
 	// ordered to match the contiguous Win64 CONTEXT block CTX_RAX..CTX_RIP
 	// (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15, rip). Verified
@@ -143,8 +151,12 @@ public sealed unsafe partial class DirectExecutionBackend
 	{
 		byte* fakeUcontext = stackalloc byte[512];
 		new Span<byte>(fakeUcontext, 512).Clear();
-		byte* fakeMcontext = stackalloc byte[512];
-		new Span<byte>(fakeMcontext, 512).Clear();
+		// Sized past Darwin's inline XMM block: the bridge reads and writes 256
+		// bytes at mcontext+352 (=608), so a 512-byte fake mcontext would let
+		// the warmup fault over-read/write the stack. Real __darwin_mcontext64
+		// is smaller than this; the slack is harmless.
+		byte* fakeMcontext = stackalloc byte[1024];
+		new Span<byte>(fakeMcontext, 1024).Clear();
 		if (OperatingSystem.IsMacOS())
 		{
 			*(byte**)(fakeUcontext + DarwinUcontextMcontextOffset) = fakeMcontext;
@@ -275,24 +287,34 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 
 		// Bridge the XMM registers alongside the GPRs where the layout is
-		// known: on Linux the fpstate pointer and FXSAVE image are kernel
-		// ABI, so recovery paths that read or write XMM state (SSE4a
+		// known, so recovery paths that read or write XMM state (SSE4a
 		// EXTRQ/INSERTQ) see the live registers and their writes reach the
-		// guest through sigreturn.
-		byte* fpstate = null;
+		// guest through sigreturn. Linux locates the FXSAVE image through the
+		// kernel's fpstate pointer (which can be absent); Darwin embeds the
+		// float state inline in the mcontext, so the block is addressed
+		// directly. Both resolve to a single pointer at the live xmm0 slot.
+		byte* xmm = null;
 		if (OperatingSystem.IsLinux())
 		{
-			fpstate = *(byte**)(registers + LinuxGregsFpstateOffset);
+			byte* fpstate = *(byte**)(registers + LinuxGregsFpstateOffset);
 			if (fpstate != null)
 			{
-				Buffer.MemoryCopy(
-					fpstate + FxsaveXmmOffset,
-					contextRecord + Win64ContextXmm0Offset,
-					XmmBlockSize,
-					XmmBlockSize);
+				xmm = fpstate + FxsaveXmmOffset;
 			}
 		}
-		_posixXmmContextBridged = fpstate != null;
+		else if (OperatingSystem.IsMacOS())
+		{
+			xmm = registers + DarwinMcontextXmmOffset;
+		}
+		if (xmm != null)
+		{
+			Buffer.MemoryCopy(
+				xmm,
+				contextRecord + Win64ContextXmm0Offset,
+				XmmBlockSize,
+				XmmBlockSize);
+		}
+		_posixXmmContextBridged = xmm != null;
 
 		EXCEPTION_RECORD record = default;
 		record.ExceptionAddress = (void*)ReadCtxU64(contextRecord, CTX_RIP);
@@ -359,11 +381,11 @@ public sealed unsafe partial class DirectExecutionBackend
 		{
 			*(ulong*)(registers + offsets[i]) = ReadCtxU64(contextRecord, CTX_RAX + i * 8);
 		}
-		if (fpstate != null)
+		if (xmm != null)
 		{
 			Buffer.MemoryCopy(
 				contextRecord + Win64ContextXmm0Offset,
-				fpstate + FxsaveXmmOffset,
+				xmm,
 				XmmBlockSize,
 				XmmBlockSize);
 		}
