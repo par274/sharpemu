@@ -586,6 +586,22 @@ internal static unsafe class VulkanVideoPresenter
             Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_WORK_COMPLETION"),
             "1",
             StringComparison.Ordinal);
+    private static readonly bool _traceOrderedActionLatency =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_ORDERED_ACTION_LATENCY"),
+            "1",
+            StringComparison.Ordinal);
+    // Yotei CJobManager starvation: agc.drain_resume_slow pinpointed a 5-7s
+    // resume to WriteBackAllDirtyGuestBuffers processing a 192246-run
+    // fragmented buffer, but that number is the whole per-range block (scan
+    // + memory.TryRead/TryWrite). Splits it into scan_ms (the byte-compare
+    // loop finding runs) vs io_ms (the guest memory calls) so a fix targets
+    // the actual hot part instead of guessing.
+    private static readonly bool _traceGlobalWritebackTiming =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GLOBAL_WRITEBACK_TIMING"),
+            "1",
+            StringComparison.Ordinal);
     private static readonly HashSet<(ulong Address, uint Width, uint Height)>
         _tracedGuestImageSubmissions = [];
     private static Thread? _thread;
@@ -12072,6 +12088,8 @@ internal static unsafe class VulkanVideoPresenter
                     var unreadablePages = 0;
                     var fallbackWrites = 0;
                     var firstChangedOffset = -1;
+                    var scanTicks = 0L;
+                    var ioTicks = 0L;
                     allocation.DirtyRanges.RemoveAt(index);
 
                     // A writable descriptor only identifies a potential write
@@ -12110,13 +12128,12 @@ internal static unsafe class VulkanVideoPresenter
                             mappedPageSource.CopyTo(mappedPage);
                             pageRuns.Clear();
                             var cursor = 0;
+                            var scanStartTicks = _traceGlobalWritebackTiming
+                                ? System.Diagnostics.Stopwatch.GetTimestamp()
+                                : 0L;
                             while (cursor < pageLength)
                             {
-                                while (cursor < pageLength &&
-                                       mappedPage[cursor] == shadowPage[cursor])
-                                {
-                                    cursor++;
-                                }
+                                cursor = SkipEqualBytes(mappedPage, shadowPage, cursor, pageLength);
 
                                 if (cursor == pageLength)
                                 {
@@ -12124,11 +12141,7 @@ internal static unsafe class VulkanVideoPresenter
                                 }
 
                                 var runStart = cursor;
-                                while (cursor < pageLength &&
-                                       mappedPage[cursor] != shadowPage[cursor])
-                                {
-                                    cursor++;
-                                }
+                                cursor = SkipDifferentBytes(mappedPage, shadowPage, cursor, pageLength);
 
                                 var runLength = cursor - runStart;
                                 pageRuns.Add((pageStart + runStart, runLength));
@@ -12140,6 +12153,11 @@ internal static unsafe class VulkanVideoPresenter
                                 }
                             }
 
+                            if (_traceGlobalWritebackTiming)
+                            {
+                                scanTicks += System.Diagnostics.Stopwatch.GetTimestamp() - scanStartTicks;
+                            }
+
                             if (pageRuns.Count == 0)
                             {
                                 continue;
@@ -12147,7 +12165,16 @@ internal static unsafe class VulkanVideoPresenter
 
                             changedPages++;
                             var livePage = livePageBuffer.AsSpan(0, pageLength);
-                            if (memory.TryRead(guestAddress + (ulong)pageStart, livePage))
+                            var ioStartTicks = _traceGlobalWritebackTiming
+                                ? System.Diagnostics.Stopwatch.GetTimestamp()
+                                : 0L;
+                            var readOk = memory.TryRead(guestAddress + (ulong)pageStart, livePage);
+                            if (_traceGlobalWritebackTiming)
+                            {
+                                ioTicks += System.Diagnostics.Stopwatch.GetTimestamp() - ioStartTicks;
+                            }
+
+                            if (readOk)
                             {
                                 foreach (var run in pageRuns)
                                 {
@@ -12155,7 +12182,16 @@ internal static unsafe class VulkanVideoPresenter
                                         livePage.Slice(run.Start - pageStart, run.Length));
                                 }
 
-                                if (memory.TryWrite(guestAddress + (ulong)pageStart, livePage))
+                                var writeStartTicks = _traceGlobalWritebackTiming
+                                    ? System.Diagnostics.Stopwatch.GetTimestamp()
+                                    : 0L;
+                                var writeOk = memory.TryWrite(guestAddress + (ulong)pageStart, livePage);
+                                if (_traceGlobalWritebackTiming)
+                                {
+                                    ioTicks += System.Diagnostics.Stopwatch.GetTimestamp() - writeStartTicks;
+                                }
+
+                                if (writeOk)
                                 {
                                     foreach (var run in pageRuns)
                                     {
@@ -12308,8 +12344,78 @@ internal static unsafe class VulkanVideoPresenter
                             $"probe_nonzero={nonzero}/{probe.Length} " +
                             $"changed_head={Convert.ToHexString(head)}");
                     }
+
+                    if (_traceGlobalWritebackTiming && changedRuns > 0)
+                    {
+                        var freq = (double)System.Diagnostics.Stopwatch.Frequency;
+                        Console.Error.WriteLine(
+                            $"[LOADER][ERROR] vk.global_writeback_timing base=0x{guestAddress:X16} " +
+                            $"changed_runs={changedRuns} changed_pages={changedPages} " +
+                            $"scan_ms={(scanTicks * 1000.0 / freq).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} " +
+                            $"io_ms={(ioTicks * 1000.0 / freq).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
+                    }
                 }
             }
+        }
+
+        // Yotei CJobManager starvation (2026-07-27/28 nuit): the byte-by-byte
+        // scan below dominated WriteBackAllDirtyGuestBuffers -- measured
+        // scan_ms up to 4014ms against io_ms of a few ms for the same range
+        // (SHARPEMU_TRACE_GLOBAL_WRITEBACK_TIMING), on a buffer with
+        // 2,041,713 changed runs recurring across a single run. Vectorizing
+        // ONLY the "are these bytes still equal" skip (the dominant case,
+        // since changed bytes are a small minority of the buffer -- 324KB of
+        // 10.8MB in the case that traced this) leaves every read/write/
+        // reconciliation decision in the caller completely unchanged: this
+        // returns the exact same cursor position as the scalar loop it
+        // replaces, just faster. The "find end of a differing run" direction
+        // is left scalar deliberately -- measured average run length is short
+        // (~10 bytes), so vectorizing it has little to gain and no proven
+        // need justifies the added complexity.
+        private static int SkipEqualBytes(
+            ReadOnlySpan<byte> a,
+            ReadOnlySpan<byte> b,
+            int start,
+            int end)
+        {
+            var cursor = start;
+            var vectorSize = System.Numerics.Vector<byte>.Count;
+            while (cursor + vectorSize <= end)
+            {
+                var va = new System.Numerics.Vector<byte>(a.Slice(cursor, vectorSize));
+                var vb = new System.Numerics.Vector<byte>(b.Slice(cursor, vectorSize));
+                if (va != vb)
+                {
+                    // At least one lane differs; fall through to the scalar
+                    // loop below to pinpoint the exact byte without
+                    // guessing which lane.
+                    break;
+                }
+
+                cursor += vectorSize;
+            }
+
+            while (cursor < end && a[cursor] == b[cursor])
+            {
+                cursor++;
+            }
+
+            return cursor;
+        }
+
+        private static int SkipDifferentBytes(
+            ReadOnlySpan<byte> a,
+            ReadOnlySpan<byte> b,
+            int start,
+            int end)
+        {
+            var cursor = start;
+            while (cursor < end && a[cursor] != b[cursor])
+            {
+                cursor++;
+            }
+
+            return cursor;
         }
 
         private void RecordChunkedComputeDispatch(
@@ -15311,6 +15417,30 @@ internal static unsafe class VulkanVideoPresenter
                         $"submission={pendingGuestWork.Queue.SubmissionId} " +
                         $"queued_ms={(System.Diagnostics.Stopwatch.GetTimestamp() - pendingGuestWork.EnqueuedTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F3} " +
                         work.GetType().Name);
+                }
+
+                // SHARPEMU_TRACE_ORDERED_ACTION_LATENCY=1: Yotei CJobManager
+                // starvation investigation (2026-07-27 nuit). 89% of its
+                // completion signals arrive via RELEASE_MEM kevents delivered
+                // from inside VulkanOrderedGuestAction (SubmitOrderedGpuSideEffect
+                // -> SubmitOrderedGuestAction), which only runs once this
+                // consumer dequeues it -- so if this consumer stalls (blocked
+                // on a fence behind an orphaned/convoyed submission), every
+                // action queued behind it, including the kevent delivery that
+                // would wake CJobManager, waits with it. Logs every dequeued
+                // VulkanOrderedGuestAction's queued_ms unconditionally (the
+                // existing traceWork gate above only covers dispatch/draw
+                // work), so a run can be diffed against the sceKernelSignalSema
+                // trace to see whether queued_ms spikes right where signals
+                // stop.
+                if (_traceOrderedActionLatency && work is VulkanOrderedGuestAction orderedActionForLatency)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] vk.ordered_action_latency #{completedWork} " +
+                        $"name='{orderedActionForLatency.DebugName}' " +
+                        $"queue={pendingGuestWork.Queue.Name} " +
+                        $"queued_ms={(System.Diagnostics.Stopwatch.GetTimestamp() - pendingGuestWork.EnqueuedTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F3} " +
+                        $"pending={_pendingGuestWorkCount}");
                 }
                 try
                 {
