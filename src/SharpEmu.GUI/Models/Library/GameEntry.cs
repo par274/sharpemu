@@ -28,29 +28,37 @@ public class GameEntry : LibraryTile, INotifyPropertyChanged
     private Bitmap? _cover;
     private IBrush? _placeholderBrush;
     private long _sizeBytes;
+    private string _name;
+    private string? _titleId;
+    private string? _version;
+    private string? _coverPath;
+    private string? _backgroundPath;
+    private string _initials;
+    private bool _isLoading = true;
+    private bool _isCardVisible;
 
     public GameEntry(
         string name, string? titleId, string? version, string path, long sizeBytes,
         string? coverPath, string? backgroundPath)
     {
-        Name = name;
-        TitleId = titleId;
-        Version = version;
+        _name = name;
+        _titleId = titleId;
+        _version = version;
         Path = path;
         _sizeBytes = sizeBytes;
-        CoverPath = coverPath;
-        BackgroundPath = backgroundPath;
-        Initials = ComputeInitials(name);
+        _coverPath = coverPath;
+        _backgroundPath = backgroundPath;
+        _initials = ComputeInitials(name);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public string Name { get; }
+    public string Name => _name;
 
-    public string? TitleId { get; }
+    public string? TitleId => _titleId;
 
     /// <summary>Content version from sce_sys/param.json, e.g. "01.000.000".</summary>
-    public string? Version { get; }
+    public string? Version => _version;
 
     public string Path { get; }
 
@@ -76,10 +84,10 @@ public class GameEntry : LibraryTile, INotifyPropertyChanged
     }
 
     /// <summary>Path to the cover art image shipped with the game, if found.</summary>
-    public string? CoverPath { get; }
+    public string? CoverPath => _coverPath;
 
     /// <summary>Path to the key art (pic0/pic1) shipped with the game, if found.</summary>
-    public string? BackgroundPath { get; }
+    public string? BackgroundPath => _backgroundPath;
 
     /// <summary>
     /// Decoded key art used as the window backdrop while this game is
@@ -87,7 +95,46 @@ public class GameEntry : LibraryTile, INotifyPropertyChanged
     /// </summary>
     public Bitmap? Background { get; set; }
 
-    public string Initials { get; }
+    public string Initials => _initials;
+
+    /// <summary>
+    /// True while this card is enriching its filesystem metadata, cover and
+    /// installed size. The carousel binds this state locally so a rescan never
+    /// replaces the whole page with a global loading indicator.
+    /// </summary>
+    public bool IsLoading
+    {
+        get => _isLoading;
+        internal set
+        {
+            if (_isLoading == value)
+            {
+                return;
+            }
+
+            _isLoading = value;
+            RaisePropertyChanged(nameof(IsLoading));
+        }
+    }
+
+    /// <summary>
+    /// Becomes true on the render pass after insertion, allowing only the new
+    /// card to animate into the existing carousel.
+    /// </summary>
+    public bool IsCardVisible
+    {
+        get => _isCardVisible;
+        internal set
+        {
+            if (_isCardVisible == value)
+            {
+                return;
+            }
+
+            _isCardVisible = value;
+            RaisePropertyChanged(nameof(IsCardVisible));
+        }
+    }
 
     // Built lazily: brushes are AvaloniaObjects that must be created on the
     // UI thread, while GameEntry itself is constructed on the scan thread.
@@ -105,8 +152,8 @@ public class GameEntry : LibraryTile, INotifyPropertyChanged
             }
 
             _cover = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Cover)));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasCover)));
+            RaisePropertyChanged(nameof(Cover));
+            RaisePropertyChanged(nameof(HasCover));
         }
     }
 
@@ -121,6 +168,69 @@ public class GameEntry : LibraryTile, INotifyPropertyChanged
 
     /// <summary>Formatted install size badge shown in the launch bar.</summary>
     public string SizeText => FormatSize(SizeBytes);
+
+    /// <summary>
+    /// Applies a fresh filesystem scan to this existing presentation object.
+    /// Keeping the object identity stable preserves the ListBox container,
+    /// selection and card animations across rescans.
+    /// </summary>
+    internal bool UpdateFrom(GameEntry scanned)
+    {
+        var needsEnrichment = false;
+        if (!string.Equals(_name, scanned.Name, StringComparison.Ordinal))
+        {
+            _name = scanned.Name;
+            _initials = ComputeInitials(scanned.Name);
+            _placeholderBrush = null;
+            RaisePropertyChanged(nameof(Name));
+            RaisePropertyChanged(nameof(Initials));
+            RaisePropertyChanged(nameof(PlaceholderBrush));
+        }
+
+        if (!string.Equals(_titleId, scanned.TitleId, StringComparison.Ordinal))
+        {
+            _titleId = scanned.TitleId;
+            RaisePropertyChanged(nameof(TitleId));
+            RaisePropertyChanged(nameof(HasTitleId));
+        }
+
+        if (!string.Equals(_version, scanned.Version, StringComparison.Ordinal))
+        {
+            _version = scanned.Version;
+            RaisePropertyChanged(nameof(Version));
+            RaisePropertyChanged(nameof(VersionText));
+            RaisePropertyChanged(nameof(HasVersion));
+        }
+
+        if (!string.Equals(_coverPath, scanned.CoverPath, StringComparison.Ordinal))
+        {
+            _coverPath = scanned.CoverPath;
+            Cover = null;
+            needsEnrichment = true;
+        }
+
+        if (!string.Equals(_backgroundPath, scanned.BackgroundPath, StringComparison.Ordinal))
+        {
+            _backgroundPath = scanned.BackgroundPath;
+            Background = null;
+            needsEnrichment = true;
+        }
+
+        if (_sizeBytes <= 0 && scanned.SizeBytes > 0)
+        {
+            SizeBytes = scanned.SizeBytes;
+        }
+
+        if (needsEnrichment)
+        {
+            IsLoading = true;
+        }
+
+        return needsEnrichment;
+    }
+
+    private void RaisePropertyChanged(string propertyName) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 
     private static string ComputeInitials(string name)
     {

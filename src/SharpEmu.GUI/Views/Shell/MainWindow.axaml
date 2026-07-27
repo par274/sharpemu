@@ -195,11 +195,17 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
             </ListBox.ItemsPanel>
             <ListBox.DataTemplates>
               <DataTemplate x:DataType="local:GameEntry">
-                <Border Classes="coverShadow" Width="148" Height="198" CornerRadius="7">
+                <Border Classes="coverShadow libraryGameCard"
+                        Classes.ready="{Binding IsCardVisible}"
+                        Width="148"
+                        Height="198"
+                        CornerRadius="7">
                   <Border Classes="coverClip">
                     <Panel>
-                      <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
-                        <TextBlock Text="{Binding Initials}"
+                      <Border Background="{Binding PlaceholderBrush}">
+                        <TextBlock Classes="libraryCardInitials"
+                                   Classes.ready="{Binding !IsLoading}"
+                                   Text="{Binding Initials}"
                                    FontSize="38"
                                    FontWeight="Light"
                                    LetterSpacing="-2"
@@ -208,8 +214,21 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                                    VerticalAlignment="Center" />
                       </Border>
                       <Image Source="{Binding Cover}"
+                             Classes="libraryCardCover"
+                             Classes.ready="{Binding !IsLoading}"
                              Stretch="UniformToFill"
                              IsVisible="{Binding HasCover}" />
+                      <TextBlock Classes="materialSymbol libraryCardSpinner"
+                                 Classes.loading="{Binding IsLoading}"
+                                 Text="progress_activity"
+                                 FontSize="34"
+                                 Foreground="White"
+                                 HorizontalAlignment="Center"
+                                 VerticalAlignment="Center">
+                        <TextBlock.RenderTransform>
+                          <RotateTransform Angle="0" />
+                        </TextBlock.RenderTransform>
+                      </TextBlock>
                     </Panel>
                   </Border>
                 </Border>
@@ -334,25 +353,6 @@ Shell view: chrome, persistent pages, and the native game-surface overlay.
                          IsVisible="False" />
             </StackPanel>
           </Grid>
-
-          <StackPanel x:Name="LoadingState"
-                      Grid.RowSpan="3"
-                      Spacing="22"
-                      HorizontalAlignment="Center"
-                      VerticalAlignment="Center"
-                      IsVisible="False">
-            <ProgressBar IsIndeterminate="True" Width="46" Height="3" />
-            <TextBlock Text="SHARPEMU"
-                       FontSize="13"
-                       FontWeight="Bold"
-                       LetterSpacing="3"
-                       HorizontalAlignment="Center" />
-            <TextBlock x:Name="LoadingStateText"
-                       Text="Loading library…"
-                       FontSize="12"
-                       Foreground="{StaticResource MutedBrush}"
-                       HorizontalAlignment="Center" />
-          </StackPanel>
 
           <!-- Contextual per-game settings. The panel stays in the visual tree
                so the reveal and dismissal can animate without a second window. -->

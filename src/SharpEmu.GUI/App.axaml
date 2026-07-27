@@ -1454,6 +1454,59 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <Style Selector="Border.coverShadow">
       <Setter Property="BoxShadow" Value="0 12 28 0 #61000000" />
     </Style>
+    <Style Selector="Border.libraryGameCard">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="translateY(8px) scale(0.985)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.2"
+                            Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.24"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.libraryGameCard.ready">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    </Style>
+    <Style Selector="TextBlock.libraryCardInitials,
+                     Image.libraryCardCover,
+                     TextBlock.libraryCardSpinner">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.18"
+                            Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBlock.libraryCardInitials.ready,
+                     Image.libraryCardCover.ready,
+                     TextBlock.libraryCardSpinner.loading">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="TextBlock.libraryCardSpinner">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    </Style>
+    <Style Selector="TextBlock.libraryCardSpinner.loading">
+      <Style.Animations>
+        <Animation Duration="0:0:0.82"
+                   IterationCount="Infinite"
+                   Easing="LinearEasing">
+          <KeyFrame Cue="0%">
+            <Setter Property="RotateTransform.Angle" Value="0" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="RotateTransform.Angle" Value="360" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
     <Style Selector="Border.coverClip">
       <Setter Property="CornerRadius" Value="7" />
       <Setter Property="ClipToBounds" Value="True" />

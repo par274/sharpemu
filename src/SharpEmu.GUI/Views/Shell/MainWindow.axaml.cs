@@ -60,7 +60,6 @@ public partial class MainWindow : Window
         ? StringComparison.OrdinalIgnoreCase
         : StringComparison.Ordinal;
 
-    private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<LibraryTile> _visibleGames;
     // Console buffer is owned by ILogService; aliased here for the XAML-bound
     // ConsoleList and the few remaining imperative reads.
@@ -104,6 +103,7 @@ public partial class MainWindow : Window
     private bool _isLoadingGameSettings;
     private bool _addFolderInProgress;
     private bool _suppressSelectionChanged;
+    private int _libraryScanGeneration;
     private int _gameOptionsSectionIndex;
     private int _optionsSectionIndex;
     private int _selectedDetailsAnimationGeneration;
@@ -179,6 +179,7 @@ public partial class MainWindow : Window
         // without a manual refresh.
         _libraryService.LibraryChanged += (_, _) =>
             Dispatcher.UIThread.Post(() => _ = RescanLibraryAsync());
+        _library.VisibleGamesChanged += (_, _) => SynchronizeLibrarySelection();
 
         // Translate gamepad navigation intents into UI actions.
         _gamepad.PageRequested += page => Dispatcher.UIThread.Post(() => SetActivePage(page));
@@ -264,15 +265,11 @@ public partial class MainWindow : Window
             }
 
             var current = GameList.SelectedItem as GameEntry;
-            // ListBox raises SelectionChanged asynchronously (on its layout pass)
-            // whenever its items collection is rebuilt — including the moment
-            // Games.Clear() runs during a rescan, when the selection is
-            // transiently null even though we have a chosen game. Do NOT mirror
-            // a null selection back into the view-model or the details panel;
-            // that echo would clobber the game we just picked and surface the
-            // welcome state. Only honor a null selection when the view-model
-            // agrees there really is no selected game.
-            if (current is null && _library.SelectedGame is not null)
+            // A collection diff can temporarily clear the ListBox selection on
+            // its next layout pass. The consolidated synchronization step below
+            // restores the intended entry, so never mirror that transient null
+            // into the details panel here.
+            if (current is null)
             {
                 return;
             }
@@ -297,9 +294,6 @@ public partial class MainWindow : Window
         SearchBox.TextChanged += (_, _) =>
         {
             _library.SearchText = SearchBox.Text ?? string.Empty;
-            // The filtered list refresh happens in the VM (throttled); keep
-            // the empty-state and selection sync immediate for responsiveness.
-            RefreshVisibleGames();
         };
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
         LaunchButton.Click += (_, _) => LaunchSelected();
@@ -847,7 +841,6 @@ public partial class MainWindow : Window
         CtxGameSettings.Header = loc.Get("Library.Context.GameSettings");
         CtxRemove.Header = loc.Get("Library.Context.Remove");
 
-        LoadingStateText.Text = loc.Get("Library.Loading");
         LastPlayedLabel.Text = loc.Get("Library.Stat.LastPlayed");
         VersionLabel.Text = loc.Get("Library.Stat.Version");
         InstalledLabel.Text = loc.Get("Library.Stat.Installed");
@@ -1042,9 +1035,9 @@ public partial class MainWindow : Window
         {
             // Discord does not render activities without timestamps, so the
             // browsing state carries the launcher's start time.
-            var count = _allGames.Count == 1
+            var count = _library.AllGames.Count == 1
                 ? Localization.Instance.Get("Page.GameCount.One")
-                : Localization.Instance.Format("Page.GameCount.Other", _allGames.Count);
+                : Localization.Instance.Format("Page.GameCount.Other", _library.AllGames.Count);
             _discord.SetPresence(
                 Localization.Instance.Get("Discord.Browsing"),
                 count,
@@ -1528,20 +1521,20 @@ public partial class MainWindow : Window
 
     private async Task RescanLibraryAsync()
     {
+        var generation = Interlocked.Increment(ref _libraryScanGeneration);
         var folders = _settings.GameFolders.ToArray();
         var excluded = new HashSet<string>(_settings.ExcludedGames, FilePathComparer);
         StatusBarRight.Text = Localization.Instance.Get("Status.ScanningLibrary");
-        LoadingState.IsVisible = true;
 
         // The scan runs in the injected library service; the view-model owns
         // the resulting collection and kicks off cover/size enrichment.
         var games = await Task.Run(() => _libraryService.ScanFolders(folders, excluded));
+        if (generation != _libraryScanGeneration)
+        {
+            return;
+        }
 
         _library.ApplyScannedGames(games);
-        RefreshVisibleGames();
-        _allGames.Clear();
-        _allGames.AddRange(games);
-        LoadingState.IsVisible = false;
         UpdateDiscordPresence();
         StatusBarRight.Text = folders.Length == 0
             ? Localization.Instance.Get("Status.AddFolderPrompt")
@@ -1914,51 +1907,58 @@ public partial class MainWindow : Window
         }
 
         _library.Remove(game);
-        _allGames.RemoveAll(g => string.Equals(g.Path, game.Path, FilePathComparison));
-        GameList.SelectedItem = null;
         StatusBarRight.Text = Localization.Instance.Format("Status.RemovedFromLibrary", game.Name);
     }
 
-    private void RefreshVisibleGames()
+    private void SynchronizeLibrarySelection()
     {
-        _library.RefreshVisibleGames();
-
         var selectedPath = _library.SelectedGame?.Path;
         GameEntry? toSelect;
         if (selectedPath is not null &&
             _visibleGames.OfType<GameEntry>().FirstOrDefault(g => g.Path.Equals(selectedPath, FilePathComparison))
                 is { } reselected)
         {
-            GameList.SelectedItem = reselected;
             toSelect = reselected;
         }
         else if (_visibleGames.OfType<GameEntry>().FirstOrDefault() is { } first)
         {
-            GameList.SelectedItem = first;
-            _library.SelectedGame = first;
             toSelect = first;
         }
         else
         {
-            GameList.SelectedItem = null;
-            _library.SelectedGame = null;
             toSelect = null;
         }
 
-        UpdateSelectedGame(toSelect);
-
-        var restore = toSelect;
-        if (restore is not null)
+        var current = GameList.SelectedItem as GameEntry;
+        if (ReferenceEquals(current, toSelect))
         {
-            Dispatcher.UIThread.Post(() =>
+            var modelSelectionChanged = !ReferenceEquals(_library.SelectedGame, toSelect);
+            _library.SelectedGame = toSelect;
+            if (modelSelectionChanged)
             {
-                if (GameList.SelectedItem is null &&
-                    _library.SelectedGame?.Path == restore.Path)
-                {
-                    GameList.SelectedItem = restore;
-                }
-            }, DispatcherPriority.Background);
+                UpdateSelectedGame(toSelect);
+            }
+            else
+            {
+                ApplySelectedGameDetails(toSelect);
+                UpdateRunButtons();
+            }
+
+            return;
         }
+
+        _suppressSelectionChanged = true;
+        try
+        {
+            GameList.SelectedItem = toSelect;
+        }
+        finally
+        {
+            _suppressSelectionChanged = false;
+        }
+
+        _library.SelectedGame = toSelect;
+        UpdateSelectedGame(toSelect);
     }
 
     private void UpdateSelectedGame()
@@ -2283,7 +2283,7 @@ public partial class MainWindow : Window
         }
 
         var resolvedTitleId = string.IsNullOrWhiteSpace(titleId)
-            ? _allGames.FirstOrDefault(game => game.Path.Equals(ebootPath, FilePathComparison))?.TitleId
+            ? _library.AllGames.FirstOrDefault(game => game.Path.Equals(ebootPath, FilePathComparison))?.TitleId
             : titleId;
         var effective = EffectiveLaunchSettings.Resolve(_settings, PerGameSettings.Load(resolvedTitleId));
 
