@@ -8,7 +8,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
         xmlns:local="clr-namespace:SharpEmu.GUI"
         xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         x:Class="SharpEmu.GUI.MainWindow"
-        x:CompileBindings="False"
         Title="SharpEmu"
         Width="1280" Height="820"
         MinWidth="980" MinHeight="640"
@@ -274,8 +273,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <local:SettingRow x:Name="LanguageRow" Label="Emulator language"
                                         Description="Language used throughout the launcher. Applies immediately.">
                         <ComboBox x:Name="LanguageBox" Width="160"
-                                  VerticalAlignment="Center" CornerRadius="8"
-                                  DisplayMemberBinding="{Binding NativeName}" />
+                                  VerticalAlignment="Center" CornerRadius="8">
+                          <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="local:LanguageInfo">
+                              <TextBlock Text="{Binding NativeName}" />
+                            </DataTemplate>
+                          </ComboBox.ItemTemplate>
+                        </ComboBox>
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="TitleMusicRow" Label="Title music"

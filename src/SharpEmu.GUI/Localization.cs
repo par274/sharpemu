@@ -5,6 +5,8 @@ using System.Text.Json;
 
 namespace SharpEmu.GUI;
 
+public sealed record LanguageInfo(string Code, string NativeName);
+
 /// <summary>
 /// Loads UI strings for the launcher. Every language ships embedded in the
 /// assembly (see SharpEmu.GUI.csproj) so a release build is fully
@@ -15,8 +17,6 @@ namespace SharpEmu.GUI;
 public sealed class Localization
 {
     public static Localization Instance { get; } = new();
-
-    public sealed record LanguageInfo(string Code, string NativeName);
 
     private const string EmbeddedResourcePrefix = "Languages.";
     private const string EmbeddedResourceSuffix = ".json";
@@ -242,7 +242,7 @@ public sealed class Localization
         result = loaded;
         return true;
     }
-    
+
     private bool TryLoad(string code, string json)
     {
         if (TryLoad(json, out var dict))

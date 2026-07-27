@@ -592,7 +592,7 @@ public partial class MainWindow : Window
 
     private void OnLanguageChanged()
     {
-        if (LanguageBox.SelectedItem is not Localization.LanguageInfo language)
+        if (LanguageBox.SelectedItem is not LanguageInfo language)
         {
             return;
         }
