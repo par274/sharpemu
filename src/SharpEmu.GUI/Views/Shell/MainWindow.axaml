@@ -1,0 +1,1645 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Shell view: chrome, persistent pages, and the native game-surface overlay.
+-->
+
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:SharpEmu.GUI"
+        xmlns:loc="clr-namespace:SharpEmu.GUI"
+        xmlns:navigation="using:SharpEmu.GUI.Navigation"
+        xmlns:navigationControls="using:SharpEmu.GUI.Controls.Navigation"
+        xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings"
+        xmlns:viewModels="using:SharpEmu.GUI.ViewModels"
+        xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
+        x:Class="SharpEmu.GUI.MainWindow"
+        x:DataType="viewModels:MainViewModel"
+        Title="SharpEmu"
+        Width="1440"
+        Height="900"
+        MinWidth="1020"
+        MinHeight="830"
+        WindowState="Maximized"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource BgBrush}"
+        ExtendClientAreaToDecorationsHint="True"
+        WindowDecorations="None"
+        ExtendClientAreaTitleBarHeightHint="92"
+        Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
+        KeyDown="OnKeyDown">
+
+  <Grid x:Name="RootLayout" RowDefinitions="92,*,0" Background="#0C0C0C">
+    <Grid x:Name="MainContent" Grid.Row="0" Grid.RowSpan="2">
+      <!-- Key art and the same three-layer atmosphere used by the WebUI. -->
+      <Grid x:Name="PageBackdropParallax"
+            ClipToBounds="False">
+        <Grid x:Name="BackdropLayer"
+              Classes="backdropLayer"
+              RenderTransformOrigin="50%,50%">
+          <Grid.RenderTransform>
+            <ScaleTransform ScaleX="1"
+                            ScaleY="1">
+              <ScaleTransform.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="ScaleX"
+                                    Duration="0:0:0.72"
+                                    Easing="CubicEaseOut" />
+                  <DoubleTransition Property="ScaleY"
+                                    Duration="0:0:0.72"
+                                    Easing="CubicEaseOut" />
+                </Transitions>
+              </ScaleTransform.Transitions>
+            </ScaleTransform>
+          </Grid.RenderTransform>
+          <Image x:Name="BackdropImage"
+                 Stretch="UniformToFill"
+                 Opacity="0"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Center">
+            <Image.Transitions>
+              <Transitions>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.46" />
+              </Transitions>
+            </Image.Transitions>
+          </Image>
+          <Grid ColumnDefinitions="32*,68*" IsHitTestVisible="False">
+            <Image x:Name="CoverFallbackImage"
+                   Grid.Column="1"
+                   Stretch="Uniform"
+                   Opacity="0"
+                   HorizontalAlignment="Right"
+                   VerticalAlignment="Center">
+              <Image.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity" Duration="0:0:0.46" />
+                </Transitions>
+              </Image.Transitions>
+            </Image>
+          </Grid>
+          <Border Background="#6B070707" />
+          <Border>
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                <GradientStop Offset="0" Color="#EB090909" />
+                <GradientStop Offset="0.30" Color="#A6090909" />
+                <GradientStop Offset="0.58" Color="#1F090909" />
+                <GradientStop Offset="1" Color="#0F090909" />
+              </LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <Border>
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0%,100%" EndPoint="0%,0%">
+                <GradientStop Offset="0" Color="#FF0B0B0B" />
+                <GradientStop Offset="0.18" Color="#C70B0B0B" />
+                <GradientStop Offset="0.58" Color="#0F0B0B0B" />
+                <GradientStop Offset="1" Color="#330B0B0B" />
+              </LinearGradientBrush>
+            </Border.Background>
+          </Border>
+        </Grid>
+      </Grid>
+
+      <Grid x:Name="PagesHost">
+        <Grid.Transitions>
+          <Transitions>
+            <DoubleTransition Property="Opacity"
+                              Duration="0:0:0.24"
+                              Easing="CubicEaseOut" />
+          </Transitions>
+        </Grid.Transitions>
+        <!-- Options and Console share one persistent opaque surface. Keeping it
+             outside both fading page roots prevents the window background from
+             showing through during a system-page cross-fade. -->
+        <Border x:Name="SystemPageSurface"
+                Background="{StaticResource GameOptionsMenuBrush}"
+                Opacity="{Binding SystemPageSurfaceOpacity}"
+                IsHitTestVisible="False">
+          <Border.Transitions>
+            <Transitions>
+              <DoubleTransition Property="Opacity"
+                                Duration="0:0:0.22"
+                                Easing="CubicEaseOut" />
+            </Transitions>
+          </Border.Transitions>
+        </Border>
+
+        <!-- All three pages stay attached, while inactive pages collapse after
+             their cross-fade. Roots remain stationary; only marked foreground
+             layers animate. -->
+        <navigationControls:PersistentPageHost
+            x:Name="PageSurface"
+            SelectedIndex="{Binding ActivePageIndex}"
+            ParallaxTarget="{Binding #PageBackdropParallax}">
+          <!-- Library: horizontal cover rail, then selected-game details. -->
+          <Grid x:Name="LibraryPage" Classes="appPage" RowDefinitions="136,270,*">
+          <Panel Grid.Row="1" Classes="pageMotionLead">
+            <Panel x:Name="CarouselHost"
+                   Classes="carouselHost"
+                   RenderTransformOrigin="50%,50%">
+            <Panel.Transitions>
+              <Transitions>
+                <TransformOperationsTransition Property="RenderTransform"
+                                               Duration="0:0:0.32"
+                                               Easing="CubicEaseOut" />
+                <DoubleTransition Property="Opacity"
+                                  Duration="0:0:0.18"
+                                  Easing="CubicEaseOut" />
+              </Transitions>
+            </Panel.Transitions>
+            <ListBox x:Name="GameList"
+                     Classes="tileGrid"
+                     SelectionMode="Single"
+                     Padding="64,0,64,0">
+            <ListBox.ContextMenu>
+              <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
+                <MenuItem x:Name="CtxLaunch" Header="Launch" FontWeight="SemiBold">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="play_arrow" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem x:Name="CtxGameSettings" Header="Game settings…">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="settings" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem x:Name="CtxOpenFolder" Header="Open game folder">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="folder_open" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem x:Name="CtxCopyPath" Header="Copy path">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="content_copy" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem x:Name="CtxCopyTitleId" Header="Copy title ID">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="content_copy" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <Separator />
+                <MenuItem x:Name="CtxRemove"
+                          Header="Remove from library"
+                          Foreground="{StaticResource DangerHoverBrush}">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="delete" />
+                  </MenuItem.Icon>
+                </MenuItem>
+              </ContextMenu>
+            </ListBox.ContextMenu>
+            <ListBox.ItemsPanel>
+              <ItemsPanelTemplate>
+                <!-- VirtualizingStackPanel realizes only the visible tiles plus a
+                     buffer, whereas a horizontal StackPanel materialized every
+                     card (each carrying a BoxShadow + cover Image) for the whole
+                     library. Visually identical rail; cost stops scaling with
+                     library size. -->
+                <VirtualizingStackPanel Orientation="Horizontal" />
+              </ItemsPanelTemplate>
+            </ListBox.ItemsPanel>
+            <ListBox.DataTemplates>
+              <DataTemplate x:DataType="local:GameEntry">
+                <Border Classes="coverShadow libraryGameCard"
+                        Classes.ready="{Binding IsCardVisible}"
+                        Width="148"
+                        Height="198"
+                        CornerRadius="7">
+                  <Border Classes="coverClip">
+                    <Panel>
+                      <!-- Visible only while there is no cover. Previously the
+                           initials always rendered underneath the cover Image
+                           and relied on z-order to be hidden; that worked when
+                           each tile was freshly created, but container
+                           recycling (VirtualizingStackPanel) reuses one tile for
+                           many games and during the DataContext swap the
+                           initials can bleed through for a frame. Gating on
+                           HasCover makes the placeholder inherently recycling-
+                           safe and also skips drawing a layer under the cover. -->
+                      <Border Background="{Binding PlaceholderBrush}"
+                              IsVisible="{Binding !HasCover}">
+                        <TextBlock Classes="libraryCardInitials"
+                                   Classes.ready="{Binding !IsLoading}"
+                                   Text="{Binding Initials}"
+                                   FontSize="38"
+                                   FontWeight="Light"
+                                   LetterSpacing="-2"
+                                   Foreground="#7AFFFFFF"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center" />
+                      </Border>
+                      <Image Source="{Binding Cover}"
+                             Classes="libraryCardCover"
+                             Classes.ready="{Binding !IsLoading}"
+                             Stretch="UniformToFill"
+                             RenderOptions.BitmapInterpolationMode="LowQuality"
+                             IsVisible="{Binding HasCover}" />
+                      <TextBlock Classes="materialSymbol libraryCardSpinner"
+                                 Classes.loading="{Binding IsLoading}"
+                                 Text="progress_activity"
+                                 FontSize="34"
+                                 Foreground="White"
+                                 HorizontalAlignment="Center"
+                                 VerticalAlignment="Center">
+                        <TextBlock.RenderTransform>
+                          <RotateTransform Angle="0" />
+                        </TextBlock.RenderTransform>
+                      </TextBlock>
+                    </Panel>
+                  </Border>
+                </Border>
+              </DataTemplate>
+              <DataTemplate x:DataType="local:AddFolderTile">
+                <Border Classes="addFolderTile" Width="148" Height="198">
+                  <StackPanel HorizontalAlignment="Center"
+                              VerticalAlignment="Center"
+                              Spacing="12">
+                    <Border Classes="addFolderTileIcon">
+                      <TextBlock Classes="materialSymbol addFolderGlyph addFolderIconGlyph"
+                                 Text="add"
+                                 FontSize="32"
+                                 LineHeight="32"
+                                 HorizontalAlignment="Center"
+                                 VerticalAlignment="Center" />
+                    </Border>
+                    <TextBlock Classes="addFolderGlyph"
+                               Text="{Binding [Library.AddFolder],
+                                              Source={x:Static loc:Localization.Instance},
+                                              Mode=OneWay,
+                                              x:CompileBindings=False}"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               LetterSpacing="0.4"
+                               HorizontalAlignment="Center" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ListBox.DataTemplates>
+            </ListBox>
+            </Panel>
+          </Panel>
+
+          <Grid Grid.Row="2"
+                Classes="pageMotionBody"
+                Margin="64,0,64,0"
+                ColumnDefinitions="*,Auto">
+            <StackPanel x:Name="SelectedDetailsHost"
+                        Classes="selectedDetailsHost"
+                        VerticalAlignment="Top"
+                        MaxWidth="980"
+                        HorizontalAlignment="Left">
+              <StackPanel.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity" Duration="0:0:0.16" />
+                  <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" />
+                </Transitions>
+              </StackPanel.Transitions>
+              <TextBlock x:Name="SelectedGameTitle"
+                         Text="No game selected"
+                         FontSize="52"
+                         FontWeight="SemiBold"
+                         LetterSpacing="-2"
+                         LineHeight="74"
+                         Margin="0,0,0,5"
+                         TextWrapping="Wrap"
+                         TextTrimming="CharacterEllipsis" />
+
+              <TextBlock x:Name="SelectedEmptyHint"
+                         Text=""
+                         FontSize="14"
+                         Foreground="{StaticResource MutedBrush}"
+                         Margin="0,6,0,0"
+                         TextWrapping="Wrap"
+                         MaxWidth="720"
+                         IsVisible="False" />
+
+              <StackPanel x:Name="SelectedBadgesRow"
+                          x:DataType="local:GameEntry"
+                          Orientation="Horizontal"
+                          Spacing="54"
+                          Margin="0,28,0,0"
+                          IsVisible="False">
+                <StackPanel Spacing="6">
+                  <TextBlock x:Name="LastPlayedLabel" Classes="gameStatLabel" Text="Last played" />
+                  <TextBlock x:Name="LastPlayedValue" Classes="gameStatValue" Text="Not played yet" />
+                </StackPanel>
+                <StackPanel Spacing="6" IsVisible="{Binding HasVersion, FallbackValue=False}">
+                  <TextBlock x:Name="VersionLabel" Classes="gameStatLabel" Text="Version" />
+                  <TextBlock Classes="gameStatValue" Text="{Binding VersionText}" />
+                </StackPanel>
+                <StackPanel Spacing="6">
+                  <TextBlock x:Name="InstalledLabel" Classes="gameStatLabel" Text="Installed" />
+                  <TextBlock Classes="gameStatValue" Text="{Binding SizeText}" />
+                </StackPanel>
+                <StackPanel Spacing="6" IsVisible="{Binding HasTitleId, FallbackValue=False}">
+                  <TextBlock x:Name="TitleIdLabel" Classes="gameStatLabel" Text="Title ID" />
+                  <TextBlock Text="{Binding TitleId}"
+                             Classes="gameStatValue"
+                             LetterSpacing="0.5" />
+                </StackPanel>
+              </StackPanel>
+
+              <!-- Launch + per-game options live with the selected game's details,
+                   not in the bottom utility bar. Hidden until a real game is picked. -->
+              <StackPanel x:Name="SelectedActionsHost"
+                          Orientation="Horizontal"
+                          Spacing="12"
+                          Margin="0,32,0,0"
+                          IsVisible="False">
+                <Button x:Name="LaunchButton"
+                        Classes="playButton"
+                        IsEnabled="False">
+                  <TextBlock x:Name="LaunchButtonLabel" Text="Play" VerticalAlignment="Center" />
+                </Button>
+                <ToggleButton x:Name="ConsoleToggle"
+                              Classes="optionsCircle"
+                              ToolTip.Tip="{Binding [Page.Options], Source={x:Static loc:Localization.Instance}}">
+                  <TextBlock Classes="materialSymbol" Text="more_horiz" />
+                </ToggleButton>
+              </StackPanel>
+
+              <!-- Kept as native state holders for the existing launcher logic. -->
+              <Panel x:Name="SelectedCoverPanel"
+                     x:DataType="local:GameEntry"
+                     Width="0"
+                     Height="0"
+                     IsVisible="False" />
+              <TextBlock x:Name="SelectedGamePath"
+                         Text="Pick a game from the library."
+                         IsVisible="False" />
+            </StackPanel>
+          </Grid>
+
+          <!-- Contextual per-game settings. The panel stays in the visual tree
+               so the reveal and dismissal can animate without a second window. -->
+          <Grid x:Name="GameOptionsOverlay"
+                Classes="gameOptionsOverlay"
+                Grid.RowSpan="3"
+                RowDefinitions="2*,3*"
+                IsHitTestVisible="False">
+            <Grid.Transitions>
+              <Transitions>
+                <DoubleTransition Property="Opacity"
+                                  Duration="0:0:0.2"
+                                  Easing="CubicEaseOut" />
+                <TransformOperationsTransition Property="RenderTransform"
+                                               Duration="0:0:0.38"
+                                               Easing="CubicEaseOut" />
+              </Transitions>
+            </Grid.Transitions>
+
+            <Border Grid.Row="1"
+                    Width="180"
+                    Height="242"
+                    Margin="84,-96,0,0"
+                    ZIndex="2"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Top"
+                    BoxShadow="0 26 54 0 #D1000000"
+                    x:DataType="local:GameEntry">
+              <Border Classes="coverClip"
+                      Background="{Binding PlaceholderBrush}">
+                <Panel>
+                  <TextBlock Text="{Binding Initials}"
+                             FontSize="28"
+                             FontWeight="Medium"
+                             Foreground="#A6FFFFFF"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center"
+                             IsVisible="{Binding !HasCover}" />
+                  <Image Source="{Binding Cover}"
+                         Stretch="UniformToFill"
+                         IsVisible="{Binding HasCover}" />
+                </Panel>
+              </Border>
+            </Border>
+
+            <Border Grid.Row="1"
+                    Background="Transparent">
+              <Grid RowDefinitions="Auto,*">
+                <Border Grid.Row="1"
+                        Background="{StaticResource GameOptionsMenuBrush}" />
+                <Border Grid.Row="1"
+                        Height="1"
+                        ZIndex="1"
+                        IsHitTestVisible="False"
+                        VerticalAlignment="Top"
+                        BoxShadow="0 18 42 0 #A6000000" />
+
+                <Border Padding="300,18,64,30">
+                  <Grid x:Name="GameOptionsIdentity"
+                        x:DataType="local:GameEntry"
+                        ColumnDefinitions="*,Auto"
+                        ColumnSpacing="34">
+                    <StackPanel Spacing="3" VerticalAlignment="Center">
+                      <TextBlock Text="{Binding Name}"
+                                 FontSize="42"
+                                 FontWeight="SemiBold"
+                                 TextTrimming="CharacterEllipsis" />
+                      <TextBlock Text="{Binding Path}"
+                                 MaxWidth="680"
+                                 HorizontalAlignment="Left"
+                                 FontSize="11"
+                                 Foreground="#99FFFFFF"
+                                 TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1"
+                                Orientation="Horizontal"
+                                Spacing="34"
+                                VerticalAlignment="Center">
+                      <StackPanel Spacing="4">
+                        <TextBlock x:Name="GameOptionsLastPlayedLabel"
+                                   Classes="gameStatLabel"
+                                   Text="Last played" />
+                        <TextBlock x:Name="GameOptionsLastPlayedValue"
+                                   Classes="gameStatValue"
+                                   FontSize="15"
+                                   Text="Not played yet" />
+                      </StackPanel>
+                      <StackPanel Spacing="4" IsVisible="{Binding HasVersion}">
+                        <TextBlock x:Name="GameOptionsVersionLabel"
+                                   Classes="gameStatLabel"
+                                   Text="Version" />
+                        <TextBlock Classes="gameStatValue"
+                                   FontSize="15"
+                                   Text="{Binding VersionText}" />
+                      </StackPanel>
+                      <StackPanel Spacing="4">
+                        <TextBlock x:Name="GameOptionsInstalledLabel"
+                                   Classes="gameStatLabel"
+                                   Text="Installed" />
+                        <TextBlock Classes="gameStatValue"
+                                   FontSize="15"
+                                   Text="{Binding SizeText}" />
+                      </StackPanel>
+                      <StackPanel Spacing="4" IsVisible="{Binding HasTitleId}">
+                        <TextBlock x:Name="GameOptionsTitleIdLabel"
+                                   Classes="gameStatLabel"
+                                   Text="Title ID" />
+                        <TextBlock Classes="gameStatValue"
+                                   FontSize="15"
+                                   Text="{Binding TitleId}" />
+                      </StackPanel>
+                    </StackPanel>
+                  </Grid>
+                </Border>
+
+                <Grid Grid.Row="1"
+                      Margin="64,12,64,8"
+                      ColumnDefinitions="220,*"
+                      ColumnSpacing="54">
+                  <StackPanel Margin="0,62,0,0" Spacing="12">
+                    <Button x:Name="GameOptionsLaunchButton"
+                            Classes="gameOptionsLaunch">
+                      <TextBlock x:Name="GameOptionsLaunchLabel"
+                                 Classes="gameOptionsLaunchLabel"
+                                 VerticalAlignment="Center"
+                                 Text="Launch" />
+                    </Button>
+
+                    <Grid x:Name="GameOptionsNavHost"
+                          Background="Transparent"
+                          VerticalAlignment="Top">
+                      <Border x:Name="GameOptionsNavIndicator"
+                              Classes="optionsNavIndicator"
+                              IsHitTestVisible="False"
+                              VerticalAlignment="Top">
+                        <Border.RenderTransform>
+                          <TranslateTransform>
+                            <TranslateTransform.Transitions>
+                              <Transitions>
+                                <DoubleTransition Property="Y"
+                                                  Duration="0:0:0.12"
+                                                  Easing="CubicEaseOut" />
+                              </Transitions>
+                            </TranslateTransform.Transitions>
+                          </TranslateTransform>
+                        </Border.RenderTransform>
+                      </Border>
+
+                      <StackPanel>
+                        <Button x:Name="GameOptionsGeneralNav"
+                                Classes="optionsNav active">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="tune" />
+                            <TextBlock x:Name="GameOptionsGeneralNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="General" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="GameOptionsLoggingNav"
+                                Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="terminal" />
+                            <TextBlock x:Name="GameOptionsLoggingNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="Logging" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="GameOptionsEnvironmentNav"
+                                Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="deployed_code" />
+                            <TextBlock x:Name="GameOptionsEnvironmentNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="Environment" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="GameOptionsBackNav"
+                                Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="arrow_back" />
+                            <TextBlock x:Name="GameOptionsBackNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="Back" />
+                          </Grid>
+                        </Button>
+                      </StackPanel>
+                    </Grid>
+                  </StackPanel>
+
+                  <Grid Grid.Column="1"
+                        Margin="0,36,0,0">
+                    <ScrollViewer x:Name="GameOptionsGeneralPanel"
+                                  Classes="optionsSectionPanel active">
+                      <StackPanel Spacing="12">
+                        <local:SettingRow x:Name="GameStrictRow"
+                                          Classes="optionRow"
+                                          Label="Strict dynlib resolution"
+                                          Description="Fail the launch when an imported symbol cannot be resolved.">
+                          <ToggleSwitch x:Name="GameStrictToggle"
+                                        Classes="optionToggle" />
+                        </local:SettingRow>
+
+                        <WrapPanel Margin="0,12,0,0"
+                                   ItemWidth="260"
+                                   ItemHeight="54"
+                                   Orientation="Horizontal">
+                          <Button x:Name="GameOptionsOpenFolderButton"
+                                  Classes="gameAction"
+                                  Margin="0,0,10,10">
+                            <StackPanel Orientation="Horizontal" Spacing="11">
+                              <TextBlock Classes="materialSymbol" Text="folder_open" />
+                              <TextBlock x:Name="GameOptionsOpenFolderLabel"
+                                         VerticalAlignment="Center"
+                                         Text="Open game folder" />
+                            </StackPanel>
+                          </Button>
+                          <Button x:Name="GameOptionsCopyPathButton"
+                                  Classes="gameAction"
+                                  Margin="0,0,10,10">
+                            <StackPanel Orientation="Horizontal" Spacing="11">
+                              <TextBlock Classes="materialSymbol" Text="content_copy" />
+                              <TextBlock x:Name="GameOptionsCopyPathLabel"
+                                         VerticalAlignment="Center"
+                                         Text="Copy path" />
+                            </StackPanel>
+                          </Button>
+                          <Button x:Name="GameOptionsCopyTitleIdButton"
+                                  Classes="gameAction"
+                                  Margin="0,0,10,10">
+                            <StackPanel Orientation="Horizontal" Spacing="11">
+                              <TextBlock Classes="materialSymbol" Text="tag" />
+                              <TextBlock x:Name="GameOptionsCopyTitleIdLabel"
+                                         VerticalAlignment="Center"
+                                         Text="Copy title ID" />
+                            </StackPanel>
+                          </Button>
+                          <Button x:Name="GameOptionsRemoveButton"
+                                  Classes="gameAction dangerAction"
+                                  Margin="0,0,10,10">
+                            <StackPanel Orientation="Horizontal" Spacing="11">
+                              <TextBlock Classes="materialSymbol" Text="delete" />
+                              <TextBlock x:Name="GameOptionsRemoveLabel"
+                                         VerticalAlignment="Center"
+                                         Text="Remove from library" />
+                            </StackPanel>
+                          </Button>
+                        </WrapPanel>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="GameOptionsLoggingPanel"
+                                  Classes="optionsSectionPanel">
+                      <StackPanel Spacing="12">
+                        <local:SettingRow x:Name="GameLogLevelRow"
+                                          Classes="optionRow"
+                                          Label="Log level"
+                                          Description="Verbosity of the emulator console output.">
+                          <settingsControls:AnimatedComboBox x:Name="GameLogLevelBox"
+                                                            Classes="optionValue"
+                                                            Width="170" />
+                        </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameTraceRow"
+                                          Classes="optionRow"
+                                          Label="Import trace limit"
+                                          Description="Trace the first N imports per module.">
+                          <settingsControls:SplitNumericUpDown x:Name="GameTraceBox"
+                                                              Classes="optionValue"
+                                                              Width="170"
+                                                              Minimum="0"
+                                                              Maximum="4096"
+                                                              Increment="16"
+                                                              FormatString="0" />
+                        </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameLogToFileRow"
+                                          Classes="optionRow"
+                                          Label="Log to file"
+                                          Description="Mirror emulator output to a log file.">
+                          <ToggleSwitch x:Name="GameLogToFileToggle"
+                                        Classes="optionToggle" />
+                        </local:SettingRow>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="GameOptionsEnvironmentPanel"
+                                  Classes="optionsSectionPanel">
+                      <StackPanel Spacing="12">
+                        <StackPanel x:Name="GameEnvironmentList"
+                                    Spacing="8">
+                          <local:SettingRow x:Name="GameEnvBthidRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_BTHID_UNAVAILABLE">
+                            <ToggleSwitch x:Name="GameEnvBthidToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvLoopGuardRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD">
+                            <ToggleSwitch x:Name="GameEnvLoopGuardToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvWritableApp0Row"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_WRITABLE_APP0">
+                            <ToggleSwitch x:Name="GameEnvWritableApp0Toggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvVkValidationRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_VK_VALIDATION">
+                            <ToggleSwitch x:Name="GameEnvVkValidationToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvDumpSpirvRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_DUMP_SPIRV">
+                            <ToggleSwitch x:Name="GameEnvDumpSpirvToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvLogDirectMemoryRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_LOG_DIRECT_MEMORY">
+                            <ToggleSwitch x:Name="GameEnvLogDirectMemoryToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvLogIoRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_LOG_IO">
+                            <ToggleSwitch x:Name="GameEnvLogIoToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                          <local:SettingRow x:Name="GameEnvLogNpRow"
+                                            Classes="optionRow"
+                                            Label="SHARPEMU_LOG_NP">
+                            <ToggleSwitch x:Name="GameEnvLogNpToggle"
+                                          Classes="optionToggle" />
+                          </local:SettingRow>
+                        </StackPanel>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                  </Grid>
+                </Grid>
+
+              </Grid>
+            </Border>
+          </Grid>
+        </Grid>
+
+          <Grid x:Name="OptionsPage" Classes="appPage" RowDefinitions="124,*">
+            <Grid Grid.Row="1"
+                  Margin="64,0,64,30"
+                  Classes="pageMotionBody"
+                  ColumnDefinitions="244,*"
+                  ColumnSpacing="42">
+                <Border Classes="optionsNavSurface">
+                  <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                                VerticalScrollBarVisibility="Hidden">
+                    <Grid x:Name="OptionsNavHost">
+                      <Border x:Name="OptionsNavIndicator"
+                              Classes="optionsNavIndicator"
+                              Height="54"
+                              VerticalAlignment="Top"
+                              IsHitTestVisible="False">
+                        <Border.RenderTransform>
+                          <TranslateTransform>
+                            <TranslateTransform.Transitions>
+                              <Transitions>
+                                <DoubleTransition Property="Y"
+                                                  Duration="0:0:0.16"
+                                                  Easing="CubicEaseOut" />
+                              </Transitions>
+                            </TranslateTransform.Transitions>
+                          </TranslateTransform>
+                        </Border.RenderTransform>
+                      </Border>
+                      <StackPanel>
+                        <Button x:Name="OptionsGeneralNav" Classes="optionsNav active">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="tune" />
+                            <TextBlock x:Name="OptionsGeneralNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="General" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="OptionsLoggingNav" Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="terminal" />
+                            <TextBlock x:Name="OptionsLoggingNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="Logging" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="OptionsLauncherNav" Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="rocket_launch" />
+                            <TextBlock x:Name="OptionsLauncherNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="Launcher" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="OptionsRenderingNav" Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="monitor" />
+                            <TextBlock x:Name="OptionsRenderingNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="Rendering" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="OptionsEnvironmentNav" Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="deployed_code" />
+                            <TextBlock x:Name="OptionsEnvironmentNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="Environment" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="OptionsAboutNav" Classes="optionsNav">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="info" />
+                            <TextBlock x:Name="OptionsAboutNavLabel"
+                                       Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="About" />
+                          </Grid>
+                        </Button>
+                      </StackPanel>
+                    </Grid>
+                  </ScrollViewer>
+                </Border>
+
+                <Border x:Name="OptionsContentSurface"
+                        Grid.Column="1"
+                        Classes="optionsContentSurface">
+                  <Grid>
+                    <ScrollViewer x:Name="OptionsGeneralPanel"
+                                  Classes="optionsSectionPanel active">
+                      <StackPanel>
+                        <Border Classes="optionsGroup">
+                          <StackPanel Spacing="8">
+                            <local:SettingRow x:Name="CpuEngineRow"
+                                              Classes="optionRow"
+                                              Label="CPU engine"
+                                              Description="Execution engine used to run game code.">
+                              <settingsControls:AnimatedComboBox x:Name="CpuEngineBox"
+                                                                 Classes="optionValue"
+                                                                 Width="190" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="StrictRow"
+                                              Classes="optionRow"
+                                              Label="Strict dynlib resolution"
+                                              Description="Fail the launch when an imported symbol cannot be resolved.">
+                              <ToggleSwitch x:Name="StrictToggle"
+                                            Classes="optionToggle" />
+                            </local:SettingRow>
+                          </StackPanel>
+                        </Border>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="OptionsLoggingPanel"
+                                  Classes="optionsSectionPanel">
+                      <StackPanel>
+                        <Border Classes="optionsGroup">
+                          <StackPanel Spacing="8">
+                            <local:SettingRow x:Name="LogLevelRow"
+                                              Classes="optionRow"
+                                              Label="Log level"
+                                              Description="Verbosity of the emulator console output.">
+                              <settingsControls:AnimatedComboBox x:Name="LogLevelBox"
+                                                                 Classes="optionValue"
+                                                                 Width="190" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="TraceImportsRow"
+                                              Classes="optionRow"
+                                              Label="Import trace limit"
+                                              Description="Trace the first N imports per module (0 = off).">
+                              <settingsControls:SplitNumericUpDown x:Name="TraceImportsBox"
+                                                                  Classes="optionValue"
+                                                                  Width="190"
+                                                                  Minimum="0"
+                                                                  Maximum="4096"
+                                                                  Increment="16"
+                                                                  Value="0"
+                                                                  FormatString="0" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="LogToFileRow"
+                                              Classes="optionRow"
+                                              Label="Log to file"
+                                              Description="Mirror emulator output to a log file.">
+                              <ToggleSwitch x:Name="LogToFileToggle"
+                                            Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="LogFilePathRow"
+                                              Classes="optionRow"
+                                              Label="Log file path"
+                                              Description="No custom path">
+                              <Button x:Name="SelectLogFilePathButton"
+                                      Classes="optionAction">
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="8"
+                                            VerticalAlignment="Center">
+                                  <TextBlock Classes="materialSymbol compact"
+                                             Text="description" />
+                                  <TextBlock x:Name="SelectLogFilePathButtonLabel"
+                                             Text="Select…"
+                                             VerticalAlignment="Center" />
+                                </StackPanel>
+                              </Button>
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="OverrideLogFileRow"
+                                              Classes="optionRow"
+                                              Label="Override log file"
+                                              Description="Use the exact file path instead of appending title ID and timestamp.">
+                              <ToggleSwitch x:Name="OverrideLogFileToggle"
+                                            Classes="optionToggle" />
+                            </local:SettingRow>
+                          </StackPanel>
+                        </Border>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="OptionsLauncherPanel"
+                                  Classes="optionsSectionPanel">
+                      <StackPanel>
+                        <Border Classes="optionsGroup">
+                          <StackPanel Spacing="8">
+                            <local:SettingRow x:Name="LanguageRow"
+                                              Classes="optionRow"
+                                              Label="Emulator language"
+                                              Description="Language used throughout the launcher. Applies immediately.">
+                              <settingsControls:AnimatedComboBox x:Name="LanguageBox"
+                                                                 Classes="optionValue languageValue"
+                                                                 Width="210">
+                                <settingsControls:AnimatedComboBox.ItemTemplate>
+                                  <DataTemplate x:DataType="local:Localization+LanguageInfo">
+                                    <Grid ColumnDefinitions="26,*"
+                                          ColumnSpacing="10">
+                                      <Border Width="24"
+                                              Height="16"
+                                              CornerRadius="3"
+                                              ClipToBounds="True"
+                                              VerticalAlignment="Center">
+                                        <svg:Svg Path="{Binding FlagAssetPath}"
+                                                 Stretch="UniformToFill"
+                                                 OpacityMask="White" />
+                                      </Border>
+                                      <TextBlock Grid.Column="1"
+                                                 Text="{Binding NativeName}"
+                                                 TextTrimming="CharacterEllipsis"
+                                                 VerticalAlignment="Center" />
+                                    </Grid>
+                                  </DataTemplate>
+                                </settingsControls:AnimatedComboBox.ItemTemplate>
+                              </settingsControls:AnimatedComboBox>
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="TitleMusicRow"
+                                              Classes="optionRow"
+                                              Label="Title music"
+                                              Description="Loop the selected game's preview music in the library.">
+                              <ToggleSwitch x:Name="TitleMusicToggle"
+                                            Classes="optionToggle"
+                                            IsChecked="True" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="DiscordRow"
+                                              Classes="optionRow"
+                                              Label="Discord presence"
+                                              Description="Show the running game on your Discord profile.">
+                              <ToggleSwitch x:Name="DiscordToggle"
+                                            Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="AutoUpdateRow"
+                                              Classes="optionRow"
+                                              Label="Check for updates on startup"
+                                              Description="Checks GitHub without delaying startup.">
+                              <ToggleSwitch x:Name="AutoUpdateToggle"
+                                            Classes="optionToggle"
+                                            IsChecked="True" />
+                            </local:SettingRow>
+                          </StackPanel>
+                        </Border>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="OptionsRenderingPanel"
+                                  Classes="optionsSectionPanel">
+                      <StackPanel>
+                        <Border Classes="optionsGroup">
+                          <StackPanel>
+                            <local:SettingRow x:Name="RenderResolutionRow"
+                                              Classes="optionRow"
+                                              Label="Internal resolution"
+                                              Description="Render below native resolution and upscale on present. Takes effect on next launch.">
+                              <settingsControls:AnimatedComboBox x:Name="RenderResolutionBox"
+                                                                 Classes="optionValue"
+                                                                 Width="190" />
+                            </local:SettingRow>
+                          </StackPanel>
+                        </Border>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="OptionsEnvironmentPanel"
+                                  Classes="optionsSectionPanel">
+                      <StackPanel>
+                        <Border Classes="optionsGroup">
+                          <StackPanel Spacing="8">
+                            <local:SettingRow x:Name="EnvBthidRow"
+                                              Classes="optionRow"
+                                              Label="SHARPEMU_BTHID_UNAVAILABLE">
+                              <ToggleSwitch x:Name="EnvBthidToggle" Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="EnvLoopGuardRow"
+                                              Classes="optionRow"
+                                              Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD">
+                              <ToggleSwitch x:Name="EnvLoopGuardToggle" Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="EnvWritableApp0Row"
+                                              Classes="optionRow"
+                                              Label="SHARPEMU_WRITABLE_APP0">
+                              <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="EnvVkValidationRow"
+                                              Classes="optionRow"
+                                              Label="SHARPEMU_VK_VALIDATION">
+                              <ToggleSwitch x:Name="EnvVkValidationToggle" Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="EnvDumpSpirvRow"
+                                              Classes="optionRow"
+                                              Label="SHARPEMU_DUMP_SPIRV">
+                              <ToggleSwitch x:Name="EnvDumpSpirvToggle" Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="EnvLogDirectMemoryRow"
+                                              Classes="optionRow"
+                                              Label="SHARPEMU_LOG_DIRECT_MEMORY">
+                              <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="EnvLogIoRow"
+                                              Classes="optionRow"
+                                              Label="SHARPEMU_LOG_IO">
+                              <ToggleSwitch x:Name="EnvLogIoToggle" Classes="optionToggle" />
+                            </local:SettingRow>
+                            <local:SettingRow x:Name="EnvLogNpRow"
+                                              Classes="optionRow"
+                                              Label="SHARPEMU_LOG_NP">
+                              <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" />
+                            </local:SettingRow>
+                          </StackPanel>
+                        </Border>
+                      </StackPanel>
+                    </ScrollViewer>
+
+                    <ScrollViewer x:Name="OptionsAboutPanel"
+                                  Classes="optionsSectionPanel">
+                      <StackPanel>
+                        <StackPanel HorizontalAlignment="Center"
+                                    Margin="0,12,0,34"
+                                    Spacing="7">
+                          <Border Width="140"
+                                  Height="140"
+                                  CornerRadius="15"
+                                  ClipToBounds="True"
+                                  HorizontalAlignment="Center">
+                            <Image Source="avares://SharpEmu.GUI/Assets/logo.png"
+                                   Stretch="UniformToFill" />
+                          </Border>
+                          <TextBlock Text="SharpEmu"
+                                     FontSize="36"
+                                     FontWeight="SemiBold"
+                                     LetterSpacing="-0.6"
+                                     HorizontalAlignment="Center" />
+                          <TextBlock x:Name="AboutTagline"
+                                     Text="An experimental PlayStation 5 emulator for Windows, Linux and macOS"
+                                     MaxWidth="620"
+                                     FontSize="13"
+                                     FontWeight="Normal"
+                                     Foreground="{StaticResource SettingsDescriptionBrush}"
+                                     TextAlignment="Center"
+                                     TextWrapping="Wrap"
+                                     HorizontalAlignment="Center" />
+                        </StackPanel>
+                        <Border Classes="optionsGroup">
+                          <StackPanel Spacing="8">
+                            <Border Classes="optionsInfoRow">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
+                                <StackPanel VerticalAlignment="Center">
+                                  <TextBlock x:Name="UpdateLabel" Text="Updates" FontSize="14" FontWeight="Medium" />
+                                  <TextBlock x:Name="UpdateStatusText"
+                                             Text="Current build: dev"
+                                             FontSize="11"
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button x:Name="UpdateButton"
+                                        Grid.Column="1"
+                                        Classes="optionAction updateAction idle">
+                                  <Grid>
+                                    <Grid Classes="updateActionState updateActionIdle">
+                                      <TextBlock x:Name="UpdateCheckLabel"
+                                                 Classes="updateActionVisual"
+                                                 Text="Check for updates"
+                                                 VerticalAlignment="Center" />
+                                    </Grid>
+                                    <Grid Classes="updateActionState updateActionChecking">
+                                      <StackPanel Orientation="Horizontal"
+                                                  Spacing="8"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center">
+                                        <TextBlock Classes="materialSymbol compact updateActionVisual updateSpinner"
+                                                   Text="progress_activity">
+                                          <TextBlock.RenderTransform>
+                                            <RotateTransform Angle="0" />
+                                          </TextBlock.RenderTransform>
+                                        </TextBlock>
+                                        <TextBlock x:Name="UpdateCheckingLabel"
+                                                   Classes="updateActionVisual"
+                                                   Text="Checking…"
+                                                   VerticalAlignment="Center" />
+                                      </StackPanel>
+                                    </Grid>
+                                    <Grid Classes="updateActionState updateActionAvailable">
+                                      <StackPanel Orientation="Horizontal"
+                                                  Spacing="8"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center">
+                                        <TextBlock Classes="materialSymbol compact updateActionVisual"
+                                                   Text="system_update_alt" />
+                                        <TextBlock x:Name="UpdateInstallLabel"
+                                                   Classes="updateActionVisual"
+                                                   Text="Install update"
+                                                   VerticalAlignment="Center" />
+                                      </StackPanel>
+                                    </Grid>
+                                  </Grid>
+                                </Button>
+                              </Grid>
+                            </Border>
+                            <Border Classes="optionsInfoRow">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
+                                <StackPanel VerticalAlignment="Center">
+                                  <TextBlock x:Name="LatestCommitLabel" Text="Latest commit" FontSize="14" FontWeight="Medium" />
+                                  <TextBlock x:Name="LatestCommitDescription"
+                                             Text="Latest commit on the main branch"
+                                             FontSize="11"
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button x:Name="LatestCommitButton"
+                                        Grid.Column="1"
+                                        Classes="aboutLinkAction"
+                                        IsEnabled="False"
+                                        VerticalAlignment="Center">
+                                  <StackPanel Orientation="Horizontal"
+                                              Spacing="8"
+                                              VerticalAlignment="Center">
+                                    <TextBlock x:Name="LatestCommitHashText"
+                                               Text="Loading…"
+                                               FontFamily="{StaticResource GoogleSans}"
+                                               FontSize="13"
+                                               FontWeight="Medium"
+                                               VerticalAlignment="Center" />
+                                    <TextBlock Classes="materialSymbol compact"
+                                               Text="fork_right" />
+                                  </StackPanel>
+                                </Button>
+                              </Grid>
+                            </Border>
+                            <Border Classes="optionsInfoRow">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
+                                <StackPanel VerticalAlignment="Center">
+                                  <TextBlock x:Name="GithubLabel" Text="GitHub" FontSize="14" FontWeight="Medium" />
+                                  <TextBlock x:Name="GithubDesc"
+                                             Text="Source code, issues and project development."
+                                             FontSize="11"
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button x:Name="GithubButton"
+                                        Grid.Column="1"
+                                        Classes="aboutLinkAction"
+                                        VerticalAlignment="Center">
+                                  <StackPanel Orientation="Horizontal"
+                                              Spacing="8"
+                                              VerticalAlignment="Center">
+                                    <TextBlock x:Name="GithubButtonLabel"
+                                               Text="Contribute on GitHub!"
+                                               FontSize="13"
+                                               FontWeight="Medium"
+                                               VerticalAlignment="Center" />
+                                    <svg:Svg Classes="aboutLinkBrandIcon"
+                                             Path="avares://SharpEmu.GUI/Assets/Icons/GitHub.svg"
+                                             Width="18"
+                                             Height="18" />
+                                  </StackPanel>
+                                </Button>
+                              </Grid>
+                            </Border>
+                            <Border Classes="optionsInfoRow">
+                              <Grid ColumnDefinitions="*,Auto"
+                                    ColumnSpacing="18">
+                                <StackPanel VerticalAlignment="Center">
+                                  <TextBlock x:Name="DiscordServerLabel" Text="Discord" FontSize="14" FontWeight="Medium" />
+                                  <TextBlock x:Name="DiscordServerDesc"
+                                             Text="Join the community, get support and follow development."
+                                             FontSize="11"
+                                             FontWeight="Normal"
+                                             Foreground="{StaticResource SettingsDescriptionBrush}"
+                                             TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button x:Name="DiscordButton"
+                                        Grid.Column="1"
+                                        Classes="aboutLinkAction"
+                                        VerticalAlignment="Center">
+                                  <StackPanel Orientation="Horizontal"
+                                              Spacing="8"
+                                              VerticalAlignment="Center">
+                                    <TextBlock x:Name="DiscordButtonLabel"
+                                               Text="Join our Discord!"
+                                               FontSize="13"
+                                               FontWeight="Medium"
+                                               VerticalAlignment="Center" />
+                                    <svg:Svg Classes="aboutLinkBrandIcon"
+                                             Path="avares://SharpEmu.GUI/Assets/Icons/Discord.svg"
+                                             Width="18"
+                                             Height="18" />
+                                  </StackPanel>
+                                </Button>
+                              </Grid>
+                            </Border>
+                          </StackPanel>
+                        </Border>
+                      </StackPanel>
+                    </ScrollViewer>
+                  </Grid>
+                </Border>
+              </Grid>
+          </Grid>
+
+        <Grid x:Name="ConsolePanel" Classes="appPage" RowDefinitions="124,*">
+          <Border Grid.Row="1"
+                  Margin="64,0,64,30"
+                  Classes="pageMotionBody"
+                  Background="#C7101010"
+                  BorderBrush="#12FFFFFF"
+                  BorderThickness="1"
+                  CornerRadius="20"
+                  ClipToBounds="True">
+            <Grid RowDefinitions="Auto,*">
+              <Grid Margin="18,14"
+                    ColumnDefinitions="Auto,Auto,*,Auto"
+                    ColumnSpacing="10">
+                <TextBox x:Name="ConsoleSearchBox"
+                         Grid.Column="0"
+                         Classes="consoleSearch"
+                         Width="288"
+                         HorizontalAlignment="Left"
+                         FontSize="12"
+                         PlaceholderText="Search…">
+                  <TextBox.InnerLeftContent>
+                    <TextBlock Classes="materialSymbol compact consoleSearchIcon"
+                               Text="search" />
+                  </TextBox.InnerLeftContent>
+                </TextBox>
+
+                <CheckBox x:Name="AutoScrollCheck"
+                          Grid.Column="1"
+                          Classes="consoleAutoScroll"
+                          Content="Auto-scroll"
+                          IsChecked="True"
+                          FontSize="12"
+                          VerticalAlignment="Center" />
+
+                <StackPanel Grid.Column="3"
+                            Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Spacing="10">
+                  <Button x:Name="DetachConsoleButton"
+                          Classes="consoleAction">
+                    <StackPanel Orientation="Horizontal"
+                                VerticalAlignment="Center"
+                                Spacing="8">
+                      <TextBlock Classes="materialSymbol compact"
+                                 Text="splitscreen" />
+                      <TextBlock x:Name="DetachConsoleButtonLabel"
+                                 Text="Split"
+                                 VerticalAlignment="Center" />
+                    </StackPanel>
+                  </Button>
+                  <Button x:Name="CopyLogButton"
+                          Classes="consoleAction">
+                    <StackPanel Orientation="Horizontal"
+                                VerticalAlignment="Center"
+                                Spacing="8">
+                      <TextBlock Classes="materialSymbol compact"
+                                 Text="content_copy" />
+                      <TextBlock x:Name="CopyLogButtonLabel"
+                                 Text="Copy"
+                                 VerticalAlignment="Center" />
+                    </StackPanel>
+                  </Button>
+                  <Button x:Name="ClearLogButton"
+                          Classes="consoleAction">
+                    <StackPanel Orientation="Horizontal"
+                                VerticalAlignment="Center"
+                                Spacing="8">
+                      <TextBlock Classes="materialSymbol compact"
+                                 Text="delete_sweep" />
+                      <TextBlock x:Name="ClearLogButtonLabel"
+                                 Text="Clear"
+                                 VerticalAlignment="Center" />
+                    </StackPanel>
+                  </Button>
+                </StackPanel>
+              </Grid>
+              <ListBox x:Name="ConsoleList"
+                       Grid.Row="1"
+                       Classes="console"
+                       BorderBrush="#12FFFFFF"
+                       BorderThickness="0,1,0,0">
+                <ListBox.ItemTemplate>
+                  <DataTemplate x:DataType="local:LogLine">
+                    <TextBlock Text="{Binding Text}"
+                               Foreground="{Binding Brush}"
+                               TextWrapping="NoWrap" />
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+            </Grid>
+          </Border>
+        </Grid>
+        </navigationControls:PersistentPageHost>
+      </Grid>
+
+      <!-- The native surface remains parked offscreen until its first frame.
+           This compact indicator is the only foreground shown during that wait. -->
+      <Grid x:Name="LaunchProgressHost"
+            Width="420"
+            Margin="0,0,0,48"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Bottom"
+            Opacity="0"
+            IsHitTestVisible="False"
+            ZIndex="10">
+        <Grid.Transitions>
+          <Transitions>
+            <DoubleTransition Property="Opacity"
+                              Duration="0:0:0.22"
+                              Easing="CubicEaseOut" />
+          </Transitions>
+        </Grid.Transitions>
+        <StackPanel Spacing="12">
+          <TextBlock x:Name="LaunchLoadingLabel"
+                     Text="Loading…"
+                     FontSize="13"
+                     FontWeight="Medium"
+                     Foreground="White"
+                     HorizontalAlignment="Center" />
+          <ProgressBar Height="4"
+                       Background="#24FFFFFF"
+                       Foreground="White"
+                       IsIndeterminate="True" />
+        </StackPanel>
+      </Grid>
+
+      <!-- The native child window cannot participate in Avalonia opacity.
+           Keep it hidden while this bridge fades the backdrop fully to black,
+           then reveal the already-rendered surface without a background flash. -->
+      <Border x:Name="LaunchBlackout"
+              Background="Black"
+              Opacity="0"
+              IsHitTestVisible="False"
+              ZIndex="11">
+        <Border.Transitions>
+          <Transitions>
+            <DoubleTransition Property="Opacity"
+                              Duration="0:0:0.34"
+                              Easing="CubicEaseInOut" />
+          </Transitions>
+        </Border.Transitions>
+      </Border>
+
+      <!-- Native game surface must remain above the Avalonia shell. -->
+      <Border x:Name="GameView"
+              IsVisible="False"
+              Background="#000000"
+              ClipToBounds="True">
+        <Grid x:Name="GameSurfaceContainer" />
+      </Border>
+    </Grid>
+
+    <!-- 92 px top bar: brand, centered navigation, utility cluster. -->
+    <Grid x:Name="TitleBar" Grid.Row="0">
+      <Grid.Transitions>
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.2"
+                            Easing="CubicEaseOut" />
+        </Transitions>
+      </Grid.Transitions>
+      <Border>
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+            <GradientStop Offset="0" Color="#94090909" />
+            <GradientStop Offset="1" Color="#00090909" />
+          </LinearGradientBrush>
+        </Border.Background>
+      </Border>
+      <Grid x:Name="ContentToolbar"
+            Margin="46,0"
+            ColumnDefinitions="*,Auto,*">
+        <StackPanel Orientation="Horizontal"
+                    Spacing="11"
+                    VerticalAlignment="Center">
+          <svg:Svg Path="avares://SharpEmu.GUI/Assets/logo.svg"
+                   Width="46"
+                   Height="46"
+                   Stretch="Uniform"
+                   OpacityMask="White" />
+          <TextBlock x:Name="VersionText"
+                     Text="v0.0.1"
+                     FontSize="10"
+                     Foreground="#70FFFFFF"
+                     VerticalAlignment="Center"
+                     Margin="4,1,0,0" />
+        </StackPanel>
+
+        <StackPanel Grid.Column="1"
+                    Orientation="Horizontal"
+                    Spacing="10"
+                    VerticalAlignment="Center">
+          <Border Classes="padHint">
+            <TextBlock Text="L1"
+                       FontSize="9"
+                       FontWeight="Bold"
+                       Foreground="#111111"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+          </Border>
+          <Grid Width="396"
+                Height="42"
+                ColumnDefinitions="132,132,132">
+            <Border x:Name="TopNavigationIndicator"
+                    Grid.ColumnSpan="3"
+                    Width="132"
+                    Height="42"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center"
+                    Background="#24FFFFFF"
+                    CornerRadius="999"
+                    IsHitTestVisible="False">
+              <Border.RenderTransform>
+                <TranslateTransform X="{Binding NavigationOffset}">
+                  <TranslateTransform.Transitions>
+                    <Transitions>
+                      <DoubleTransition Property="X"
+                                        Duration="0:0:0.2"
+                                        Easing="CubicEaseOut" />
+                    </Transitions>
+                  </TranslateTransform.Transitions>
+                </TranslateTransform>
+              </Border.RenderTransform>
+              <Border.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity"
+                                    Duration="0:0:0.14"
+                                    Easing="CubicEaseOut" />
+                </Transitions>
+              </Border.Transitions>
+            </Border>
+            <Button x:Name="LibraryTabButton"
+                    Grid.Column="0"
+                    Classes="segment"
+                    Classes.active="{Binding IsLibraryActive}"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="{x:Static navigation:ShellPage.Library}"
+                    Content="{Binding [Page.Library], Source={x:Static loc:Localization.Instance}}" />
+            <Button x:Name="OptionsTabButton"
+                    Grid.Column="1"
+                    Classes="segment"
+                    Classes.active="{Binding IsOptionsActive}"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="{x:Static navigation:ShellPage.Options}"
+                    Content="{Binding [Page.Options], Source={x:Static loc:Localization.Instance}}" />
+            <Button x:Name="ConsoleTabButton"
+                    Grid.Column="2"
+                    Classes="segment"
+                    Classes.active="{Binding IsConsoleActive}"
+                    Command="{Binding NavigateCommand}"
+                    CommandParameter="{x:Static navigation:ShellPage.Console}"
+                    Content="{Binding [Page.Console], Source={x:Static loc:Localization.Instance}}" />
+          </Grid>
+          <Border Classes="padHint">
+            <TextBlock Text="R1"
+                       FontSize="9"
+                       FontWeight="Bold"
+                       Foreground="#111111"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+          </Border>
+        </StackPanel>
+
+        <StackPanel x:Name="LibraryToolbar"
+                    Grid.Column="2"
+                    Orientation="Horizontal"
+                    Spacing="6"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center">
+          <TextBox x:Name="SearchBox"
+                   Width="220"
+                   Height="40"
+                   IsVisible="False"
+                   PlaceholderText="Search library…"
+                   FontSize="12"
+                   CornerRadius="20"
+                   Padding="15,0" />
+          <Button x:Name="MinimizeButton"
+                  Classes="icon windowChrome"
+                  ToolTip.Tip="Minimize">
+            <TextBlock Classes="materialSymbol compact" Text="minimize" />
+          </Button>
+          <Button x:Name="MaximizeButton"
+                  Classes="icon windowChrome"
+                  ToolTip.Tip="Maximize">
+            <TextBlock Classes="materialSymbol compact" Text="crop_square" />
+          </Button>
+          <Button x:Name="CloseButton"
+                  Classes="icon windowChrome"
+                  ToolTip.Tip="Close">
+            <TextBlock Classes="materialSymbol windowCloseGlyph" Text="close" />
+          </Button>
+        </StackPanel>
+      </Grid>
+    </Grid>
+
+    <!-- Existing status channels stay available to the launcher code but do
+         not add a second strip to the WebUI composition. -->
+    <Grid x:Name="StatusBar" Grid.Row="2" Height="0" IsVisible="False">
+      <TextBlock x:Name="EmulatorPathText" />
+      <TextBlock x:Name="StatusBarRight" />
+      <TextBlock x:Name="StatusText" />
+    </Grid>
+
+    <!-- A NativeControlHost always renders above Avalonia content. In a
+         windowed session GameView leaves this strip uncovered so the
+         frameless window still has a reliable native-window drag target. -->
+    <Border x:Name="GameWindowDragRegion"
+            Grid.RowSpan="3"
+            ZIndex="999"
+            Height="32"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Top"
+            Background="Black"
+            IsVisible="False"
+            PointerPressed="OnTitleBarPointerPressed" />
+
+    <!-- Portable resize hit targets for the frameless desktop window. -->
+    <Border Tag="North"
+              Grid.RowSpan="3"
+              ZIndex="1000"
+              Height="6"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="South"
+              Grid.RowSpan="3"
+              ZIndex="1000"
+              Height="6"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="West"
+              Grid.RowSpan="3"
+              ZIndex="1000"
+              Width="6"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Stretch"
+              Background="#01000000"
+              Cursor="LeftSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="East"
+              Grid.RowSpan="3"
+              ZIndex="1000"
+              Width="6"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Background="#01000000"
+              Cursor="RightSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="NorthWest"
+              Grid.RowSpan="3"
+              ZIndex="1001"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopLeftCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="NorthEast"
+              Grid.RowSpan="3"
+              ZIndex="1001"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopRightCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="SouthWest"
+              Grid.RowSpan="3"
+              ZIndex="1001"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomLeftCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    <Border Tag="SouthEast"
+              Grid.RowSpan="3"
+              ZIndex="1001"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomRightCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+
+  </Grid>
+</Window>

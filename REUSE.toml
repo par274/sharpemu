@@ -8,6 +8,7 @@ path = [
     "**/packages.lock.json",
     "scripts/ps5_names.txt",
     "src/SharpEmu.GUI/Languages/**",
+    "src/SharpEmu.GUI/Assets/**",
     "src/SharpEmu.ShaderCompiler.Metal/Templates/**",
     "tests/SharpEmu.ShaderCompiler.Metal.Tests/Goldens/**",
     "_logs/**",
@@ -18,6 +19,39 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "SharpEmu Emulator Project"
 SPDX-License-Identifier = "GPL-2.0-or-later"
+
+[[annotations]]
+path = "src/SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-*.ttf"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Google LLC"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "src/SharpEmu.GUI/Assets/Fonts/GoogleSans-*.ttf"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2025 The Google Sans Project Authors (github.com/googlefonts/googlesans)"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "src/SharpEmu.GUI/Assets/Fonts/JetBrainsMono-*.ttf"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = [
+    "src/SharpEmu.GUI/Assets/Fonts/NotoSansJP-*.ttf",
+    "src/SharpEmu.GUI/Assets/Fonts/NotoSansKR-*.ttf"
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "src/SharpEmu.GUI/Assets/Flags/*.svg"
+precedence = "override"
+SPDX-FileCopyrightText = "2020 @catamphetamine <purecatamphetamine@gmail.com>"
+SPDX-License-Identifier = "MIT"
 
 [[annotations]]
 path = "src/SharpEmu.GUI/Atrac9/**"

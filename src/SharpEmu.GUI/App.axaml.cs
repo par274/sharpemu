@@ -18,6 +18,8 @@ public partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            // MainWindow resolves its shell view-model and services from the DI
+            // container built in GuiLauncher.
             desktop.MainWindow = new MainWindow();
         }
 

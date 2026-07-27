@@ -1,0 +1,58 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Per-game options launch button and game action rows.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Style Selector="Button.gameOptionsLaunch">
+      <Setter Property="Width" Value="220" />
+      <Setter Property="Height" Value="46" />
+      <Setter Property="Padding" Value="20,0" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Background" Value="White" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Foreground" Value="#111111" />
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.gameOptionsLaunch /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="BoxShadow" Value="0 0 0 0 Transparent" />
+    </Style>
+    <Style Selector="TextBlock.gameOptionsLaunchLabel">
+      <Setter Property="FontSize" Value="15" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.gameOptionsLaunch:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#EAF3FF" />
+      <Setter Property="Foreground" Value="#111111" />
+    </Style>
+
+    <Style Selector="Button.gameAction">
+      <Setter Property="Width" Value="250" />
+      <Setter Property="Height" Value="48" />
+      <Setter Property="Padding" Value="16,0" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Background" Value="#0FFFFFFF" />
+      <Setter Property="BorderBrush" Value="#14FFFFFF" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Button.gameAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#1AFFFFFF" />
+      <Setter Property="BorderBrush" Value="#28FFFFFF" />
+    </Style>
+    <Style Selector="Button.gameAction.dangerAction">
+      <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+      <Setter Property="BorderBrush" Value="#48FF646E" />
+    </Style>
+    <Style Selector="Button.gameAction.dangerAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#1FFF646E" />
+      <Setter Property="BorderBrush" Value="{StaticResource DangerBrush}" />
+    </Style>
+</Styles>

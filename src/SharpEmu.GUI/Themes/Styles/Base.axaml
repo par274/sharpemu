@@ -1,0 +1,56 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Window defaults, Material Symbols glyphs, game stat text and backdrop layers.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:SharpEmu.GUI">
+    <Style Selector="Window">
+      <Setter Property="FontFamily"
+              Value="{Binding LauncherFontFamily,
+                              Source={x:Static local:Localization.Instance},
+                              x:CompileBindings=False}" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Background" Value="{StaticResource BgBrush}" />
+    </Style>
+
+    <Style Selector="Button">
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="TextBlock.materialSymbol">
+      <Setter Property="FontFamily" Value="{StaticResource MaterialSymbolsRounded}" />
+      <Setter Property="FontFeatures" Value="+liga" />
+      <Setter Property="FontSize" Value="18" />
+      <Setter Property="FontWeight" Value="Normal" />
+      <Setter Property="LineHeight" Value="20" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="TextAlignment" Value="Center" />
+    </Style>
+    <Style Selector="TextBlock.materialSymbol.compact">
+      <Setter Property="FontSize" Value="16" />
+      <Setter Property="LineHeight" Value="18" />
+    </Style>
+
+    <Style Selector="TextBlock.gameStatLabel">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="Normal" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Opacity" Value="0.75" />
+    </Style>
+    <Style Selector="TextBlock.gameStatValue">
+      <Setter Property="FontSize" Value="18" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+
+    <Style Selector="Grid.backdropLayer">
+      <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    </Style>
+    <Style Selector="Panel.carouselHost">
+      <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+</Styles>

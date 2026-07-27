@@ -1,0 +1,171 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Library carousel: tile grid, game cards, cover clipping and the add-folder tile.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Style Selector="ListBox.tileGrid">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Hidden" />
+      <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem">
+      <Setter Property="Width" Value="156" />
+      <Setter Property="Height" Value="206" />
+      <Setter Property="Padding" Value="4" />
+      <Setter Property="Margin" Value="0,10,12,20" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="2" />
+      <Setter Property="Opacity" Value="0.68" />
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="translateY(0px)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.11"
+                            Easing="QuadraticEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.16"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover,
+                     ListBox.tileGrid ListBoxItem:selected">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateY(-7px) scale(1.045)" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem /template/ ContentPresenter#PART_ContentPresenter,
+                     ListBox.tileGrid ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="White" />
+    </Style>
+
+    <Style Selector="Border.coverShadow">
+      <Setter Property="BoxShadow" Value="0 12 28 0 #61000000" />
+    </Style>
+    <Style Selector="Border.libraryGameCard">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="translateY(8px) scale(0.985)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.2"
+                            Easing="CubicEaseOut" />
+          <TransformOperationsTransition Property="RenderTransform"
+                                         Duration="0:0:0.24"
+                                         Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.libraryGameCard.ready">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    </Style>
+    <Style Selector="TextBlock.libraryCardInitials,
+                     Image.libraryCardCover,
+                     TextBlock.libraryCardSpinner">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity"
+                            Duration="0:0:0.18"
+                            Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="TextBlock.libraryCardInitials.ready,
+                     Image.libraryCardCover.ready,
+                     TextBlock.libraryCardSpinner.loading">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="TextBlock.libraryCardSpinner">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+    </Style>
+    <Style Selector="TextBlock.libraryCardSpinner.loading">
+      <Style.Animations>
+        <Animation Duration="0:0:0.82"
+                   IterationCount="Infinite"
+                   Easing="LinearEasing">
+          <KeyFrame Cue="0%">
+            <Setter Property="RotateTransform.Angle" Value="0" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="RotateTransform.Angle" Value="360" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+    <Style Selector="Border.coverClip">
+      <Setter Property="CornerRadius" Value="7" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="Background" Value="#1C1C1C" />
+    </Style>
+
+    <!-- Trailing "add folder" action tile in the library carousel. It matches a
+         game cover's footprint but reads as an affordance, not content. -->
+    <Style Selector="Border.addFolderTile">
+      <Setter Property="CornerRadius" Value="7" />
+      <Setter Property="Background" Value="#0CFFFFFF" />
+      <Setter Property="BorderBrush" Value="#2EFFFFFF" />
+      <Setter Property="BorderThickness" Value="1.5" />
+      <Setter Property="BoxShadow" Value="0 12 28 0 #3A000000" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.18" Easing="CubicEaseOut" />
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.addFolderTileIcon">
+      <Setter Property="Width" Value="60" />
+      <Setter Property="Height" Value="60" />
+      <Setter Property="CornerRadius" Value="30" />
+      <Setter Property="Background" Value="#1BFFFFFF" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <!-- Tile glyph + label share one rest color and animate to pure white on
+         hover, matching the icon to the label color as requested. -->
+    <Style Selector="TextBlock.addFolderGlyph">
+      <Setter Property="Foreground" Value="#A6FFFFFF" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <!-- Optical compensation: the "add" Material Symbols glyph sits a hair below
+         its em-box center, so nudge it up to sit centered in the round badge. -->
+    <Style Selector="TextBlock.addFolderIconGlyph">
+      <Setter Property="RenderTransform" Value="translateY(-2px)" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover TextBlock.addFolderGlyph,
+                     ListBox.tileGrid ListBoxItem:selected TextBlock.addFolderGlyph">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTile">
+      <Setter Property="Background" Value="#1AFFFFFF" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:selected Border.addFolderTile">
+      <Setter Property="Background" Value="#1AFFFFFF" />
+      <Setter Property="BorderBrush" Value="#55FFFFFF" />
+    </Style>
+    <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTileIcon,
+                     ListBox.tileGrid ListBoxItem:selected Border.addFolderTileIcon">
+      <Setter Property="Background" Value="#2EFFFFFF" />
+    </Style>
+</Styles>

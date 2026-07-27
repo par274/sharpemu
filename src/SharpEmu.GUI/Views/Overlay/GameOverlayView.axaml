@@ -1,0 +1,280 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:viewModels="using:SharpEmu.GUI.ViewModels"
+             xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
+             x:Class="SharpEmu.GUI.GameOverlayView"
+             x:DataType="viewModels:GameOverlayViewModel"
+             Background="Transparent">
+
+  <UserControl.Styles>
+    <Style Selector="Grid.overlayRoot">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="Border.overlayDimmer">
+      <Setter Property="IsHitTestVisible" Value="False" />
+    </Style>
+
+    <Style Selector="TextBlock.overlayStatValue">
+      <Setter Property="FontSize" Value="18" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+    </Style>
+    <Style Selector="TextBlock.overlayStatLabel">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Foreground" Value="#A3A3A3" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+    </Style>
+
+    <Style Selector="Button.overlayAction">
+      <Setter Property="Width" Value="108" />
+      <Setter Property="Height" Value="38" />
+      <Setter Property="MinWidth" Value="108" />
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="Padding" Value="12,0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="Background" Value="#303030" />
+      <Setter Property="Foreground" Value="#D0D0D0" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+    </Style>
+    <Style Selector="Button.overlayAction /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#303030" />
+      <Setter Property="Foreground" Value="#D0D0D0" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.overlayAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.overlayAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#444444" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.overlayAction.console /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="White" />
+      <Setter Property="Foreground" Value="#171717" />
+      <Setter Property="CornerRadius" Value="10,0,0,10" />
+    </Style>
+    <Style Selector="Button.overlayAction.console:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.overlayAction.console:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.overlayAction.console.hovered /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#F2F2F2" />
+      <Setter Property="Foreground" Value="#171717" />
+    </Style>
+    <Style Selector="Button.overlayAction.console.selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#E8E8E8" />
+      <Setter Property="Foreground" Value="#171717" />
+    </Style>
+    <Style Selector="Button.overlayAction.console:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#D8D8D8" />
+    </Style>
+    <Style Selector="Button.overlayAction.exit /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#9F3945" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="CornerRadius" Value="0,10,10,0" />
+    </Style>
+    <Style Selector="Button.overlayAction.exit:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.overlayAction.exit:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.overlayAction.exit.hovered /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#AE414E" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.overlayAction.exit.selected /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#BE4956" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.overlayAction.exit:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#87313B" />
+    </Style>
+
+    <Style Selector="Border.overlayKey">
+      <Setter Property="MinWidth" Value="22" />
+      <Setter Property="Height" Value="22" />
+      <Setter Property="Padding" Value="6,0" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Background" Value="#E8E8E8" />
+    </Style>
+    <Style Selector="Border.overlayKey TextBlock">
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="Bold" />
+      <Setter Property="Foreground" Value="#171717" />
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+  </UserControl.Styles>
+
+  <Grid x:Name="OverlayRoot"
+        Classes="overlayRoot"
+        ClipToBounds="True">
+    <Border Classes="overlayDimmer"
+            Background="#A6000000" />
+
+    <Grid RowDefinitions="Auto,*,Auto">
+    <Grid Classes="overlayBrand"
+          Width="600"
+          Margin="42,36,0,0"
+          HorizontalAlignment="Left"
+          VerticalAlignment="Top"
+          ColumnDefinitions="112,*"
+          ColumnSpacing="24">
+      <Border Width="112"
+              Height="158"
+              CornerRadius="10"
+              ClipToBounds="True"
+              Background="#282828">
+        <Grid>
+          <Border Background="{Binding PosterPlaceholderBrush}"
+                  IsVisible="{Binding !HasPoster}">
+            <TextBlock Text="{Binding GameInitials}"
+                       FontSize="30"
+                       FontWeight="Medium"
+                       Foreground="#D8FFFFFF"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+          </Border>
+          <Image Source="{Binding GamePoster}"
+                 Stretch="UniformToFill"
+                 RenderOptions.BitmapInterpolationMode="LowQuality"
+                 IsVisible="{Binding HasPoster}" />
+        </Grid>
+      </Border>
+      <StackPanel Grid.Column="1"
+                  VerticalAlignment="Center"
+                  Spacing="10">
+        <TextBlock Text="{Binding GameTitle}"
+                   MaxWidth="464"
+                   FontSize="40"
+                   FontWeight="Medium"
+                   Foreground="White"
+                   TextWrapping="Wrap"
+                   MaxLines="2"
+                   TextTrimming="CharacterEllipsis" />
+        <TextBlock Text="{Binding GameMetadata}"
+                   IsVisible="{Binding HasGameMetadata}"
+                   FontSize="14"
+                   Foreground="#A8A8A8"
+                   TextTrimming="CharacterEllipsis" />
+      </StackPanel>
+    </Grid>
+
+    <StackPanel Classes="overlayStats"
+                Margin="0,30,42,0"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Top"
+                Spacing="12">
+      <TextBlock Text="{Binding CurrentTime}"
+                 FontSize="46"
+                 FontWeight="Medium"
+                 Foreground="White"
+                 HorizontalAlignment="Right" />
+      <StackPanel HorizontalAlignment="Right"
+                  Spacing="9">
+        <StackPanel Width="170"
+                    Spacing="3">
+          <TextBlock Classes="overlayStatValue"
+                     Text="{Binding SessionDuration}" />
+          <TextBlock Classes="overlayStatLabel"
+                     Text="{Binding SessionLabel}" />
+        </StackPanel>
+        <StackPanel Width="170"
+                    Spacing="3">
+          <TextBlock Classes="overlayStatValue"
+                     Text="{Binding RecentDuration}" />
+          <TextBlock Classes="overlayStatLabel"
+                     Text="{Binding RecentLabel}" />
+        </StackPanel>
+      </StackPanel>
+    </StackPanel>
+
+    <Grid Grid.Row="2"
+          Classes="overlayBottom"
+          Height="64"
+          Margin="34,0,34,28">
+      <StackPanel Classes="overlayHints"
+                  Orientation="Horizontal"
+                  HorizontalAlignment="Left"
+                  VerticalAlignment="Center"
+                  Spacing="18">
+        <StackPanel Orientation="Horizontal" Spacing="7">
+          <Border Classes="overlayKey">
+            <TextBlock Text="A" />
+          </Border>
+          <TextBlock Text="{Binding SelectHint}"
+                     FontSize="11"
+                     Foreground="#B8B8B8"
+                     VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="7">
+          <Border Classes="overlayKey">
+            <TextBlock Text="B" />
+          </Border>
+          <TextBlock Text="{Binding CloseHint}"
+                     FontSize="11"
+                     Foreground="#B8B8B8"
+                     VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Spacing="7">
+          <Border Classes="overlayKey">
+            <TextBlock Classes="materialSymbol compact"
+                       Text="gamepad" />
+          </Border>
+          <TextBlock Text="{Binding ToggleHint}"
+                     FontSize="11"
+                     Foreground="#B8B8B8"
+                     VerticalAlignment="Center" />
+        </StackPanel>
+      </StackPanel>
+
+      <StackPanel Orientation="Horizontal"
+                  HorizontalAlignment="Right"
+                  VerticalAlignment="Center"
+                  Spacing="10">
+        <Border CornerRadius="10"
+                ClipToBounds="True"
+                BoxShadow="0 5 14 0 #2E000000">
+          <Grid ColumnDefinitions="Auto,Auto">
+            <Button x:Name="ConsoleButton"
+                    Classes="overlayAction console">
+              <StackPanel Orientation="Horizontal"
+                          Spacing="7">
+                <TextBlock Classes="materialSymbol compact"
+                           Text="terminal" />
+                <TextBlock Text="{Binding ConsoleLabel}"
+                           VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
+            <Button x:Name="ExitButton"
+                    Grid.Column="1"
+                    Classes="overlayAction exit"
+                    IsEnabled="{Binding CanExit}">
+              <StackPanel Orientation="Horizontal"
+                          Spacing="7">
+                <TextBlock Classes="materialSymbol compact"
+                           Text="logout" />
+                <TextBlock Text="{Binding ExitLabel}"
+                           VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
+          </Grid>
+        </Border>
+        <svg:Svg Width="54"
+                 Height="54"
+                 Path="avares://SharpEmu.GUI/Assets/logo.svg"
+                 Stretch="Uniform"
+                 OpacityMask="White"
+                 VerticalAlignment="Center" />
+      </StackPanel>
+    </Grid>
+    </Grid>
+  </Grid>
+</UserControl>

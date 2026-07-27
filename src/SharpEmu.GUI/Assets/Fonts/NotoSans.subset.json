@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "inputSha256": "2c4bfd9af259a509ebb153814d58f5ac90d7584ae7ab0641e2f751b4855b5b31",
+  "harfBuzzVersion": "14.2.1.1",
+  "outputs": {
+    "NotoSansJP-Light.ttf": "80b7cd6307417b6ee43e2473515e3d732bcae423854bd60b13bd74a90129656c",
+    "NotoSansJP-Regular.ttf": "d69185a6d3e94c350ad2d6a4f12e317f5c901123b11b0b14d83052c321e4ca07",
+    "NotoSansJP-Medium.ttf": "eaa731ecb32bed6bdce60c23499db0a5b619db8a9c10d861438ae8a00de03fe5",
+    "NotoSansJP-SemiBold.ttf": "3b3e549ef7653ca04b26954dcfd640f036355cc05708773aef985f66e9562fb2",
+    "NotoSansJP-Bold.ttf": "3689ff1a0fb2c01dc05074dd5286297a5725570536dadbdccaae1a3ae866dea3",
+    "NotoSansKR-Light.ttf": "2b7e09592ce24325efb329d02656fde94ae527f5fda493b2ba21ab11f929b873",
+    "NotoSansKR-Regular.ttf": "88392442c1b7135d19b136599c9707b0ed9ba3085ca01b69d55122f9601edc49",
+    "NotoSansKR-Medium.ttf": "e3366e5934a7bb68e95db8deebfb892dc20061954bfdd500c700232c28189697",
+    "NotoSansKR-SemiBold.ttf": "493cec3c28352574038e15c542df06c4950bcb7be0d20ae3e324c71912278e11",
+    "NotoSansKR-Bold.ttf": "d22253d5a8277ba2c737e1c431dbfe2894829c1bdaaad7b86003429c4940f343"
+  }
+}

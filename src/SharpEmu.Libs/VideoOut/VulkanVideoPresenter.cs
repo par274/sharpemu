@@ -27,6 +27,8 @@ using VkSemaphore = Silk.NET.Vulkan.Semaphore;
 
 namespace SharpEmu.Libs.VideoOut;
 
+internal readonly record struct VulkanPresentRect(uint X, uint Y, uint Width, uint Height);
+
 internal readonly record struct VulkanRenderTargetFormat(
     Format Format,
     Gen5PixelOutputKind OutputKind)
@@ -110,6 +112,43 @@ internal readonly record struct VulkanGuestQueueIdentity(
 
 internal static unsafe class VulkanVideoPresenter
 {
+    internal static VulkanPresentRect CalculateAspectFitRect(
+        uint sourceWidth,
+        uint sourceHeight,
+        uint destinationWidth,
+        uint destinationHeight)
+    {
+        if (sourceWidth == 0 ||
+            sourceHeight == 0 ||
+            destinationWidth == 0 ||
+            destinationHeight == 0)
+        {
+            return default;
+        }
+
+        if ((ulong)sourceWidth * destinationHeight >
+            (ulong)destinationWidth * sourceHeight)
+        {
+            var height = Math.Max(
+                1u,
+                (uint)((ulong)destinationWidth * sourceHeight / sourceWidth));
+            return new VulkanPresentRect(
+                0,
+                (destinationHeight - height) / 2,
+                destinationWidth,
+                height);
+        }
+
+        var width = Math.Max(
+            1u,
+            (uint)((ulong)destinationHeight * sourceWidth / sourceHeight));
+        return new VulkanPresentRect(
+            (destinationWidth - width) / 2,
+            0,
+            width,
+            destinationHeight);
+    }
+
     // Standalone CLI launches use a desktop-sized surface. The embedded GUI
     // always takes its dimensions from the native child control instead.
     private const uint DefaultWindowWidth = 1920;
@@ -559,6 +598,8 @@ internal static unsafe class VulkanVideoPresenter
     private static Thread? _thread;
     private static VulkanHostSurface? _hostSurface;
     private static VulkanHostSurface? _hostSurfacePendingDetach;
+    private static VulkanOverlayFrameReader? _hostOverlay;
+    private static bool _hostOverlayPendingDetach;
     internal static event Action<VulkanHostSurface>? FirstHostFramePresented;
     private static Presentation? _latestPresentation;
     private static byte[]? _copyFragmentSpirv;
@@ -792,6 +833,43 @@ internal static unsafe class VulkanVideoPresenter
             _closed = false;
             _presenterCloseRequested = false;
             return true;
+        }
+    }
+
+    internal static bool TryAttachHostOverlay(string descriptor, out string? error)
+    {
+        lock (_gate)
+        {
+            if (_thread is not null || _hostOverlay is not null)
+            {
+                error = "a GUI overlay channel is already active";
+                return false;
+            }
+
+            if (!VulkanOverlayFrameReader.TryOpen(descriptor, out var reader, out error))
+            {
+                return false;
+            }
+
+            _hostOverlay = reader;
+            _hostOverlayPendingDetach = false;
+            return true;
+        }
+    }
+
+    internal static void DetachHostOverlay()
+    {
+        lock (_gate)
+        {
+            if (_thread is not null)
+            {
+                _hostOverlayPendingDetach = true;
+                return;
+            }
+
+            _hostOverlay?.Dispose();
+            _hostOverlay = null;
+            _hostOverlayPendingDetach = false;
         }
     }
 
@@ -1838,6 +1916,233 @@ internal static unsafe class VulkanVideoPresenter
     internal static bool IsLinearFloatPresentSource(Format format) =>
         format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
 
+    internal static bool GameOverlayNeedsLinearization(Format swapchainFormat) =>
+        swapchainFormat is Format.B8G8R8A8Srgb or Format.R8G8B8A8Srgb;
+
+    internal static byte[] CreateGameOverlayFragment(Format swapchainFormat)
+    {
+        var linearize = GameOverlayNeedsLinearization(swapchainFormat);
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+
+        var voidType = module.TypeVoid();
+        var boolType = module.TypeBool();
+        var uintType = module.TypeInt(32, signed: false);
+        var floatType = module.TypeFloat(32);
+        var vec2Type = module.TypeVector(floatType, 2);
+        var vec3Type = module.TypeVector(floatType, 3);
+        var vec4Type = module.TypeVector(floatType, 4);
+        var inputVec4Pointer =
+            module.TypePointer(SpirvStorageClass.Input, vec4Type);
+        var outputVec4Pointer =
+            module.TypePointer(SpirvStorageClass.Output, vec4Type);
+        var imageType = module.TypeImage(
+            floatType,
+            SpirvImageDim.Dim2D,
+            depth: false,
+            arrayed: false,
+            multisampled: false,
+            sampled: 1,
+            SpirvImageFormat.Unknown);
+        var sampledImageType = module.TypeSampledImage(imageType);
+        var sampledImagePointer =
+            module.TypePointer(
+                SpirvStorageClass.UniformConstant,
+                sampledImageType);
+        var opacityPushStruct = module.TypeStruct(floatType);
+        module.AddDecoration(opacityPushStruct, SpirvDecoration.Block);
+        module.AddMemberDecoration(
+            opacityPushStruct,
+            0,
+            SpirvDecoration.Offset,
+            0);
+        var opacityPushPointer = module.TypePointer(
+            SpirvStorageClass.PushConstant,
+            opacityPushStruct);
+        var opacityMemberPointer = module.TypePointer(
+            SpirvStorageClass.PushConstant,
+            floatType);
+        var opacityPush = module.AddGlobalVariable(
+            opacityPushPointer,
+            SpirvStorageClass.PushConstant);
+        module.AddName(opacityPush, "overlay");
+
+        var attribute =
+            module.AddGlobalVariable(inputVec4Pointer, SpirvStorageClass.Input);
+        module.AddName(attribute, "attr0");
+        module.AddDecoration(attribute, SpirvDecoration.Location, 0);
+
+        var texture = module.AddGlobalVariable(
+            sampledImagePointer,
+            SpirvStorageClass.UniformConstant);
+        module.AddName(texture, "tex0");
+        module.AddDecoration(texture, SpirvDecoration.DescriptorSet, 0);
+        module.AddDecoration(texture, SpirvDecoration.Binding, 1);
+
+        var output =
+            module.AddGlobalVariable(outputVec4Pointer, SpirvStorageClass.Output);
+        module.AddName(output, "outColor");
+        module.AddDecoration(output, SpirvDecoration.Location, 0);
+
+        var functionType = module.TypeFunction(voidType);
+        var main = module.BeginFunction(voidType, functionType);
+        module.AddName(main, "main");
+        module.AddLabel();
+
+        var attributeValue =
+            module.AddInstruction(SpirvOp.Load, vec4Type, attribute);
+        var coordinates = module.AddInstruction(
+            SpirvOp.VectorShuffle,
+            vec2Type,
+            attributeValue,
+            attributeValue,
+            0,
+            1);
+        var sampledImage =
+            module.AddInstruction(SpirvOp.Load, sampledImageType, texture);
+        var lod = module.ConstantFloat(floatType, 0);
+        var color = module.AddInstruction(
+            SpirvOp.ImageSampleExplicitLod,
+            vec4Type,
+            sampledImage,
+            coordinates,
+            2,
+            lod);
+
+        if (linearize)
+        {
+            var encodedPremultiplied = module.AddInstruction(
+                SpirvOp.VectorShuffle,
+                vec3Type,
+                color,
+                color,
+                0,
+                1,
+                2);
+            var alpha = module.AddInstruction(
+                SpirvOp.CompositeExtract,
+                floatType,
+                color,
+                3);
+            var zero = module.ConstantFloat(floatType, 0);
+            var one = module.ConstantFloat(floatType, 1);
+            var hasAlpha = module.AddInstruction(
+                SpirvOp.FOrdGreaterThan,
+                boolType,
+                alpha,
+                zero);
+            var safeAlpha = module.AddInstruction(
+                SpirvOp.Select,
+                floatType,
+                hasAlpha,
+                alpha,
+                one);
+            var safeAlpha3 = module.AddInstruction(
+                SpirvOp.CompositeConstruct,
+                vec3Type,
+                safeAlpha,
+                safeAlpha,
+                safeAlpha);
+            var alpha3 = module.AddInstruction(
+                SpirvOp.CompositeConstruct,
+                vec3Type,
+                alpha,
+                alpha,
+                alpha);
+            var straightSrgb = module.AddInstruction(
+                SpirvOp.FDiv,
+                vec3Type,
+                encodedPremultiplied,
+                safeAlpha3);
+
+            uint VectorConstant(float value)
+            {
+                var scalar = module.ConstantFloat(floatType, value);
+                return module.ConstantComposite(
+                    vec3Type,
+                    scalar,
+                    scalar,
+                    scalar);
+            }
+
+            // Fast sRGB->linear approximation by Ian Taylor. The overlay is
+            // full-screen, so avoiding three Pow instructions per pixel keeps
+            // the color correction effectively free on the presentation pass.
+            var polynomial = module.AddInstruction(
+                SpirvOp.FMul,
+                vec3Type,
+                straightSrgb,
+                VectorConstant(0.305306011f));
+            polynomial = module.AddInstruction(
+                SpirvOp.FAdd,
+                vec3Type,
+                polynomial,
+                VectorConstant(0.682171111f));
+            polynomial = module.AddInstruction(
+                SpirvOp.FMul,
+                vec3Type,
+                straightSrgb,
+                polynomial);
+            polynomial = module.AddInstruction(
+                SpirvOp.FAdd,
+                vec3Type,
+                polynomial,
+                VectorConstant(0.012522878f));
+            var linearStraight = module.AddInstruction(
+                SpirvOp.FMul,
+                vec3Type,
+                straightSrgb,
+                polynomial);
+            var linearPremultiplied = module.AddInstruction(
+                SpirvOp.FMul,
+                vec3Type,
+                linearStraight,
+                alpha3);
+            color = module.AddInstruction(
+                SpirvOp.VectorShuffle,
+                vec4Type,
+                linearPremultiplied,
+                color,
+                0,
+                1,
+                2,
+                6);
+        }
+
+        var opacityPointer = module.AddInstruction(
+            SpirvOp.AccessChain,
+            opacityMemberPointer,
+            opacityPush,
+            module.Constant(uintType, 0));
+        var opacity = module.AddInstruction(
+            SpirvOp.Load,
+            floatType,
+            opacityPointer);
+        var opacityVector = module.AddInstruction(
+            SpirvOp.CompositeConstruct,
+            vec4Type,
+            opacity,
+            opacity,
+            opacity,
+            opacity);
+        color = module.AddInstruction(
+            SpirvOp.FMul,
+            vec4Type,
+            color,
+            opacityVector);
+
+        module.AddStatement(SpirvOp.Store, output, color);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+        module.AddEntryPoint(
+            SpirvExecutionModel.Fragment,
+            main,
+            "main",
+            [attribute, texture, opacityPush, output]);
+        module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+        return module.Build();
+    }
+
     private static byte[]? TakeGuestImageInitialData(ulong address)
     {
         lock (_gate)
@@ -2427,11 +2732,13 @@ internal static unsafe class VulkanVideoPresenter
         uint width;
         uint height;
         VulkanHostSurface? hostSurface;
+        VulkanOverlayFrameReader? hostOverlay;
         lock (_gate)
         {
             width = _windowWidth == 0 ? _latestPresentation?.Width ?? 1280 : _windowWidth;
             height = _windowHeight == 0 ? _latestPresentation?.Height ?? 720 : _windowHeight;
             hostSurface = _hostSurface;
+            hostOverlay = _hostOverlay;
         }
 
         if (hostSurface is null)
@@ -2442,7 +2749,7 @@ internal static unsafe class VulkanVideoPresenter
 
         try
         {
-            using var presenter = new Presenter(width, height, hostSurface);
+            using var presenter = new Presenter(width, height, hostSurface, hostOverlay);
             presenter.Run();
         }
         catch (Exception exception)
@@ -2460,6 +2767,12 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     _hostSurface = null;
                     _hostSurfacePendingDetach = null;
+                }
+                if (_hostOverlayPendingDetach)
+                {
+                    _hostOverlay?.Dispose();
+                    _hostOverlay = null;
+                    _hostOverlayPendingDetach = false;
                 }
                 System.Threading.Monitor.PulseAll(_gate);
             }
@@ -3326,6 +3639,28 @@ internal static unsafe class VulkanVideoPresenter
         private VkBuffer[] _overlayStagingBuffers = [];
         private DeviceMemory[] _overlayStagingMemory = [];
         private nint[] _overlayStagingMapped = [];
+        // Full GUI overlay: Avalonia rasterizes premultiplied BGRA in the host
+        // process; this process uploads it and alpha-composites it over the
+        // completed swapchain image before presentation.
+        private readonly VulkanOverlayFrameReader? _gameOverlayReader;
+        private Image _gameOverlayImage;
+        private DeviceMemory _gameOverlayImageMemory;
+        private ImageView _gameOverlayImageView;
+        private Sampler _gameOverlaySampler;
+        private VkBuffer[] _gameOverlayStagingBuffers = [];
+        private DeviceMemory[] _gameOverlayStagingMemory = [];
+        private nint[] _gameOverlayStagingMapped = [];
+        private DescriptorSetLayout _gameOverlayDescriptorSetLayout;
+        private DescriptorPool _gameOverlayDescriptorPool;
+        private DescriptorSet _gameOverlayDescriptorSet;
+        private RenderPass _gameOverlayRenderPass;
+        private Framebuffer[] _gameOverlayFramebuffers = [];
+        private PipelineLayout _gameOverlayPipelineLayout;
+        private Pipeline _gameOverlayPipeline;
+        private uint _gameOverlayWidth;
+        private uint _gameOverlayHeight;
+        private long _gameOverlayFrameSequence = -1;
+        private bool _gameOverlayImageInitialized;
         private long _presentedSequence;
         private long _presentNotTakenLoggedSequence = long.MinValue;
         private bool _vulkanReady;
@@ -3658,9 +3993,14 @@ internal static unsafe class VulkanVideoPresenter
             VulkanGuestQueueIdentity Queue,
             long WorkSequence);
 
-        public Presenter(uint width, uint height, VulkanHostSurface? hostSurface)
+        public Presenter(
+            uint width,
+            uint height,
+            VulkanHostSurface? hostSurface,
+            VulkanOverlayFrameReader? hostOverlay)
         {
             _hostSurface = hostSurface;
+            _gameOverlayReader = hostOverlay;
             _hostBufferPool = new VulkanHostBufferPool(
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);
@@ -5165,6 +5505,576 @@ internal static unsafe class VulkanVideoPresenter
             _overlayImageInitialized = true;
         }
 
+        private void CreateGameOverlayResources()
+        {
+            if (_gameOverlayReader is null)
+            {
+                return;
+            }
+
+            var frameSize = VulkanOverlayFrameProtocol.GetFrameSize(
+                checked((int)_extent.Width),
+                checked((int)_extent.Height));
+            _gameOverlayWidth = (uint)frameSize.Width;
+            _gameOverlayHeight = (uint)frameSize.Height;
+            var overlayBytes =
+                (ulong)_gameOverlayWidth *
+                _gameOverlayHeight *
+                VulkanOverlayFrameProtocol.BytesPerPixel;
+
+            var imageInfo = new ImageCreateInfo
+            {
+                SType = StructureType.ImageCreateInfo,
+                ImageType = ImageType.Type2D,
+                Format = Format.B8G8R8A8Unorm,
+                Extent = new Extent3D(_gameOverlayWidth, _gameOverlayHeight, 1),
+                MipLevels = 1,
+                ArrayLayers = 1,
+                Samples = SampleCountFlags.Count1Bit,
+                Tiling = ImageTiling.Optimal,
+                Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+                SharingMode = SharingMode.Exclusive,
+                InitialLayout = ImageLayout.Undefined,
+            };
+            Check(
+                _vk.CreateImage(_device, &imageInfo, null, out _gameOverlayImage),
+                "vkCreateImage(game overlay)");
+            _vk.GetImageMemoryRequirements(_device, _gameOverlayImage, out var requirements);
+            var memoryInfo = new MemoryAllocateInfo
+            {
+                SType = StructureType.MemoryAllocateInfo,
+                AllocationSize = requirements.Size,
+                MemoryTypeIndex = FindMemoryType(
+                    requirements.MemoryTypeBits,
+                    MemoryPropertyFlags.DeviceLocalBit),
+            };
+            Check(
+                _vk.AllocateMemory(
+                    _device,
+                    &memoryInfo,
+                    null,
+                    out _gameOverlayImageMemory),
+                "vkAllocateMemory(game overlay)");
+            Check(
+                _vk.BindImageMemory(
+                    _device,
+                    _gameOverlayImage,
+                    _gameOverlayImageMemory,
+                    0),
+                "vkBindImageMemory(game overlay)");
+
+            var imageViewInfo = new ImageViewCreateInfo
+            {
+                SType = StructureType.ImageViewCreateInfo,
+                Image = _gameOverlayImage,
+                ViewType = ImageViewType.Type2D,
+                Format = Format.B8G8R8A8Unorm,
+                Components = new ComponentMapping(
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity),
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            Check(
+                _vk.CreateImageView(
+                    _device,
+                    &imageViewInfo,
+                    null,
+                    out _gameOverlayImageView),
+                "vkCreateImageView(game overlay)");
+
+            var samplerInfo = new SamplerCreateInfo
+            {
+                SType = StructureType.SamplerCreateInfo,
+                MagFilter = Filter.Linear,
+                MinFilter = Filter.Linear,
+                MipmapMode = SamplerMipmapMode.Linear,
+                AddressModeU = SamplerAddressMode.ClampToEdge,
+                AddressModeV = SamplerAddressMode.ClampToEdge,
+                AddressModeW = SamplerAddressMode.ClampToEdge,
+                MinLod = 0,
+                MaxLod = 0,
+            };
+            Check(
+                _vk.CreateSampler(
+                    _device,
+                    &samplerInfo,
+                    null,
+                    out _gameOverlaySampler),
+                "vkCreateSampler(game overlay)");
+
+            _gameOverlayStagingBuffers = new VkBuffer[MaxFramesInFlight];
+            _gameOverlayStagingMemory = new DeviceMemory[MaxFramesInFlight];
+            _gameOverlayStagingMapped = new nint[MaxFramesInFlight];
+            for (var slot = 0; slot < MaxFramesInFlight; slot++)
+            {
+                _gameOverlayStagingBuffers[slot] = CreateBuffer(
+                    overlayBytes,
+                    BufferUsageFlags.TransferSrcBit,
+                    MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
+                    out _gameOverlayStagingMemory[slot]);
+                void* mapped;
+                Check(
+                    _vk.MapMemory(
+                        _device,
+                        _gameOverlayStagingMemory[slot],
+                        0,
+                        overlayBytes,
+                        0,
+                        &mapped),
+                    "vkMapMemory(game overlay staging)");
+                _gameOverlayStagingMapped[slot] = (nint)mapped;
+            }
+
+            var descriptorBinding = new DescriptorSetLayoutBinding
+            {
+                Binding = 1,
+                DescriptorType = DescriptorType.CombinedImageSampler,
+                DescriptorCount = 1,
+                StageFlags = ShaderStageFlags.FragmentBit,
+            };
+            var descriptorLayoutInfo = new DescriptorSetLayoutCreateInfo
+            {
+                SType = StructureType.DescriptorSetLayoutCreateInfo,
+                BindingCount = 1,
+                PBindings = &descriptorBinding,
+            };
+            Check(
+                _vk.CreateDescriptorSetLayout(
+                    _device,
+                    &descriptorLayoutInfo,
+                    null,
+                    out _gameOverlayDescriptorSetLayout),
+                "vkCreateDescriptorSetLayout(game overlay)");
+
+            var poolSize = new DescriptorPoolSize
+            {
+                Type = DescriptorType.CombinedImageSampler,
+                DescriptorCount = 1,
+            };
+            var poolInfo = new DescriptorPoolCreateInfo
+            {
+                SType = StructureType.DescriptorPoolCreateInfo,
+                MaxSets = 1,
+                PoolSizeCount = 1,
+                PPoolSizes = &poolSize,
+            };
+            Check(
+                _vk.CreateDescriptorPool(
+                    _device,
+                    &poolInfo,
+                    null,
+                    out _gameOverlayDescriptorPool),
+                "vkCreateDescriptorPool(game overlay)");
+
+            var setLayout = _gameOverlayDescriptorSetLayout;
+            var allocateInfo = new DescriptorSetAllocateInfo
+            {
+                SType = StructureType.DescriptorSetAllocateInfo,
+                DescriptorPool = _gameOverlayDescriptorPool,
+                DescriptorSetCount = 1,
+                PSetLayouts = &setLayout,
+            };
+            Check(
+                _vk.AllocateDescriptorSets(
+                    _device,
+                    &allocateInfo,
+                    out _gameOverlayDescriptorSet),
+                "vkAllocateDescriptorSets(game overlay)");
+
+            var descriptorImage = new DescriptorImageInfo
+            {
+                Sampler = _gameOverlaySampler,
+                ImageView = _gameOverlayImageView,
+                ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+            };
+            var descriptorWrite = new WriteDescriptorSet
+            {
+                SType = StructureType.WriteDescriptorSet,
+                DstSet = _gameOverlayDescriptorSet,
+                DstBinding = 1,
+                DescriptorCount = 1,
+                DescriptorType = DescriptorType.CombinedImageSampler,
+                PImageInfo = &descriptorImage,
+            };
+            _vk.UpdateDescriptorSets(_device, 1, &descriptorWrite, 0, null);
+
+            CreateGameOverlayRenderPass();
+            CreateGameOverlayPipeline();
+            _gameOverlayFrameSequence = -1;
+            _gameOverlayImageInitialized = false;
+        }
+
+        private void CreateGameOverlayRenderPass()
+        {
+            var attachment = new AttachmentDescription
+            {
+                Format = _swapchainFormat,
+                Samples = SampleCountFlags.Count1Bit,
+                LoadOp = AttachmentLoadOp.Load,
+                StoreOp = AttachmentStoreOp.Store,
+                StencilLoadOp = AttachmentLoadOp.DontCare,
+                StencilStoreOp = AttachmentStoreOp.DontCare,
+                InitialLayout = ImageLayout.PresentSrcKhr,
+                FinalLayout = ImageLayout.PresentSrcKhr,
+            };
+            var colorReference = new AttachmentReference
+            {
+                Attachment = 0,
+                Layout = ImageLayout.ColorAttachmentOptimal,
+            };
+            var subpass = new SubpassDescription
+            {
+                PipelineBindPoint = PipelineBindPoint.Graphics,
+                ColorAttachmentCount = 1,
+                PColorAttachments = &colorReference,
+            };
+            var dependencies = stackalloc SubpassDependency[2];
+            dependencies[0] = new SubpassDependency
+            {
+                SrcSubpass = Vk.SubpassExternal,
+                DstSubpass = 0,
+                SrcStageMask =
+                    PipelineStageFlags.TransferBit |
+                    PipelineStageFlags.ColorAttachmentOutputBit,
+                DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
+                SrcAccessMask =
+                    AccessFlags.TransferWriteBit |
+                    AccessFlags.ColorAttachmentWriteBit,
+                DstAccessMask =
+                    AccessFlags.ColorAttachmentReadBit |
+                    AccessFlags.ColorAttachmentWriteBit,
+            };
+            dependencies[1] = new SubpassDependency
+            {
+                SrcSubpass = 0,
+                DstSubpass = Vk.SubpassExternal,
+                SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
+                DstStageMask = PipelineStageFlags.BottomOfPipeBit,
+                SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
+            };
+            var renderPassInfo = new RenderPassCreateInfo
+            {
+                SType = StructureType.RenderPassCreateInfo,
+                AttachmentCount = 1,
+                PAttachments = &attachment,
+                SubpassCount = 1,
+                PSubpasses = &subpass,
+                DependencyCount = 2,
+                PDependencies = dependencies,
+            };
+            Check(
+                _vk.CreateRenderPass(
+                    _device,
+                    &renderPassInfo,
+                    null,
+                    out _gameOverlayRenderPass),
+                "vkCreateRenderPass(game overlay)");
+
+            _gameOverlayFramebuffers = new Framebuffer[_swapchainImageViews.Length];
+            for (var index = 0; index < _swapchainImageViews.Length; index++)
+            {
+                var view = _swapchainImageViews[index];
+                var framebufferInfo = new FramebufferCreateInfo
+                {
+                    SType = StructureType.FramebufferCreateInfo,
+                    RenderPass = _gameOverlayRenderPass,
+                    AttachmentCount = 1,
+                    PAttachments = &view,
+                    Width = _extent.Width,
+                    Height = _extent.Height,
+                    Layers = 1,
+                };
+                Check(
+                    _vk.CreateFramebuffer(
+                        _device,
+                        &framebufferInfo,
+                        null,
+                        out _gameOverlayFramebuffers[index]),
+                    "vkCreateFramebuffer(game overlay)");
+            }
+        }
+
+        private void CreateGameOverlayPipeline()
+        {
+            var setLayout = _gameOverlayDescriptorSetLayout;
+            var opacityPushRange = new PushConstantRange
+            {
+                StageFlags = ShaderStageFlags.FragmentBit,
+                Offset = 0,
+                Size = sizeof(float),
+            };
+            var pipelineLayoutInfo = new PipelineLayoutCreateInfo
+            {
+                SType = StructureType.PipelineLayoutCreateInfo,
+                SetLayoutCount = 1,
+                PSetLayouts = &setLayout,
+                PushConstantRangeCount = 1,
+                PPushConstantRanges = &opacityPushRange,
+            };
+            Check(
+                _vk.CreatePipelineLayout(
+                    _device,
+                    &pipelineLayoutInfo,
+                    null,
+                    out _gameOverlayPipelineLayout),
+                "vkCreatePipelineLayout(game overlay)");
+
+            var vertexModule = CreateShaderModule(
+                SpirvFixedShaders.CreateFullscreenVertex(attributeCount: 1));
+            var fragmentModule = CreateShaderModule(
+                CreateGameOverlayFragment(_swapchainFormat));
+            var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
+            try
+            {
+                var stages = stackalloc PipelineShaderStageCreateInfo[2];
+                stages[0] = new PipelineShaderStageCreateInfo
+                {
+                    SType = StructureType.PipelineShaderStageCreateInfo,
+                    Stage = ShaderStageFlags.VertexBit,
+                    Module = vertexModule,
+                    PName = entryPoint,
+                };
+                stages[1] = new PipelineShaderStageCreateInfo
+                {
+                    SType = StructureType.PipelineShaderStageCreateInfo,
+                    Stage = ShaderStageFlags.FragmentBit,
+                    Module = fragmentModule,
+                    PName = entryPoint,
+                };
+                var vertexInput = new PipelineVertexInputStateCreateInfo
+                {
+                    SType = StructureType.PipelineVertexInputStateCreateInfo,
+                };
+                var inputAssembly = new PipelineInputAssemblyStateCreateInfo
+                {
+                    SType = StructureType.PipelineInputAssemblyStateCreateInfo,
+                    Topology = PrimitiveTopology.TriangleList,
+                };
+                var viewport = new Viewport(0, 0, _extent.Width, _extent.Height, 0, 1);
+                var scissor = new Rect2D(new Offset2D(0, 0), _extent);
+                var viewportState = new PipelineViewportStateCreateInfo
+                {
+                    SType = StructureType.PipelineViewportStateCreateInfo,
+                    ViewportCount = 1,
+                    PViewports = &viewport,
+                    ScissorCount = 1,
+                    PScissors = &scissor,
+                };
+                var rasterization = new PipelineRasterizationStateCreateInfo
+                {
+                    SType = StructureType.PipelineRasterizationStateCreateInfo,
+                    PolygonMode = PolygonMode.Fill,
+                    CullMode = CullModeFlags.None,
+                    FrontFace = FrontFace.CounterClockwise,
+                    LineWidth = 1,
+                };
+                var multisample = new PipelineMultisampleStateCreateInfo
+                {
+                    SType = StructureType.PipelineMultisampleStateCreateInfo,
+                    RasterizationSamples = SampleCountFlags.Count1Bit,
+                };
+                var blendAttachment = new PipelineColorBlendAttachmentState
+                {
+                    BlendEnable = true,
+                    SrcColorBlendFactor = BlendFactor.One,
+                    DstColorBlendFactor = BlendFactor.OneMinusSrcAlpha,
+                    ColorBlendOp = BlendOp.Add,
+                    SrcAlphaBlendFactor = BlendFactor.One,
+                    DstAlphaBlendFactor = BlendFactor.OneMinusSrcAlpha,
+                    AlphaBlendOp = BlendOp.Add,
+                    ColorWriteMask =
+                        ColorComponentFlags.RBit |
+                        ColorComponentFlags.GBit |
+                        ColorComponentFlags.BBit |
+                        ColorComponentFlags.ABit,
+                };
+                var blendState = new PipelineColorBlendStateCreateInfo
+                {
+                    SType = StructureType.PipelineColorBlendStateCreateInfo,
+                    AttachmentCount = 1,
+                    PAttachments = &blendAttachment,
+                };
+                var pipelineInfo = new GraphicsPipelineCreateInfo
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo,
+                    StageCount = 2,
+                    PStages = stages,
+                    PVertexInputState = &vertexInput,
+                    PInputAssemblyState = &inputAssembly,
+                    PViewportState = &viewportState,
+                    PRasterizationState = &rasterization,
+                    PMultisampleState = &multisample,
+                    PColorBlendState = &blendState,
+                    Layout = _gameOverlayPipelineLayout,
+                    RenderPass = _gameOverlayRenderPass,
+                    Subpass = 0,
+                };
+                Check(
+                    _vk.CreateGraphicsPipelines(
+                        _device,
+                        _pipelineCache,
+                        1,
+                        &pipelineInfo,
+                        null,
+                        out _gameOverlayPipeline),
+                    "vkCreateGraphicsPipelines(game overlay)");
+                MarkPipelineCacheDirty();
+            }
+            finally
+            {
+                SilkMarshal.Free((nint)entryPoint);
+                _vk.DestroyShaderModule(_device, fragmentModule, null);
+                _vk.DestroyShaderModule(_device, vertexModule, null);
+            }
+        }
+
+        private void RecordGameOverlay(uint imageIndex, int frameSlot)
+        {
+            if (_gameOverlayReader is null ||
+                _gameOverlayImage.Handle == 0 ||
+                _gameOverlayStagingMapped.Length <= frameSlot)
+            {
+                return;
+            }
+
+            var byteCount = checked(
+                (int)(_gameOverlayWidth *
+                    _gameOverlayHeight *
+                    VulkanOverlayFrameProtocol.BytesPerPixel));
+            var staging = new Span<byte>(
+                (void*)_gameOverlayStagingMapped[frameSlot],
+                byteCount);
+            if (!_gameOverlayReader.TryCopyLatest(
+                    staging,
+                    checked((int)_gameOverlayWidth),
+                    checked((int)_gameOverlayHeight),
+                    _gameOverlayFrameSequence,
+                    out var visible,
+                    out var sequence,
+                    out var opacity,
+                    out var copied))
+            {
+                return;
+            }
+
+            if (!visible)
+            {
+                HostSessionControl.SetOverlayInputCaptured(false);
+                _gameOverlayFrameSequence = sequence;
+                return;
+            }
+
+            HostSessionControl.SetOverlayInputCaptured(true);
+            _gameOverlayFrameSequence = sequence;
+            if (copied)
+            {
+                var toTransfer = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = _gameOverlayImageInitialized
+                        ? AccessFlags.ShaderReadBit
+                        : 0,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                    OldLayout = _gameOverlayImageInitialized
+                        ? ImageLayout.ShaderReadOnlyOptimal
+                        : ImageLayout.Undefined,
+                    NewLayout = ImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = _gameOverlayImage,
+                    SubresourceRange = ColorSubresourceRange(),
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    _gameOverlayImageInitialized
+                        ? PipelineStageFlags.FragmentShaderBit
+                        : PipelineStageFlags.TopOfPipeBit,
+                    PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &toTransfer);
+
+                var copy = new BufferImageCopy
+                {
+                    ImageSubresource = new ImageSubresourceLayers(
+                        ImageAspectFlags.ColorBit,
+                        0,
+                        0,
+                        1),
+                    ImageExtent = new Extent3D(
+                        _gameOverlayWidth,
+                        _gameOverlayHeight,
+                        1),
+                };
+                _vk.CmdCopyBufferToImage(
+                    _commandBuffer,
+                    _gameOverlayStagingBuffers[frameSlot],
+                    _gameOverlayImage,
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &copy);
+
+                var toShaderRead = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.ShaderReadBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.ShaderReadOnlyOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = _gameOverlayImage,
+                    SubresourceRange = ColorSubresourceRange(),
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    PipelineStageFlags.TransferBit,
+                    PipelineStageFlags.FragmentShaderBit,
+                    0, 0, null, 0, null, 1, &toShaderRead);
+                _gameOverlayImageInitialized = true;
+            }
+
+            if (!_gameOverlayImageInitialized)
+            {
+                return;
+            }
+
+            var renderPassInfo = new RenderPassBeginInfo
+            {
+                SType = StructureType.RenderPassBeginInfo,
+                RenderPass = _gameOverlayRenderPass,
+                Framebuffer = _gameOverlayFramebuffers[imageIndex],
+                RenderArea = new Rect2D(new Offset2D(0, 0), _extent),
+            };
+            _vk.CmdBeginRenderPass(
+                _commandBuffer,
+                &renderPassInfo,
+                SubpassContents.Inline);
+            _vk.CmdBindPipeline(
+                _commandBuffer,
+                PipelineBindPoint.Graphics,
+                _gameOverlayPipeline);
+            var descriptorSet = _gameOverlayDescriptorSet;
+            _vk.CmdBindDescriptorSets(
+                _commandBuffer,
+                PipelineBindPoint.Graphics,
+                _gameOverlayPipelineLayout,
+                0,
+                1,
+                &descriptorSet,
+                0,
+                null);
+            _vk.CmdPushConstants(
+                _commandBuffer,
+                _gameOverlayPipelineLayout,
+                ShaderStageFlags.FragmentBit,
+                0,
+                sizeof(float),
+                &opacity);
+            _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
+            _vk.CmdEndRenderPass(_commandBuffer);
+        }
+
         private CommandBuffer AllocateGuestCommandBuffer()
         {
             // The pool has ResetCommandBufferBit, so vkBeginCommandBuffer
@@ -6398,6 +7308,7 @@ internal static unsafe class VulkanVideoPresenter
                 _vk.CreatePipelineLayout(_device, &layoutInfo, null, out _pipelineLayout),
                 "vkCreatePipelineLayout");
             CreateBarycentricPipeline();
+            CreateGameOverlayResources();
         }
 
         private void CreateBarycentricPipeline()
@@ -14359,7 +15270,7 @@ internal static unsafe class VulkanVideoPresenter
                 pixels = presentation.Width == _extent.Width && presentation.Height == _extent.Height
                     ? sourcePixels
                     : _hostSurface is not null
-                    ? ScaleBgraCoverBilinear(
+                    ? ScaleBgraAspectFitBilinear(
                         sourcePixels,
                         presentation.Width,
                         presentation.Height,
@@ -14568,6 +15479,8 @@ internal static unsafe class VulkanVideoPresenter
             {
                 RecordOverlayBlit(imageIndex, frameSlot);
             }
+
+            RecordGameOverlay(imageIndex, frameSlot);
 
             Check(_vk.EndCommandBuffer(_commandBuffer), "vkEndCommandBuffer");
 
@@ -16892,43 +17805,74 @@ internal static unsafe class VulkanVideoPresenter
                 encodeForPresent ? 3u : 2u,
                 barriers);
 
-            var sourceX = 0u;
-            var sourceY = 0u;
-            var sourceWidth = source.Width;
-            var sourceHeight = source.Height;
+            var blitDestination = encodeForPresent
+                ? encodeImage
+                : _swapchainImages[imageIndex];
+            // Embedded presentation is aspect-fit: clear the whole destination
+            // to opaque black, then blit the complete guest frame into a
+            // centered rectangle. This produces pillar/letterboxing instead
+            // of the previous object-fit:cover crop on maximized launchers.
             if (_hostSurface is not null)
             {
-                // The embedded GUI fills its game surface like CSS
-                // object-fit: cover. Preserve the guest aspect ratio and crop
-                // only the excess instead of distorting every video frame.
-                var sourceIsWider = (ulong)sourceWidth * _extent.Height >
-                                     (ulong)_extent.Width * sourceHeight;
-                if (sourceIsWider)
+                var black = new ClearColorValue(0f, 0f, 0f, 1f);
+                var destinationRange = ColorSubresourceRange();
+                _vk.CmdClearColorImage(
+                    _commandBuffer,
+                    blitDestination,
+                    ImageLayout.TransferDstOptimal,
+                    &black,
+                    1,
+                    &destinationRange);
+                var clearToBlit = new ImageMemoryBarrier
                 {
-                    sourceWidth = Math.Max(1u, (uint)((ulong)sourceHeight * _extent.Width / _extent.Height));
-                    sourceX = (source.Width - sourceWidth) / 2;
-                }
-                else
-                {
-                    sourceHeight = Math.Max(1u, (uint)((ulong)sourceWidth * _extent.Height / _extent.Width));
-                    sourceY = (source.Height - sourceHeight) / 2;
-                }
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = blitDestination,
+                    SubresourceRange = destinationRange,
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    PipelineStageFlags.TransferBit,
+                    PipelineStageFlags.TransferBit,
+                    0,
+                    0,
+                    null,
+                    0,
+                    null,
+                    1,
+                    &clearToBlit);
             }
+
+            var destinationRect = _hostSurface is null
+                ? new VulkanPresentRect(0, 0, _extent.Width, _extent.Height)
+                : CalculateAspectFitRect(
+                    source.Width,
+                    source.Height,
+                    _extent.Width,
+                    _extent.Height);
 
             var sourceOffsets = new ImageBlit.SrcOffsetsBuffer
             {
-                Element0 = new Offset3D(checked((int)sourceX), checked((int)sourceY), 0),
+                Element0 = new Offset3D(0, 0, 0),
                 Element1 = new Offset3D(
-                    checked((int)(sourceX + sourceWidth)),
-                    checked((int)(sourceY + sourceHeight)),
+                    checked((int)source.Width),
+                    checked((int)source.Height),
                     1),
             };
             var destinationOffsets = new ImageBlit.DstOffsetsBuffer
             {
-                Element0 = new Offset3D(0, 0, 0),
+                Element0 = new Offset3D(
+                    checked((int)destinationRect.X),
+                    checked((int)destinationRect.Y),
+                    0),
                 Element1 = new Offset3D(
-                    checked((int)_extent.Width),
-                    checked((int)_extent.Height),
+                    checked((int)(destinationRect.X + destinationRect.Width)),
+                    checked((int)(destinationRect.Y + destinationRect.Height)),
                     1),
             };
             var region = new ImageBlit
@@ -16951,9 +17895,11 @@ internal static unsafe class VulkanVideoPresenter
             // must blend neighbours or it silently drops every Nth source
             // row/column, which shreds 1-2px features in the guest frame.
             var isIntegerUpscale =
-                sourceWidth != 0 && sourceHeight != 0 &&
-                _extent.Width >= sourceWidth && _extent.Height >= sourceHeight &&
-                _extent.Width % sourceWidth == 0 && _extent.Height % sourceHeight == 0;
+                source.Width != 0 && source.Height != 0 &&
+                destinationRect.Width >= source.Width &&
+                destinationRect.Height >= source.Height &&
+                destinationRect.Width % source.Width == 0 &&
+                destinationRect.Height % source.Height == 0;
             _vk.CmdBlitImage(
                 _commandBuffer,
                 source.Image,
@@ -17309,7 +18255,7 @@ internal static unsafe class VulkanVideoPresenter
             return destination;
         }
 
-        private static byte[] ScaleBgraCoverBilinear(
+        private static byte[] ScaleBgraAspectFitBilinear(
             byte[] source,
             uint sourceWidth,
             uint sourceHeight,
@@ -17317,37 +18263,50 @@ internal static unsafe class VulkanVideoPresenter
             uint height)
         {
             var destination = new byte[checked((int)(width * height * 4))];
-            var sourceIsWider = (ulong)sourceWidth * height > (ulong)width * sourceHeight;
-            var cropWidth = sourceIsWider
-                ? Math.Max(1u, (uint)((ulong)sourceHeight * width / height))
-                : sourceWidth;
-            var cropHeight = sourceIsWider
-                ? sourceHeight
-                : Math.Max(1u, (uint)((ulong)sourceWidth * height / width));
-            var offsetX = (sourceWidth - cropWidth) / 2;
-            var offsetY = (sourceHeight - cropHeight) / 2;
-            var maxSourceX = offsetX + cropWidth - 1;
-            var maxSourceY = offsetY + cropHeight - 1;
-
-            for (uint y = 0; y < height; y++)
+            for (var index = 3; index < destination.Length; index += 4)
             {
-                for (uint x = 0; x < width; x++)
+                destination[index] = byte.MaxValue;
+            }
+
+            var destinationRect = CalculateAspectFitRect(
+                sourceWidth,
+                sourceHeight,
+                width,
+                height);
+            var maxSourceX = sourceWidth - 1;
+            var maxSourceY = sourceHeight - 1;
+
+            for (uint y = 0; y < destinationRect.Height; y++)
+            {
+                for (uint x = 0; x < destinationRect.Width; x++)
                 {
-                    var destinationOffset = checked((int)(((ulong)y * width + x) * 4));
+                    var destinationOffset = checked((int)(
+                        ((ulong)(destinationRect.Y + y) * width +
+                         destinationRect.X + x) * 4));
                     float blue = 0;
                     float green = 0;
                     float red = 0;
                     float alpha = 0;
                     for (var sampleY = 0; sampleY < 2; sampleY++)
                     {
-                        var scaledY = offsetY + (((y + ((sampleY + 0.5f) / 2)) * cropHeight) / height) - 0.5f;
-                        var sourceY0 = (uint)Math.Clamp((int)MathF.Floor(scaledY), (int)offsetY, (int)maxSourceY);
+                        var scaledY =
+                            ((y + ((sampleY + 0.5f) / 2)) * sourceHeight /
+                             destinationRect.Height) - 0.5f;
+                        var sourceY0 = (uint)Math.Clamp(
+                            (int)MathF.Floor(scaledY),
+                            0,
+                            (int)maxSourceY);
                         var sourceY1 = Math.Min(sourceY0 + 1, maxSourceY);
                         var fractionY = scaledY - MathF.Floor(scaledY);
                         for (var sampleX = 0; sampleX < 2; sampleX++)
                         {
-                            var scaledX = offsetX + (((x + ((sampleX + 0.5f) / 2)) * cropWidth) / width) - 0.5f;
-                            var sourceX0 = (uint)Math.Clamp((int)MathF.Floor(scaledX), (int)offsetX, (int)maxSourceX);
+                            var scaledX =
+                                ((x + ((sampleX + 0.5f) / 2)) * sourceWidth /
+                                 destinationRect.Width) - 0.5f;
+                            var sourceX0 = (uint)Math.Clamp(
+                                (int)MathF.Floor(scaledX),
+                                0,
+                                (int)maxSourceX);
                             var sourceX1 = Math.Min(sourceX0 + 1, maxSourceX);
                             var fractionX = scaledX - MathF.Floor(scaledX);
                             var sourceOffset00 = checked((int)(((ulong)sourceY0 * sourceWidth + sourceX0) * 4));
@@ -17557,6 +18516,7 @@ internal static unsafe class VulkanVideoPresenter
 
         private void DestroySwapchainResources()
         {
+            DestroyGameOverlayResources();
             DestroyHostMovieImage();
             DestroyPresentEncodeImage();
             for (var slot = 0; slot < _frameUploadBuffers.Length; slot++)
@@ -17695,6 +18655,97 @@ internal static unsafe class VulkanVideoPresenter
             _swapchainImageViews = [];
             _framebuffers = [];
             _imageInitialized = [];
+        }
+
+        private void DestroyGameOverlayResources()
+        {
+            if (_gameOverlayPipeline.Handle != 0)
+            {
+                _vk.DestroyPipeline(_device, _gameOverlayPipeline, null);
+                _gameOverlayPipeline = default;
+            }
+            if (_gameOverlayPipelineLayout.Handle != 0)
+            {
+                _vk.DestroyPipelineLayout(_device, _gameOverlayPipelineLayout, null);
+                _gameOverlayPipelineLayout = default;
+            }
+            foreach (var framebuffer in _gameOverlayFramebuffers)
+            {
+                if (framebuffer.Handle != 0)
+                {
+                    _vk.DestroyFramebuffer(_device, framebuffer, null);
+                }
+            }
+            _gameOverlayFramebuffers = [];
+            if (_gameOverlayRenderPass.Handle != 0)
+            {
+                _vk.DestroyRenderPass(_device, _gameOverlayRenderPass, null);
+                _gameOverlayRenderPass = default;
+            }
+            if (_gameOverlayDescriptorPool.Handle != 0)
+            {
+                _vk.DestroyDescriptorPool(_device, _gameOverlayDescriptorPool, null);
+                _gameOverlayDescriptorPool = default;
+                _gameOverlayDescriptorSet = default;
+            }
+            if (_gameOverlayDescriptorSetLayout.Handle != 0)
+            {
+                _vk.DestroyDescriptorSetLayout(
+                    _device,
+                    _gameOverlayDescriptorSetLayout,
+                    null);
+                _gameOverlayDescriptorSetLayout = default;
+            }
+            if (_gameOverlaySampler.Handle != 0)
+            {
+                _vk.DestroySampler(_device, _gameOverlaySampler, null);
+                _gameOverlaySampler = default;
+            }
+            if (_gameOverlayImageView.Handle != 0)
+            {
+                _vk.DestroyImageView(_device, _gameOverlayImageView, null);
+                _gameOverlayImageView = default;
+            }
+            if (_gameOverlayImage.Handle != 0)
+            {
+                _vk.DestroyImage(_device, _gameOverlayImage, null);
+                _gameOverlayImage = default;
+            }
+            if (_gameOverlayImageMemory.Handle != 0)
+            {
+                _vk.FreeMemory(_device, _gameOverlayImageMemory, null);
+                _gameOverlayImageMemory = default;
+            }
+            for (var slot = 0; slot < _gameOverlayStagingBuffers.Length; slot++)
+            {
+                if (_gameOverlayStagingMapped.Length > slot &&
+                    _gameOverlayStagingMapped[slot] != 0)
+                {
+                    _vk.UnmapMemory(_device, _gameOverlayStagingMemory[slot]);
+                }
+                if (_gameOverlayStagingBuffers[slot].Handle != 0)
+                {
+                    _vk.DestroyBuffer(
+                        _device,
+                        _gameOverlayStagingBuffers[slot],
+                        null);
+                }
+                if (_gameOverlayStagingMemory[slot].Handle != 0)
+                {
+                    _vk.FreeMemory(
+                        _device,
+                        _gameOverlayStagingMemory[slot],
+                        null);
+                }
+            }
+            _gameOverlayStagingBuffers = [];
+            _gameOverlayStagingMemory = [];
+            _gameOverlayStagingMapped = [];
+            _gameOverlayWidth = 0;
+            _gameOverlayHeight = 0;
+            _gameOverlayFrameSequence = -1;
+            _gameOverlayImageInitialized = false;
+            HostSessionControl.SetOverlayInputCaptured(false);
         }
 
         private static void CheckSwapchainResult(Result result, string operation)
