@@ -275,12 +275,27 @@ public static class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
+        // Offset -1 means "continue after the previous read of this file id".
+        // #216 dropped this wiring; without it sequential pack/streamer reads
+        // fail as INVALID_ARGUMENT and RAGE load jobs never complete while the
+        // North Yankton UI keeps flipping.
+        if (fileOffset == unchecked((ulong)(long)-1))
+        {
+            fileOffset = PakDirectoryTracker.ResolveSequentialOffset(fileId, size);
+        }
+        else if (fileOffset > long.MaxValue)
+        {
+            fileOffset = 0;
+        }
+
         var result = TryReadFileToGuestMemory(ctx, hostPath, fileOffset, destination, size, out var bytesRead);
         if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             TraceAmprRead(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead, hostPath, result);
             return result;
         }
+
+        PakDirectoryTracker.OnReadCompleted(ctx, fileId, destination, fileOffset, bytesRead);
 
         if (!AppendReadFileRecord(ctx, commandBuffer, fileId, destination, size, fileOffset, bytesRead))
         {

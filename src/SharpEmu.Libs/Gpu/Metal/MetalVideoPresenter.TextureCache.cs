@@ -45,12 +45,11 @@ internal static partial class MetalVideoPresenter
         texture.Pitch,
         texture.Sampler);
 
-    /// <summary>Caching requires the write tracker: without page protection a
-    /// guest CPU write would never evict the entry and draws would sample
-    /// stale texels forever. Storage textures are shader-writable on the GPU,
-    /// so their content identity is not stable either.</summary>
+    /// <summary>Storage textures are shader-writable on the GPU, so their
+    /// content identity is not stable. CPU rewrites of protected/CPU-backed
+    /// images still evict via DrainGuestImageCpuSync when those addresses
+    /// are dirty.</summary>
     private static bool IsCacheableDrawTexture(GuestDrawTexture texture) =>
-        GuestImageWriteTracker.Enabled &&
         texture.Address != 0 &&
         !texture.IsStorage &&
         !texture.IsFallback;
@@ -69,20 +68,100 @@ internal static partial class MetalVideoPresenter
         _ = MetalNative.Send(handle, MetalNative.Selector("retain"));
         _drawTextureCache[key] = handle;
         _cachedDrawTextureIdentities[key] = 0;
-        GuestImageWriteTracker.Track(
-            texture.Address,
-            (ulong)texture.RgbaPixels.Length,
-            Volatile.Read(ref _executingGuestWorkSequence),
-            "metal.texture-cache");
+        // No GuestImageWriteTracker.Track: watch-only cache registrations
+        // widened the managed-write hot path. CPU-backed / protected images
+        // own dirty notifications used for eviction.
     }
 
-    /// <summary>Runs once per drain, before any queued draw executes: a draw
-    /// whose texels the submit thread skipped must never resolve to an entry
-    /// the guest has since rewritten.</summary>
-    private static void EvictDirtyCachedDrawTextures()
+    /// <summary>
+    /// Single dirty consumer per drain: re-upload CPU-written guest images,
+    /// evict matching draw-texture cache entries, then re-arm once per address.
+    /// </summary>
+    private static void DrainGuestImageCpuSync(nint device)
     {
+        if (!GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
+        _ = Interlocked.Exchange(ref _cpuWrittenGuestImageSyncRequested, 0);
+
+        HashSet<ulong>? dirtyAddresses = null;
+        List<(ulong Address, uint Width, uint Height, ulong ByteCount)>? extents = null;
+        lock (_gate)
+        {
+            if (_guestImageExtents.Count > 0)
+            {
+                extents = new(_guestImageExtents.Count);
+                foreach (var entry in _guestImageExtents)
+                {
+                    extents.Add((
+                        entry.Key,
+                        entry.Value.Width,
+                        entry.Value.Height,
+                        entry.Value.ByteCount));
+                }
+            }
+        }
+
+        var memory = _guestMemory;
+        if (extents is not null)
+        {
+            foreach (var (address, width, height, byteCount) in extents)
+            {
+                if (!GuestImageWriteTracker.ConsumeDirty(address))
+                {
+                    continue;
+                }
+
+                (dirtyAddresses ??= []).Add(address);
+                if (memory is null ||
+                    byteCount == 0 ||
+                    byteCount > 128UL * 1024UL * 1024UL)
+                {
+                    continue;
+                }
+
+                GuestImage? image;
+                lock (_gate)
+                {
+                    _guestImages.TryGetValue(address, out image);
+                }
+
+                if (image is null)
+                {
+                    continue;
+                }
+
+                var pixels = new byte[byteCount];
+                if (!memory.TryRead(address, pixels) ||
+                    pixels.AsSpan().IndexOfAnyExcept((byte)0) < 0)
+                {
+                    continue;
+                }
+
+                ExecuteGuestImageWrite(
+                    device,
+                    queue: 0,
+                    new GuestImageWrite(address, pixels, 0));
+                if (Interlocked.Increment(ref _guestImageCpuSyncTraceCount) <= 64)
+                {
+                    Console.Error.WriteLine(
+                        $"[SYNC] cpu-write-drain addr=0x{address:X} {width}x{height}");
+                }
+            }
+        }
+
         if (_drawTextureCache.Count == 0)
         {
+            if (dirtyAddresses is not null)
+            {
+                foreach (var address in dirtyAddresses)
+                {
+                    GuestImageWriteTracker.Rearm(address);
+                }
+            }
+
             return;
         }
 
@@ -90,17 +169,17 @@ internal static partial class MetalVideoPresenter
         // share one source address (same texels, different samplers), and
         // ConsumeDirty clears the flag on first read — evicting only the
         // first identity would leave the others sampling stale texels.
-        HashSet<ulong>? dirtyAddresses = null;
         foreach (var entry in _drawTextureCache)
         {
-            if (dirtyAddresses is not null && dirtyAddresses.Contains(entry.Key.Address))
+            var address = entry.Key.Address;
+            if (dirtyAddresses is not null && dirtyAddresses.Contains(address))
             {
                 continue;
             }
 
-            if (GuestImageWriteTracker.ConsumeDirty(entry.Key.Address))
+            if (GuestImageWriteTracker.ConsumeDirty(address))
             {
-                (dirtyAddresses ??= []).Add(entry.Key.Address);
+                (dirtyAddresses ??= []).Add(address);
             }
         }
 
@@ -118,6 +197,14 @@ internal static partial class MetalVideoPresenter
 
             _drawTextureCache.Clear();
             _cachedDrawTextureIdentities.Clear();
+            if (dirtyAddresses is not null)
+            {
+                foreach (var address in dirtyAddresses)
+                {
+                    GuestImageWriteTracker.Rearm(address);
+                }
+            }
+
             return;
         }
 

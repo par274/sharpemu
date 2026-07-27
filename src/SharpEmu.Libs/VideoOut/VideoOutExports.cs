@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Audio;
 using SharpEmu.Libs.Kernel;
@@ -1233,6 +1234,15 @@ public static class VideoOutExports
             $"videoout.submit_flip handle={handle} index={bufferIndex} mode={flipMode} " +
             $"arg={flipArg} addr=0x{guestImageAddress:X16} submitted={guestImageSubmitted} " +
             $"events={flipEventCount} ordered_completion={!submitGpuImage}");
+        LoadProgressDiagnostics.TraceFlipSubmit(
+            handle,
+            bufferIndex,
+            flipMode,
+            submitGpuImage,
+            guestImageSubmitted,
+            guestImageAddress,
+            flipEventCount);
+        LoadProgressDiagnostics.TraceGpuWaitSnapshot(ctx.Memory);
         ReportFrameRate(presented: false);
         var diagnosticFlipNumber = Interlocked.Increment(ref _diagnosticFlipCount);
         if (_holdFirstFlipMilliseconds > 0 && diagnosticFlipNumber == _holdFlipNumber)

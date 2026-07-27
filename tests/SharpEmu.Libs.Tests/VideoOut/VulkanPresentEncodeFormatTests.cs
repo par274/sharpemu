@@ -56,4 +56,26 @@ public sealed class VulkanPresentEncodeFormatTests
     {
         Assert.False(VulkanVideoPresenter.IsLinearFloatPresentSource(sourceFormat));
     }
+
+    // GTA V Enhanced early G-buffer color targets observed as COMPAT failures
+    // when missing from TryDecodeRenderTargetFormat (format=2 / format=11).
+    [Theory]
+    [InlineData(2u, 0u, Format.R16Unorm)]
+    [InlineData(2u, 4u, Format.R16Uint)]
+    [InlineData(2u, 7u, Format.R16Sfloat)]
+    [InlineData(11u, 4u, Format.R32G32Uint)]
+    [InlineData(11u, 5u, Format.R32G32Sint)]
+    [InlineData(11u, 7u, Format.R32G32Sfloat)]
+    public void TryDecodeRenderTargetFormat_DecodesGen5R16AndRg32(
+        uint dataFormat,
+        uint numberType,
+        Format expected)
+    {
+        Assert.True(
+            VulkanVideoPresenter.TryDecodeRenderTargetFormat(
+                dataFormat,
+                numberType,
+                out var decoded));
+        Assert.Equal(expected, decoded.Format);
+    }
 }

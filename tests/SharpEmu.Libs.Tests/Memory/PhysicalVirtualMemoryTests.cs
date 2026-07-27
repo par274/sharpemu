@@ -9,9 +9,10 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.Memory;
 
 // PhysicalVirtualMemory is the host-backed (identity-mapped) implementation.
-// Reserve-only regions (> 4 GiB, non-executable) defer commit until first
-// access; TryAllocateGuestMemory serves a first-fit free-list with coalescing.
-// These tests pin that behaviour through fake IHostMemory implementations.
+// Huge non-executable maps (> 4 GiB) prefer commit-first, then fall back to
+// reserve-only + lazy commit when Allocate fails. TryAllocateGuestMemory serves
+// a first-fit free-list with coalescing. These tests pin that behaviour through
+// fake IHostMemory implementations that refuse full Allocate for huge sizes.
 public sealed class PhysicalVirtualMemoryTests
 {
     // 1. Lazy commit: a reserve-only region has its pages committed on demand
@@ -22,7 +23,8 @@ public sealed class PhysicalVirtualMemoryTests
         using var host = new LazyZeroedHostMemory();
         using var memory = new PhysicalVirtualMemory(host);
 
-        // > 4 GiB, non-executable -> reserve-only with lazy commit.
+        // > 4 GiB, non-executable; fake host rejects Allocate so reserve-only
+        // + lazy commit is used.
         var address = memory.AllocateAt(0, (4UL << 30) + 0x1000, executable: false);
         Assert.NotEqual(0UL, address);
 
@@ -108,8 +110,17 @@ public sealed class PhysicalVirtualMemoryTests
         Assert.NotEqual(0UL, (ulong)pointer);
         Assert.Equal(address + 0x123, (ulong)pointer);
 
+        // GetPointer primes a 32 MiB working-set chunk (page-sized commits
+        // against this fake host's 4 KiB Query regions). Non-page-aligned
+        // start makes AlignUp(addr + chunk) cover one extra page.
+        const ulong lazyPrimeChunkBytes = 0x0200_0000UL;
         var page = (address + 0x123) & ~0xFFFUL;
-        Assert.Equal([(page, 0x1000UL, HostPageProtection.ReadWrite)], host.CommitCalls);
+        var endPage = (address + 0x123 + lazyPrimeChunkBytes + 0xFFFUL) & ~0xFFFUL;
+        Assert.Equal((int)((endPage - page) / 0x1000UL), host.CommitCalls.Count);
+        Assert.Equal((page, 0x1000UL, HostPageProtection.ReadWrite), host.CommitCalls[0]);
+        Assert.All(
+            host.CommitCalls,
+            call => Assert.Equal(0x1000UL, call.Size));
     }
 
     [Fact]
@@ -187,7 +198,8 @@ public sealed class PhysicalVirtualMemoryTests
 
         public int QueryCalls { get; private set; }
 
-        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) => _address;
+        // Force the commit-first → reserve-only fallback for huge maps.
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
 
         public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => _address;
 

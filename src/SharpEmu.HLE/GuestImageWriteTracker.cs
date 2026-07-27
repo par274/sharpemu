@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 
@@ -30,6 +31,12 @@ public static unsafe class GuestImageWriteTracker
         public ulong End;
         public int Dirty;
         public int Armed;
+        /// <summary>
+        /// When false the range is watch-only: managed writes still dirty it via
+        /// <see cref="NotifyManagedWrite"/>, but pages are never write-protected
+        /// so native CPU stores do not fault.
+        /// </summary>
+        public bool Protect;
         public int FirstCpuWriteSeen;
         public int PendingFirstCpuWrite;
         public long WriteGeneration;
@@ -80,8 +87,17 @@ public static unsafe class GuestImageWriteTracker
 
     private static RangeSnapshot _rangeSnapshot = RangeSnapshot.Empty;
 
-    private static readonly bool _enabled = !OperatingSystem.IsWindows() &&
-        Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC") != "0";
+    // Windows defaults off: VirtualProtect fault sync still regresses titles
+    // like Dead Cells / Demon's Souls. Opt in with SHARPEMU_GUEST_IMAGE_CPU_SYNC=1
+    // when a title needs CPU-written guest planes (e.g. GTA intro). Linux/macOS
+    // keep the historical opt-out (=0 disables).
+    private static readonly bool _enabled =
+        OperatingSystem.IsWindows()
+            ? string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC"),
+                "1",
+                StringComparison.Ordinal)
+            : Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC") != "0";
     private static readonly (bool Wildcard, ulong[] Addresses) _lifetimeTraceFilter =
         ParseAddressList(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
     private static readonly (bool Wildcard, string[] Sources) _lifetimeSourceTraceFilter =
@@ -95,13 +111,66 @@ public static unsafe class GuestImageWriteTracker
         _enabled && _lifetimeTraceEnabled ? GetMonotonicNanoseconds() : 0;
     private static long _lifetimeTraceSequence;
 
+    private const uint PageReadonly = 0x02;
+    private const uint PageReadWrite = 0x04;
+
     [DllImport("libc", EntryPoint = "mprotect", SetLastError = true)]
     private static extern int Mprotect(nint address, nuint length, int protection);
 
     [DllImport("libc", EntryPoint = "clock_gettime", SetLastError = false)]
     private static extern int ClockGetTime(int clockId, Timespec* time);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int VirtualProtect(
+        nint lpAddress,
+        nuint dwSize,
+        uint flNewProtect,
+        out uint lpflOldProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint VirtualAlloc(
+        nint lpAddress,
+        nuint dwSize,
+        uint flAllocationType,
+        uint flProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int VirtualFree(nint lpAddress, nuint dwSize, uint dwFreeType);
+
+    private const uint MemCommit = 0x1000;
+    private const uint MemReserve = 0x2000;
+    private const uint MemRelease = 0x8000;
+
     public static bool Enabled => _enabled;
+
+    /// <summary>
+    /// Test/diagnostics helper: whether <paramref name="address"/> is tracked
+    /// with write protection armed (watch-only ranges report protect=false).
+    /// </summary>
+    public static bool TryGetProtectionState(
+        ulong address,
+        out bool protect,
+        out bool armed)
+    {
+        protect = false;
+        armed = false;
+        if (!_enabled)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (!_rangesByAddress.TryGetValue(address, out var range))
+            {
+                return false;
+            }
+
+            protect = range.Protect;
+            armed = Volatile.Read(ref range.Armed) != 0;
+            return true;
+        }
+    }
 
     /// <summary>
     /// Exercises the fault-handling path once outside signal context so every
@@ -115,7 +184,17 @@ public static unsafe class GuestImageWriteTracker
             return;
         }
 
-        var scratch = NativeMemory.AllocZeroed(4096);
+        // VirtualProtect only belongs on VirtualAlloc/mmap pages. Warming on
+        // CRT heap memory makes neighbouring heap metadata read-only and
+        // crashes the process on Windows.
+        var scratch = OperatingSystem.IsWindows()
+            ? VirtualAlloc(0, 4096, MemCommit | MemReserve, PageReadWrite)
+            : (nint)NativeMemory.AllocZeroed(4096);
+        if (scratch == 0)
+        {
+            return;
+        }
+
         try
         {
             // Warm the timestamp P/Invoke used by the signal-safe scalar
@@ -129,16 +208,29 @@ public static unsafe class GuestImageWriteTracker
         }
         finally
         {
-            NativeMemory.Free(scratch);
+            if (OperatingSystem.IsWindows())
+            {
+                _ = VirtualFree(scratch, 0, MemRelease);
+            }
+            else
+            {
+                NativeMemory.Free((void*)scratch);
+            }
         }
     }
 
-    /// <summary>Registers a range and arms write protection on it.</summary>
+    /// <summary>
+    /// Registers a range. When <paramref name="protect"/> is true, arms write
+    /// protection so native stores fault and mark the range dirty. When false,
+    /// the range is watch-only (managed HLE writes still dirty via
+    /// <see cref="NotifyManagedWrite"/>) and never <c>VirtualProtect</c>'d.
+    /// </summary>
     public static void Track(
         ulong address,
         ulong byteCount,
         long sourceSequence = 0,
-        string source = "unspecified")
+        string source = "unspecified",
+        bool protect = true)
     {
         if (!_enabled || address == 0 || byteCount == 0)
         {
@@ -159,6 +251,7 @@ public static unsafe class GuestImageWriteTracker
                 // a fresh immutable range, carrying the write generation so
                 // resizes do not hide guest CPU rewrites from cache owners.
                 var writeGeneration = Volatile.Read(ref range.WriteGeneration);
+                var keepProtect = range.Protect || protect;
                 DisarmLocked(range, "replace-range");
                 _rangesByAddress.Remove(address);
                 range = new TrackedRange
@@ -167,6 +260,7 @@ public static unsafe class GuestImageWriteTracker
                     ByteCount = byteCount,
                     Start = start,
                     End = start + length,
+                    Protect = keepProtect,
                     WriteGeneration = writeGeneration,
                 };
                 _rangesByAddress[address] = range;
@@ -181,6 +275,7 @@ public static unsafe class GuestImageWriteTracker
                     ByteCount = byteCount,
                     Start = start,
                     End = start + length,
+                    Protect = protect,
                     TraceLifetime =
                         ShouldTraceRange(start, start + length) || ShouldTraceSource(source),
                     SourceSequence = sourceSequence,
@@ -192,13 +287,22 @@ public static unsafe class GuestImageWriteTracker
             else
             {
                 FlushPendingFirstCpuWrite(range);
+                // Protect is sticky: a later watch-only Track (texture cache)
+                // must not disarm an RT that already needs page faults.
+                if (protect && !range.Protect)
+                {
+                    range.Protect = true;
+                }
             }
 
             range.SourceSequence = sourceSequence;
             range.Source = source;
             range.TraceLifetime =
                 ShouldTraceRange(range.Start, range.End) || ShouldTraceSource(source);
-            ArmLocked(range, "arm");
+            if (range.Protect)
+            {
+                ArmLocked(range, "arm");
+            }
         }
     }
 
@@ -277,7 +381,8 @@ public static unsafe class GuestImageWriteTracker
 
         lock (_gate)
         {
-            if (_rangesByAddress.TryGetValue(address, out var range))
+            if (_rangesByAddress.TryGetValue(address, out var range) &&
+                range.Protect)
             {
                 ArmLocked(range, "rearm");
             }
@@ -445,10 +550,7 @@ public static unsafe class GuestImageWriteTracker
         }
 
         if (needsUnprotect &&
-            Mprotect(
-                (nint)writableStart,
-                (nuint)(writableEnd - writableStart),
-                ProtRead | ProtWrite) != 0)
+            !TrySetProtection(writableStart, writableEnd - writableStart, writable: true))
         {
             return false;
         }
@@ -462,7 +564,11 @@ public static unsafe class GuestImageWriteTracker
             }
 
             var wasArmed = Interlocked.Exchange(ref range.Armed, 0) != 0;
-            if (wasArmed)
+            var wasDirty = Interlocked.Exchange(ref range.Dirty, 1) != 0;
+            // Protected ranges bump generation once per arm/fault cycle.
+            // Watch-only ranges never arm, so bump on the first dirty mark
+            // (NotifyManagedWrite) so cache owners still see a rewrite.
+            if (wasArmed || (!range.Protect && !wasDirty))
             {
                 Interlocked.Increment(ref range.WriteGeneration);
             }
@@ -480,8 +586,6 @@ public static unsafe class GuestImageWriteTracker
                 Volatile.Write(ref range.PendingFirstCpuWrite, 1);
                 Volatile.Write(ref range.FirstCpuWriteSeen, 2);
             }
-
-            Volatile.Write(ref range.Dirty, 1);
         }
 
         return true;
@@ -497,10 +601,7 @@ public static unsafe class GuestImageWriteTracker
 
         // A new publication/rearm starts a new first-write lifetime.
         Volatile.Write(ref range.FirstCpuWriteSeen, 0);
-        var failed = Mprotect(
-            (nint)range.Start,
-            (nuint)(range.End - range.Start),
-            ProtRead) != 0;
+        var failed = !TrySetProtection(range.Start, range.End - range.Start, writable: false);
         if (failed)
         {
             Volatile.Write(ref range.Armed, 0);
@@ -520,10 +621,7 @@ public static unsafe class GuestImageWriteTracker
         var wasArmed = Interlocked.Exchange(ref range.Armed, 0) == 1;
         if (wasArmed)
         {
-            _ = Mprotect(
-                (nint)range.Start,
-                (nuint)(range.End - range.Start),
-                ProtRead | ProtWrite);
+            _ = TrySetProtection(range.Start, range.End - range.Start, writable: true);
         }
 
         if (range.TraceLifetime)
@@ -534,7 +632,13 @@ public static unsafe class GuestImageWriteTracker
 
     private static void RebuildSnapshotLocked()
     {
-        Volatile.Write(ref _rangeSnapshot, new RangeSnapshot(_rangesByAddress.Values.ToArray()));
+        // Fault / NotifyManagedWrite hot paths must only see protected ranges.
+        // Watch-only texture-cache registrations used to widen Start..End across
+        // nearly all GPU memory so every managed guest write walked this path.
+        var protectedRanges = _rangesByAddress.Values
+            .Where(static range => range.Protect)
+            .ToArray();
+        Volatile.Write(ref _rangeSnapshot, new RangeSnapshot(protectedRanges));
     }
 
     private static (ulong Start, ulong Length) PageAlign(ulong address, ulong byteCount)
@@ -679,8 +783,35 @@ public static unsafe class GuestImageWriteTracker
             $"fault=0x{faultAddress:X16} page=0x{faultPage:X16}");
     }
 
+    private static bool TrySetProtection(ulong start, ulong length, bool writable)
+    {
+        if (length == 0)
+        {
+            return true;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return VirtualProtect(
+                (nint)start,
+                (nuint)length,
+                writable ? PageReadWrite : PageReadonly,
+                out _) != 0;
+        }
+
+        return Mprotect(
+            (nint)start,
+            (nuint)length,
+            writable ? ProtRead | ProtWrite : ProtRead) == 0;
+    }
+
     private static long GetMonotonicNanoseconds()
     {
+        if (OperatingSystem.IsWindows())
+        {
+            return Stopwatch.GetTimestamp() * 1_000_000_000L / Stopwatch.Frequency;
+        }
+
         Timespec time;
         return ClockGetTime(ClockMonotonicRaw, &time) == 0
             ? unchecked((time.Seconds * 1_000_000_000L) + time.Nanoseconds)

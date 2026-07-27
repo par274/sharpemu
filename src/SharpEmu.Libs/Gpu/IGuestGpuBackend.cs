@@ -54,6 +54,7 @@ internal interface IGuestGpuBackend
         int scalarRegisterBufferIndex = -1,
         uint pixelInputEnable = 0,
         uint pixelInputAddress = 0,
+        IReadOnlyList<uint>? pixelInputCntl = null,
         ulong storageBufferOffsetAlignment = 1);
 
     bool TryCompileComputeShader(
@@ -108,7 +109,8 @@ internal interface IGuestGpuBackend
         GuestIndexBuffer? indexBuffer = null,
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
-        ulong shaderAddress = 0);
+        ulong shaderAddress = 0,
+        int baseVertex = 0);
 
     void SubmitOffscreenTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -124,7 +126,8 @@ internal interface IGuestGpuBackend
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
         GuestDepthTarget? depthTarget = null,
-        ulong shaderAddress = 0);
+        ulong shaderAddress = 0,
+        int baseVertex = 0);
 
     void SubmitStorageTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -235,6 +238,12 @@ internal interface IGuestGpuBackend
     void SubmitGuestImageFill(ulong address, uint fillValue);
 
     void SubmitGuestImageWrite(ulong address, byte[] pixels);
+
+    /// <summary>
+    /// Asks the presenter to refresh CPU-dirty guest images on its render/present
+    /// drain. Must not enqueue retained plane copies on the producer path.
+    /// </summary>
+    void RequestCpuWrittenGuestImageSync(ulong scopeAddress = 0, ulong scopeByteCount = ulong.MaxValue);
 
     bool TryGetGuestImageExtent(ulong address, out uint width, out uint height, out ulong byteCount);
 

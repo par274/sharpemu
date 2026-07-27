@@ -218,6 +218,13 @@ internal static class MetalGuestFormats
     {
         var format = (dataFormat, numberType) switch
         {
+            // Early G-buffer / scene targets (R16 + RG32). Keep in sync with
+            // VulkanVideoPresenter.TryDecodeRenderTargetFormat.
+            (2, 0) => MtlPixelFormat.R16Unorm,
+            (2, 1) => MtlPixelFormat.R16Snorm,
+            (2, 4) => MtlPixelFormat.R16Uint,
+            (2, 5) => MtlPixelFormat.R16Sint,
+            (2, 7) => MtlPixelFormat.R16Float,
             (4, 4) => MtlPixelFormat.R32Uint,
             (4, 5) => MtlPixelFormat.R32Sint,
             (4, 7) => MtlPixelFormat.R32Float,
@@ -230,6 +237,8 @@ internal static class MetalGuestFormats
             (10, 5) => MtlPixelFormat.Rgba8Sint,
             (10, 9) => MtlPixelFormat.Rgba8UnormSrgb,
             (10, _) => MtlPixelFormat.Rgba8Unorm,
+            (11, 4) => MtlPixelFormat.Rg32Uint,
+            (11, 5) => MtlPixelFormat.Rg32Sint,
             (11, 7) => MtlPixelFormat.Rg32Float,
             (12, 4) => MtlPixelFormat.Rgba16Uint,
             (12, 5) => MtlPixelFormat.Rgba16Sint,
@@ -258,10 +267,12 @@ internal static class MetalGuestFormats
 
         var outputKind = format switch
         {
-            MtlPixelFormat.R8Uint or MtlPixelFormat.R32Uint or MtlPixelFormat.Rg16Uint or
-                MtlPixelFormat.Rgba8Uint or MtlPixelFormat.Rgba16Uint => Gen5PixelOutputKind.Uint,
-            MtlPixelFormat.R32Sint or MtlPixelFormat.Rg16Sint or MtlPixelFormat.Rgba8Sint or
-                MtlPixelFormat.Rgba16Sint => Gen5PixelOutputKind.Sint,
+            MtlPixelFormat.R8Uint or MtlPixelFormat.R16Uint or MtlPixelFormat.R32Uint or
+                MtlPixelFormat.Rg16Uint or MtlPixelFormat.Rg32Uint or MtlPixelFormat.Rgba8Uint or
+                MtlPixelFormat.Rgba16Uint => Gen5PixelOutputKind.Uint,
+            MtlPixelFormat.R16Sint or MtlPixelFormat.R32Sint or MtlPixelFormat.Rg16Sint or
+                MtlPixelFormat.Rg32Sint or MtlPixelFormat.Rgba8Sint or MtlPixelFormat.Rgba16Sint =>
+                Gen5PixelOutputKind.Sint,
             _ => Gen5PixelOutputKind.Float,
         };
         result = new MetalRenderTargetFormat(format, outputKind);

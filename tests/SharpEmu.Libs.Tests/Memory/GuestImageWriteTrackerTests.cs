@@ -24,11 +24,51 @@ public sealed unsafe class GuestImageWriteTrackerTests
     // spilling onto neighbouring heap pages.
     private const nuint TrackedByteCount = 4096;
     private const nuint HostPageAlignment = 16384;
+    private const uint MemCommit = 0x1000;
+    private const uint MemReserve = 0x2000;
+    private const uint MemRelease = 0x8000;
+    private const uint PageReadWrite = 0x04;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint VirtualAlloc(
+        nint lpAddress,
+        nuint dwSize,
+        uint flAllocationType,
+        uint flProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int VirtualFree(nint lpAddress, nuint dwSize, uint dwFreeType);
 
     private static ulong AllocateTrackedPages(out void* allocation)
     {
+        // VirtualProtect (Windows) / mprotect (POSIX) must target
+        // VirtualAlloc/mmap pages. Protecting CRT heap pages poisons
+        // neighbouring allocator metadata and crashes the test host.
+        if (OperatingSystem.IsWindows())
+        {
+            var windowsAllocation = VirtualAlloc(
+                0,
+                HostPageAlignment,
+                MemCommit | MemReserve,
+                PageReadWrite);
+            Assert.NotEqual(nint.Zero, windowsAllocation);
+            allocation = (void*)windowsAllocation;
+            return (ulong)windowsAllocation;
+        }
+
         allocation = NativeMemory.AlignedAlloc(2 * HostPageAlignment, HostPageAlignment);
         return (ulong)allocation;
+    }
+
+    private static void FreeTrackedPages(void* allocation)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            _ = VirtualFree((nint)allocation, 0, MemRelease);
+            return;
+        }
+
+        NativeMemory.Free(allocation);
     }
 
     [Fact]
@@ -58,7 +98,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            FreeTrackedPages(allocation);
         }
     }
 
@@ -89,7 +129,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            FreeTrackedPages(allocation);
         }
     }
 
@@ -118,7 +158,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
         finally
         {
             GuestImageWriteTracker.Untrack(address);
-            NativeMemory.Free(allocation);
+            FreeTrackedPages(allocation);
         }
     }
 
@@ -131,5 +171,133 @@ public sealed unsafe class GuestImageWriteTrackerTests
         }
 
         Assert.False(GuestImageWriteTracker.TryGetWriteGeneration(0xDEAD_0000_0000UL, out _));
+    }
+
+    [Fact]
+    public void WatchOnlyTrackDoesNotArmWriteProtection()
+    {
+        if (!GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
+        var address = AllocateTrackedPages(out var allocation);
+        try
+        {
+            GuestImageWriteTracker.Track(
+                address,
+                TrackedByteCount,
+                source: "test.watch-only",
+                protect: false);
+            Assert.True(
+                GuestImageWriteTracker.TryGetProtectionState(
+                    address,
+                    out var protect,
+                    out var armed));
+            Assert.False(protect);
+            Assert.False(armed);
+
+            // Pages stay writable: a native store must not require a fault handler.
+            *(byte*)address = 0xAB;
+            Assert.Equal(0xAB, *(byte*)address);
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(address);
+            FreeTrackedPages(allocation);
+        }
+    }
+
+    [Fact]
+    public void WatchOnlyRangesAreExcludedFromManagedWriteSnapshot()
+    {
+        if (!GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
+        var address = AllocateTrackedPages(out var allocation);
+        try
+        {
+            GuestImageWriteTracker.Track(
+                address,
+                TrackedByteCount,
+                source: "test.watch-only",
+                protect: false);
+            // Watch-only must not widen the NotifyManagedWrite hot path.
+            GuestImageWriteTracker.NotifyManagedWrite(address, sizeof(uint));
+            Assert.False(GuestImageWriteTracker.ConsumeDirty(address));
+            Assert.True(
+                GuestImageWriteTracker.TryGetProtectionState(
+                    address,
+                    out var protect,
+                    out var armed));
+            Assert.False(protect);
+            Assert.False(armed);
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(address);
+            FreeTrackedPages(allocation);
+        }
+    }
+
+    [Fact]
+    public void ProtectedTrackArmsWriteProtection()
+    {
+        if (!GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
+        var address = AllocateTrackedPages(out var allocation);
+        try
+        {
+            GuestImageWriteTracker.Track(address, TrackedByteCount);
+            Assert.True(
+                GuestImageWriteTracker.TryGetProtectionState(
+                    address,
+                    out var protect,
+                    out var armed));
+            Assert.True(protect);
+            Assert.True(armed);
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(address);
+            FreeTrackedPages(allocation);
+        }
+    }
+
+    [Fact]
+    public void WatchOnlyTrackDoesNotDowngradeProtectedRange()
+    {
+        if (!GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
+        var address = AllocateTrackedPages(out var allocation);
+        try
+        {
+            GuestImageWriteTracker.Track(address, TrackedByteCount, source: "test.rt");
+            GuestImageWriteTracker.Track(
+                address,
+                TrackedByteCount,
+                source: "test.texture-cache",
+                protect: false);
+            Assert.True(
+                GuestImageWriteTracker.TryGetProtectionState(
+                    address,
+                    out var protect,
+                    out var armed));
+            Assert.True(protect);
+            Assert.True(armed);
+        }
+        finally
+        {
+            GuestImageWriteTracker.Untrack(address);
+            FreeTrackedPages(allocation);
+        }
     }
 }

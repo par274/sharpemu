@@ -100,6 +100,26 @@ public static class GameServiceStubs
         Target = Generation.Gen5, LibraryName = "libSceVoice")]
     public static int VoiceSetThreadsParams(CpuContext ctx) => Ok(ctx);
 
+    [SysAbiExport(Nid = "nXpje5yNpaE", ExportName = "sceVoiceCreatePort",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceCreatePort(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
+
+    [SysAbiExport(Nid = "b7kJI+nx2hg", ExportName = "sceVoiceDeletePort",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceDeletePort(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "oV9GAdJ23Gw", ExportName = "sceVoiceConnectIPortToOPort",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceConnectIPortToOPort(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "ajVj3QG2um4", ExportName = "sceVoiceDisconnectIPortFromOPort",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceDisconnectIPortFromOPort(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "Oo0S5PH7FIQ", ExportName = "sceVoiceEnd",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceEnd(CpuContext ctx) => Ok(ctx);
+
     [SysAbiExport(Nid = "dPj4ZtRcIWk", ExportName = "sceContentSearchInit",
         Target = Generation.Gen5, LibraryName = "libSceContentSearch")]
     public static int ContentSearchInit(CpuContext ctx) => Ok(ctx);
