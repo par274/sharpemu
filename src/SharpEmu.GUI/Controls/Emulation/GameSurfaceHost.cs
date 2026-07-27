@@ -42,10 +42,17 @@ public sealed class GameSurfaceHost : NativeControlHost
     private const int VirtualKeyShift = 0x10;
     private const int IdcArrow = 32512;
     private const int CursorHideDelayMs = 2500;
+    private const int X11ButtonPress = 4;
+    private const int X11MotionNotify = 6;
+    private const uint X11LeftButton = 1;
+    private const long X11ButtonPressMask = 1L << 2;
+    private const long X11PointerMotionMask = 1L << 6;
+    private const int MaxX11OverlayEventsPerTick = 256;
 
     private VulkanHostSurface? _surface;
     private nint _windowHandle;
     private nint _x11Display;
+    private DispatcherTimer? _x11OverlayInputTimer;
     private string? _win32ClassName;
     private WindowProcedure? _windowProcedure;
     private nint _metalLayer;
@@ -99,6 +106,10 @@ public sealed class GameSurfaceHost : NativeControlHost
     public void SetOverlayInputEnabled(bool enabled)
     {
         _overlayInputEnabled = enabled;
+        if (OperatingSystem.IsLinux())
+        {
+            ConfigureX11OverlayInput();
+        }
         if (enabled)
         {
             ShowCursorNow();
@@ -352,6 +363,7 @@ public sealed class GameSurfaceHost : NativeControlHost
         }
         _ = XFlush(_x11Display);
         _surface = new VulkanHostSurface(VulkanHostSurfaceKind.Xlib, _windowHandle, _x11Display);
+        ConfigureX11OverlayInput();
         return new PlatformHandle(_windowHandle, "X11");
     }
 
@@ -433,6 +445,8 @@ public sealed class GameSurfaceHost : NativeControlHost
 
     private void DestroyX11()
     {
+        _x11OverlayInputTimer?.Stop();
+        _x11OverlayInputTimer = null;
         if (_x11Display != 0 && _windowHandle != 0)
         {
             _ = XDestroyWindow(_x11Display, _windowHandle);
@@ -444,6 +458,95 @@ public sealed class GameSurfaceHost : NativeControlHost
 
         _windowHandle = 0;
         _x11Display = 0;
+    }
+
+    private void ConfigureX11OverlayInput()
+    {
+        if (_x11Display == 0 || _windowHandle == 0)
+        {
+            return;
+        }
+
+        _x11OverlayInputTimer?.Stop();
+        var eventMask = _overlayInputEnabled
+            ? X11ButtonPressMask | X11PointerMotionMask
+            : 0;
+        _ = XSelectInput(_x11Display, _windowHandle, (nint)eventMask);
+        // This display connection belongs exclusively to the native child.
+        // Discard events queued under the previous mask so reopening the
+        // overlay cannot replay an old click.
+        _ = XSync(_x11Display, discard: 1);
+        if (!_overlayInputEnabled)
+        {
+            return;
+        }
+
+        _x11OverlayInputTimer ??= CreateX11OverlayInputTimer();
+        _x11OverlayInputTimer.Start();
+    }
+
+    private DispatcherTimer CreateX11OverlayInputTimer()
+    {
+        var timer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(8),
+        };
+        timer.Tick += (_, _) => PumpX11OverlayInput();
+        return timer;
+    }
+
+    private void PumpX11OverlayInput()
+    {
+        if (!_overlayInputEnabled || _x11Display == 0 || _windowHandle == 0)
+        {
+            return;
+        }
+
+        GameSurfacePointerEventArgs? pendingMotion = null;
+        var inputMask = (nint)(X11ButtonPressMask | X11PointerMotionMask);
+        for (var processed = 0;
+             processed < MaxX11OverlayEventsPerTick &&
+             XCheckWindowEvent(
+                 _x11Display,
+                 _windowHandle,
+                 inputMask,
+                 out var nativeEvent) != 0;
+             processed++)
+        {
+            var pointer = nativeEvent.Pointer;
+            if (pointer.Type == X11MotionNotify)
+            {
+                // Coalesce motion bursts to one UI update per dispatcher tick.
+                pendingMotion = new GameSurfacePointerEventArgs(
+                    pointer.X,
+                    pointer.Y,
+                    Activate: false);
+                continue;
+            }
+
+            if (pointer.Type != X11ButtonPress ||
+                pointer.Detail != X11LeftButton)
+            {
+                continue;
+            }
+
+            if (pendingMotion is not null)
+            {
+                OverlayPointerInput?.Invoke(this, pendingMotion);
+                pendingMotion = null;
+            }
+            OverlayPointerInput?.Invoke(
+                this,
+                new GameSurfacePointerEventArgs(
+                    pointer.X,
+                    pointer.Y,
+                    Activate: true));
+        }
+
+        if (pendingMotion is not null)
+        {
+            OverlayPointerInput?.Invoke(this, pendingMotion);
+        }
     }
 
     private void DestroyMacOS()
@@ -681,6 +784,46 @@ public sealed class GameSurfaceHost : NativeControlHost
 
     [DllImport("libX11.so.6", EntryPoint = "XFlush")]
     private static extern int XFlush(nint display);
+
+    [DllImport("libX11.so.6", EntryPoint = "XSelectInput")]
+    private static extern int XSelectInput(nint display, nint window, nint eventMask);
+
+    [DllImport("libX11.so.6", EntryPoint = "XSync")]
+    private static extern int XSync(nint display, int discard);
+
+    [DllImport("libX11.so.6", EntryPoint = "XCheckWindowEvent")]
+    private static extern int XCheckWindowEvent(
+        nint display,
+        nint window,
+        nint eventMask,
+        out X11Event nativeEvent);
+
+    [StructLayout(LayoutKind.Explicit, Size = 192)]
+    private struct X11Event
+    {
+        [FieldOffset(0)]
+        public X11PointerEvent Pointer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct X11PointerEvent
+    {
+        public int Type;
+        public nuint Serial;
+        public int SendEvent;
+        public nint Display;
+        public nint Window;
+        public nint Root;
+        public nint Subwindow;
+        public nuint Time;
+        public int X;
+        public int Y;
+        public int RootX;
+        public int RootY;
+        public uint State;
+        public uint Detail;
+        public int SameScreen;
+    }
 
     [DllImport("/usr/lib/libobjc.A.dylib")]
     private static extern nint objc_getClass(string name);

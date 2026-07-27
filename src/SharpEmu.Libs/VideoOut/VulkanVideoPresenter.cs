@@ -1916,6 +1916,193 @@ internal static unsafe class VulkanVideoPresenter
     internal static bool IsLinearFloatPresentSource(Format format) =>
         format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
 
+    internal static bool GameOverlayNeedsLinearization(Format swapchainFormat) =>
+        swapchainFormat is Format.B8G8R8A8Srgb or Format.R8G8B8A8Srgb;
+
+    internal static byte[] CreateGameOverlayFragment(Format swapchainFormat)
+    {
+        var linearize = GameOverlayNeedsLinearization(swapchainFormat);
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+
+        var voidType = module.TypeVoid();
+        var boolType = module.TypeBool();
+        var floatType = module.TypeFloat(32);
+        var vec2Type = module.TypeVector(floatType, 2);
+        var vec3Type = module.TypeVector(floatType, 3);
+        var vec4Type = module.TypeVector(floatType, 4);
+        var inputVec4Pointer =
+            module.TypePointer(SpirvStorageClass.Input, vec4Type);
+        var outputVec4Pointer =
+            module.TypePointer(SpirvStorageClass.Output, vec4Type);
+        var imageType = module.TypeImage(
+            floatType,
+            SpirvImageDim.Dim2D,
+            depth: false,
+            arrayed: false,
+            multisampled: false,
+            sampled: 1,
+            SpirvImageFormat.Unknown);
+        var sampledImageType = module.TypeSampledImage(imageType);
+        var sampledImagePointer =
+            module.TypePointer(
+                SpirvStorageClass.UniformConstant,
+                sampledImageType);
+
+        var attribute =
+            module.AddGlobalVariable(inputVec4Pointer, SpirvStorageClass.Input);
+        module.AddName(attribute, "attr0");
+        module.AddDecoration(attribute, SpirvDecoration.Location, 0);
+
+        var texture = module.AddGlobalVariable(
+            sampledImagePointer,
+            SpirvStorageClass.UniformConstant);
+        module.AddName(texture, "tex0");
+        module.AddDecoration(texture, SpirvDecoration.DescriptorSet, 0);
+        module.AddDecoration(texture, SpirvDecoration.Binding, 1);
+
+        var output =
+            module.AddGlobalVariable(outputVec4Pointer, SpirvStorageClass.Output);
+        module.AddName(output, "outColor");
+        module.AddDecoration(output, SpirvDecoration.Location, 0);
+
+        var functionType = module.TypeFunction(voidType);
+        var main = module.BeginFunction(voidType, functionType);
+        module.AddName(main, "main");
+        module.AddLabel();
+
+        var attributeValue =
+            module.AddInstruction(SpirvOp.Load, vec4Type, attribute);
+        var coordinates = module.AddInstruction(
+            SpirvOp.VectorShuffle,
+            vec2Type,
+            attributeValue,
+            attributeValue,
+            0,
+            1);
+        var sampledImage =
+            module.AddInstruction(SpirvOp.Load, sampledImageType, texture);
+        var lod = module.ConstantFloat(floatType, 0);
+        var color = module.AddInstruction(
+            SpirvOp.ImageSampleExplicitLod,
+            vec4Type,
+            sampledImage,
+            coordinates,
+            2,
+            lod);
+
+        if (linearize)
+        {
+            var encodedPremultiplied = module.AddInstruction(
+                SpirvOp.VectorShuffle,
+                vec3Type,
+                color,
+                color,
+                0,
+                1,
+                2);
+            var alpha = module.AddInstruction(
+                SpirvOp.CompositeExtract,
+                floatType,
+                color,
+                3);
+            var zero = module.ConstantFloat(floatType, 0);
+            var one = module.ConstantFloat(floatType, 1);
+            var hasAlpha = module.AddInstruction(
+                SpirvOp.FOrdGreaterThan,
+                boolType,
+                alpha,
+                zero);
+            var safeAlpha = module.AddInstruction(
+                SpirvOp.Select,
+                floatType,
+                hasAlpha,
+                alpha,
+                one);
+            var safeAlpha3 = module.AddInstruction(
+                SpirvOp.CompositeConstruct,
+                vec3Type,
+                safeAlpha,
+                safeAlpha,
+                safeAlpha);
+            var alpha3 = module.AddInstruction(
+                SpirvOp.CompositeConstruct,
+                vec3Type,
+                alpha,
+                alpha,
+                alpha);
+            var straightSrgb = module.AddInstruction(
+                SpirvOp.FDiv,
+                vec3Type,
+                encodedPremultiplied,
+                safeAlpha3);
+
+            uint VectorConstant(float value)
+            {
+                var scalar = module.ConstantFloat(floatType, value);
+                return module.ConstantComposite(
+                    vec3Type,
+                    scalar,
+                    scalar,
+                    scalar);
+            }
+
+            // Fast sRGB->linear approximation by Ian Taylor. The overlay is
+            // full-screen, so avoiding three Pow instructions per pixel keeps
+            // the color correction effectively free on the presentation pass.
+            var polynomial = module.AddInstruction(
+                SpirvOp.FMul,
+                vec3Type,
+                straightSrgb,
+                VectorConstant(0.305306011f));
+            polynomial = module.AddInstruction(
+                SpirvOp.FAdd,
+                vec3Type,
+                polynomial,
+                VectorConstant(0.682171111f));
+            polynomial = module.AddInstruction(
+                SpirvOp.FMul,
+                vec3Type,
+                straightSrgb,
+                polynomial);
+            polynomial = module.AddInstruction(
+                SpirvOp.FAdd,
+                vec3Type,
+                polynomial,
+                VectorConstant(0.012522878f));
+            var linearStraight = module.AddInstruction(
+                SpirvOp.FMul,
+                vec3Type,
+                straightSrgb,
+                polynomial);
+            var linearPremultiplied = module.AddInstruction(
+                SpirvOp.FMul,
+                vec3Type,
+                linearStraight,
+                alpha3);
+            color = module.AddInstruction(
+                SpirvOp.VectorShuffle,
+                vec4Type,
+                linearPremultiplied,
+                color,
+                0,
+                1,
+                2,
+                6);
+        }
+
+        module.AddStatement(SpirvOp.Store, output, color);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+        module.AddEntryPoint(
+            SpirvExecutionModel.Fragment,
+            main,
+            "main",
+            [attribute, texture, output]);
+        module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+        return module.Build();
+    }
+
     private static byte[]? TakeGuestImageInitialData(ulong address)
     {
         lock (_gate)
@@ -5589,7 +5776,7 @@ internal static unsafe class VulkanVideoPresenter
             var vertexModule = CreateShaderModule(
                 SpirvFixedShaders.CreateFullscreenVertex(attributeCount: 1));
             var fragmentModule = CreateShaderModule(
-                SpirvFixedShaders.CreateCopyFragment());
+                CreateGameOverlayFragment(_swapchainFormat));
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
             try
             {
