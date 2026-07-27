@@ -71,7 +71,7 @@ public partial class MainWindow : Window
     private GuiSettings _settings = GuiSettings.Load();
     private GameSurfaceHost? _gameSurfaceHost;
     private ConsoleWindow? _consoleWindow;
-    private readonly GameOverlayWindow _gameOverlay;
+    private readonly GameOverlayView _gameOverlay;
     private GuiConsoleMirror? _consoleMirror;
     private readonly SndPreviewPlayer _sndPreview = new();
     private string? _emulatorExePath;
@@ -150,8 +150,9 @@ public partial class MainWindow : Window
         _libraryService = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGameLibraryService>();
         _gameActivity = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGameActivityService>();
         _gamepad = GuiLauncher.Services.GetRequiredService<Services.Abstractions.IGamepadInputService>();
-        _gameOverlay = new GameOverlayWindow(
+        _gameOverlay = new GameOverlayView(
             GuiLauncher.Services.GetRequiredService<ViewModels.GameOverlayViewModel>());
+        GameSurfaceContainer.Children.Add(_gameOverlay);
         _gameOverlay.ConsoleRequested += () =>
         {
             _gameOverlay.HideOverlay();
@@ -161,6 +162,11 @@ public partial class MainWindow : Window
         {
             await _gameOverlay.HideOverlayAsync(activateOwner: false);
             StopEmulator();
+        };
+        _gameOverlay.VisibilityChanged += visible =>
+        {
+            _gameSurfaceHost?.SetOverlayInputEnabled(visible);
+            _gameSurfaceHost?.SetCursorAutoHide(!visible);
         };
         _logService.SetEmulatorExePath(_emulatorService.EmulatorExePath);
 
@@ -593,7 +599,7 @@ public partial class MainWindow : Window
         // are marshalled to the UI thread via the event subscriptions set up
         // in the constructor.
         _gamepad.Poll(
-            IsActive || _gameOverlay.IsActive,
+            IsActive,
             _isRunning || _isStopping,
             _gameOverlay.IsOverlayVisible,
             _main.ActivePageIndex);
@@ -1080,6 +1086,30 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_gameOverlay.IsOverlayVisible)
+        {
+            switch (args.Key)
+            {
+                case Key.Left:
+                    _gameOverlay.MoveFocus(-1);
+                    args.Handled = true;
+                    return;
+                case Key.Right:
+                    _gameOverlay.MoveFocus(1);
+                    args.Handled = true;
+                    return;
+                case Key.Enter:
+                case Key.Space:
+                    _gameOverlay.ActivateFocused();
+                    args.Handled = true;
+                    return;
+                case Key.Escape:
+                    _gameOverlay.HideOverlay();
+                    args.Handled = true;
+                    return;
+            }
+        }
+
         if (_isGameSettingsOpen && args.Key == Key.Escape)
         {
             CloseGameSettings();
@@ -1178,7 +1208,7 @@ public partial class MainWindow : Window
         _gamepadTimer.Stop();
         _sndPreview.Stop();
         _discord?.Dispose();
-        _gameOverlay.Close();
+        _gameOverlay.Dispose();
         _consoleWindow?.Close();
         _emulatorService.Stop();
         _consoleMirror?.Dispose();
@@ -2392,7 +2422,9 @@ public partial class MainWindow : Window
                 WarningLineBrush);
         }
 
-        _emulatorService.StartPendingSession(descriptor);
+        _emulatorService.StartPendingSession(
+            descriptor,
+            descriptor is null ? null : _gameOverlay.FrameDescriptor);
     }
 
     private void OnEmulatorOutput(string line, bool isError)
@@ -2508,6 +2540,27 @@ public partial class MainWindow : Window
             }
         };
         host.SurfaceDestroyed += (_, surface) => OnGameSurfaceDestroyed(host, surface);
+        host.ToggleOverlayRequested += (_, _) => ToggleGameOverlay();
+        host.OverlayPointerInput += (_, pointer) =>
+            _gameOverlay.HandlePointer(pointer.X, pointer.Y, pointer.Activate);
+        host.OverlayKeyInput += (_, key) =>
+        {
+            switch (key)
+            {
+                case GameSurfaceOverlayKey.Left:
+                    _gameOverlay.MoveFocus(-1);
+                    break;
+                case GameSurfaceOverlayKey.Right:
+                    _gameOverlay.MoveFocus(1);
+                    break;
+                case GameSurfaceOverlayKey.Activate:
+                    _gameOverlay.ActivateFocused();
+                    break;
+                case GameSurfaceOverlayKey.Cancel:
+                    _gameOverlay.HideOverlay();
+                    break;
+            }
+        };
         _gameSurfaceHost = host;
         GameSurfaceContainer.Children.Add(host);
         return host;
@@ -2712,7 +2765,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        _gameOverlay.Toggle(this, GameView);
+        _gameOverlay.Toggle(GameView);
     }
 
     private void QueueGameOverlayBoundsSync()

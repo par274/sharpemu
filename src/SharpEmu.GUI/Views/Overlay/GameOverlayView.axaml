@@ -3,59 +3,20 @@ Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-<Window xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:viewModels="using:SharpEmu.GUI.ViewModels"
-        xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
-        x:Class="SharpEmu.GUI.GameOverlayWindow"
-        x:DataType="viewModels:GameOverlayViewModel"
-        Title="SharpEmu Overlay"
-        WindowDecorations="None"
-        ExtendClientAreaToDecorationsHint="True"
-        TransparencyLevelHint="Transparent"
-        Background="Transparent"
-        CanResize="False"
-        ShowInTaskbar="False"
-        Topmost="False"
-        WindowStartupLocation="Manual">
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:viewModels="using:SharpEmu.GUI.ViewModels"
+             xmlns:svg="clr-namespace:Avalonia.Svg.Skia;assembly=Svg.Controls.Skia.Avalonia"
+             x:Class="SharpEmu.GUI.GameOverlayView"
+             x:DataType="viewModels:GameOverlayViewModel"
+             Background="Transparent">
 
-  <Window.Styles>
+  <UserControl.Styles>
     <Style Selector="Grid.overlayRoot">
       <Setter Property="Background" Value="Transparent" />
     </Style>
     <Style Selector="Border.overlayDimmer">
-      <Setter Property="Opacity" Value="0" />
       <Setter Property="IsHitTestVisible" Value="False" />
-      <Setter Property="Transitions">
-        <Transitions>
-          <DoubleTransition Property="Opacity"
-                            Duration="0:0:0.22"
-                            Easing="CubicEaseInOut" />
-        </Transitions>
-      </Setter>
-    </Style>
-    <Style Selector="Grid.overlayRoot.visible Border.overlayDimmer">
-      <Setter Property="Opacity" Value="1" />
-    </Style>
-
-    <Style Selector="Grid.overlayBrand,
-                     StackPanel.overlayStats,
-                     Grid.overlayBottom,
-                     StackPanel.overlayHints">
-      <Setter Property="Opacity" Value="0" />
-      <Setter Property="Transitions">
-        <Transitions>
-          <DoubleTransition Property="Opacity"
-                            Duration="0:0:0.18"
-                            Easing="CubicEaseOut" />
-        </Transitions>
-      </Setter>
-    </Style>
-    <Style Selector="Grid.overlayRoot.visible Grid.overlayBrand,
-                     Grid.overlayRoot.visible StackPanel.overlayStats,
-                     Grid.overlayRoot.visible Grid.overlayBottom,
-                     Grid.overlayRoot.visible StackPanel.overlayHints">
-      <Setter Property="Opacity" Value="1" />
     </Style>
 
     <Style Selector="TextBlock.overlayStatValue">
@@ -115,7 +76,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="CornerRadius" Value="10,0,0,10" />
     </Style>
     <Style Selector="Button.overlayAction.console:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                     Button.overlayAction.console:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+                     Button.overlayAction.console:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.overlayAction.console.hovered /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#F2F2F2" />
+      <Setter Property="Foreground" Value="#171717" />
+    </Style>
+    <Style Selector="Button.overlayAction.console.selected /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="#E8E8E8" />
       <Setter Property="Foreground" Value="#171717" />
     </Style>
@@ -128,7 +94,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="CornerRadius" Value="0,10,10,0" />
     </Style>
     <Style Selector="Button.overlayAction.exit:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                     Button.overlayAction.exit:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+                     Button.overlayAction.exit:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                     Button.overlayAction.exit.hovered /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#AE414E" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.overlayAction.exit.selected /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Background" Value="#BE4956" />
       <Setter Property="Foreground" Value="White" />
     </Style>
@@ -150,7 +121,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Setter Property="HorizontalAlignment" Value="Center" />
       <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
-  </Window.Styles>
+  </UserControl.Styles>
 
   <Grid x:Name="OverlayRoot"
         Classes="overlayRoot"
@@ -309,9 +280,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                  Height="54"
                  Path="avares://SharpEmu.GUI/Assets/logo.svg"
                  Stretch="Uniform"
+                 OpacityMask="White"
                  VerticalAlignment="Center" />
       </StackPanel>
     </Grid>
     </Grid>
   </Grid>
-</Window>
+</UserControl>

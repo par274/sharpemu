@@ -44,6 +44,11 @@ public sealed class PosixHostInput : IHostInput
 
     public int GetGamepadStates(Span<HostGamepadState> destination)
     {
+        if (HostSessionControl.IsOverlayInputCaptured)
+        {
+            return 0;
+        }
+
         return _source?.GetGamepadStates(destination) ?? 0;
     }
 
@@ -74,6 +79,11 @@ public sealed class PosixHostInput : IHostInput
 
     public bool IsKeyDown(int virtualKey)
     {
+        if (HostSessionControl.IsOverlayInputCaptured)
+        {
+            return false;
+        }
+
         var source = _source;
         if (source is not null)
         {

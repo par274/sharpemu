@@ -29,7 +29,17 @@ public sealed class GameSurfaceHost : NativeControlHost
     private const uint WsClipChildren = 0x02000000;
     private const uint CsOwnDc = 0x0020;
     private const uint WmSetCursor = 0x0020;
+    private const uint WmKeyDown = 0x0100;
+    private const uint WmKeyUp = 0x0101;
     private const uint WmMouseMove = 0x0200;
+    private const uint WmLeftButtonDown = 0x0201;
+    private const int VirtualKeyTab = 0x09;
+    private const int VirtualKeyEnter = 0x0D;
+    private const int VirtualKeyEscape = 0x1B;
+    private const int VirtualKeySpace = 0x20;
+    private const int VirtualKeyLeft = 0x25;
+    private const int VirtualKeyRight = 0x27;
+    private const int VirtualKeyShift = 0x10;
     private const int IdcArrow = 32512;
     private const int CursorHideDelayMs = 2500;
 
@@ -43,6 +53,8 @@ public sealed class GameSurfaceHost : NativeControlHost
     private DispatcherTimer? _cursorIdleTimer;
     private bool _cursorAutoHide;
     private bool _cursorHidden;
+    private bool _overlayInputEnabled;
+    private bool _overlayToggleKeyDown;
     private long _lastPointerActivity;
 
     public GameSurfaceHost()
@@ -74,9 +86,24 @@ public sealed class GameSurfaceHost : NativeControlHost
 
     public event EventHandler<VulkanHostSurface>? SurfaceDestroyed;
 
+    public event EventHandler<GameSurfacePointerEventArgs>? OverlayPointerInput;
+
+    public event EventHandler<GameSurfaceOverlayKey>? OverlayKeyInput;
+
+    public event EventHandler? ToggleOverlayRequested;
+
     public VulkanHostSurface? Surface => _surface;
 
     public void RefreshSurfaceSize() => UpdateSurfaceSize();
+
+    public void SetOverlayInputEnabled(bool enabled)
+    {
+        _overlayInputEnabled = enabled;
+        if (enabled)
+        {
+            ShowCursorNow();
+        }
+    }
 
     /// <summary>
     /// Hides the platform child without detaching the Vulkan surface. This
@@ -440,6 +467,55 @@ public sealed class GameSurfaceHost : NativeControlHost
         {
             _lastPointerActivity = System.Diagnostics.Stopwatch.GetTimestamp();
             ShowCursorNow();
+            if (_overlayInputEnabled)
+            {
+                OverlayPointerInput?.Invoke(
+                    this,
+                    DecodePointer(lParam, activate: false));
+                return 0;
+            }
+        }
+        else if (message == WmLeftButtonDown && _overlayInputEnabled)
+        {
+            OverlayPointerInput?.Invoke(
+                this,
+                DecodePointer(lParam, activate: true));
+            return 0;
+        }
+        else if (message == WmKeyUp && unchecked((int)wParam) == VirtualKeyTab)
+        {
+            _overlayToggleKeyDown = false;
+        }
+        else if (message == WmKeyDown)
+        {
+            var key = unchecked((int)wParam);
+            if (key == VirtualKeyTab &&
+                GetKeyState(VirtualKeyShift) < 0)
+            {
+                if (!_overlayToggleKeyDown)
+                {
+                    _overlayToggleKeyDown = true;
+                    ToggleOverlayRequested?.Invoke(this, EventArgs.Empty);
+                }
+                return 0;
+            }
+
+            if (_overlayInputEnabled)
+            {
+                var overlayKey = key switch
+                {
+                    VirtualKeyLeft => GameSurfaceOverlayKey.Left,
+                    VirtualKeyRight => GameSurfaceOverlayKey.Right,
+                    VirtualKeyEnter or VirtualKeySpace => GameSurfaceOverlayKey.Activate,
+                    VirtualKeyEscape => GameSurfaceOverlayKey.Cancel,
+                    _ => GameSurfaceOverlayKey.None,
+                };
+                if (overlayKey != GameSurfaceOverlayKey.None)
+                {
+                    OverlayKeyInput?.Invoke(this, overlayKey);
+                    return 0;
+                }
+            }
         }
         else if (message == WmSetCursor && _cursorHidden)
         {
@@ -451,6 +527,12 @@ public sealed class GameSurfaceHost : NativeControlHost
 
         return DefWindowProcW(window, message, wParam, lParam);
     }
+
+    private static GameSurfacePointerEventArgs DecodePointer(nint lParam, bool activate) =>
+        new(
+            unchecked((short)((long)lParam & 0xFFFF)),
+            unchecked((short)(((long)lParam >> 16) & 0xFFFF)),
+            activate);
 
     private static nint CreateObjectiveCObject(string className)
     {
@@ -547,6 +629,9 @@ public sealed class GameSurfaceHost : NativeControlHost
     [DllImport("user32.dll", EntryPoint = "SetCursor")]
     private static extern nint SetCursor(nint cursor);
 
+    [DllImport("user32.dll", EntryPoint = "GetKeyState")]
+    private static extern short GetKeyState(int virtualKey);
+
     [DllImport("user32.dll", EntryPoint = "LoadCursorW", CharSet = CharSet.Unicode)]
     private static extern nint LoadCursorW(nint instance, nint cursorName);
 
@@ -617,4 +702,15 @@ public sealed class GameSurfaceHost : NativeControlHost
 
     [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
     private static extern void objc_msgSend_double(nint receiver, nint selector, double value);
+}
+
+public sealed record GameSurfacePointerEventArgs(int X, int Y, bool Activate);
+
+public enum GameSurfaceOverlayKey
+{
+    None,
+    Left,
+    Right,
+    Activate,
+    Cancel,
 }

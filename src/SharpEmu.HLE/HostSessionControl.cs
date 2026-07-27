@@ -14,6 +14,7 @@ public static class HostSessionControl
     private static int _shutdownRequested;
     private static long _embeddedHostWindow;
     private static long _embeddedHostDisplay;
+    private static int _overlayInputCaptured;
 
     /// <summary>
     /// Indicates that the active host session is being stopped. Runtime code
@@ -31,11 +32,25 @@ public static class HostSessionControl
     /// <summary>X11 Display* paired with <see cref="EmbeddedHostWindow"/> when available.</summary>
     public static nint EmbeddedHostDisplay => unchecked((nint)Interlocked.Read(ref _embeddedHostDisplay));
 
+    /// <summary>
+    /// True while the host GUI owns keyboard and gamepad navigation for its
+    /// in-frame overlay. Guest input backends return a neutral snapshot.
+    /// </summary>
+    public static bool IsOverlayInputCaptured =>
+        Volatile.Read(ref _overlayInputCaptured) != 0;
+
     public static void SetEmbeddedHostSurface(nint window, nint display = 0)
     {
         Interlocked.Exchange(ref _embeddedHostDisplay, unchecked((long)display));
         Interlocked.Exchange(ref _embeddedHostWindow, unchecked((long)window));
+        if (window == 0)
+        {
+            SetOverlayInputCaptured(false);
+        }
     }
+
+    public static void SetOverlayInputCaptured(bool captured) =>
+        Volatile.Write(ref _overlayInputCaptured, captured ? 1 : 0);
 
     /// <summary>
     /// Starts a fresh session after the previous guest has fully left its
@@ -45,6 +60,7 @@ public static class HostSessionControl
     {
         Interlocked.Exchange(ref _pendingShutdownReason, null);
         Volatile.Write(ref _shutdownRequested, 0);
+        SetOverlayInputCaptured(false);
     }
 
     public static void SetShutdownHandler(Action<string>? handler)

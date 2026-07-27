@@ -124,7 +124,9 @@ internal sealed class EmulatorService : IEmulatorService
             runtimeOptions);
     }
 
-    public void StartPendingSession(string? childProcessDescriptor)
+    public void StartPendingSession(
+        string? childProcessDescriptor,
+        string? overlayFrameDescriptor)
     {
         if (_pendingLaunch is not { } launch || _emulator is not null)
         {
@@ -143,7 +145,10 @@ internal sealed class EmulatorService : IEmulatorService
 
         try
         {
-            var arguments = BuildArguments(launch, childProcessDescriptor);
+            var arguments = BuildArguments(
+                launch,
+                childProcessDescriptor,
+                overlayFrameDescriptor);
             _emulator = process;
             _pendingLaunch = null;
             process.Start(
@@ -183,7 +188,10 @@ internal sealed class EmulatorService : IEmulatorService
         Exited?.Invoke(exitCode);
     }
 
-    private static List<string> BuildArguments(EmulatorLaunchOptions launch, string? childProcessDescriptor)
+    private static List<string> BuildArguments(
+        EmulatorLaunchOptions launch,
+        string? childProcessDescriptor,
+        string? overlayFrameDescriptor)
     {
         var arguments = new List<string>
         {
@@ -204,6 +212,10 @@ internal sealed class EmulatorService : IEmulatorService
         if (!string.IsNullOrEmpty(childProcessDescriptor))
         {
             arguments.Add($"--host-surface={childProcessDescriptor}");
+        }
+        if (!string.IsNullOrEmpty(overlayFrameDescriptor))
+        {
+            arguments.Add($"--host-overlay={overlayFrameDescriptor}");
         }
         arguments.Add(launch.EbootPath);
         return arguments;

@@ -46,7 +46,11 @@ public interface IEmulatorService
     /// <param name="childProcessDescriptor">The serialized surface handle, or
     /// null when embedded child surfaces are unavailable on this platform
     /// (e.g. macOS Metal): the emulator then opens its own window.</param>
-    void StartPendingSession(string? childProcessDescriptor);
+    /// <param name="overlayFrameDescriptor">Shared premultiplied-BGRA overlay
+    /// channel, or null when the session is not embedded.</param>
+    void StartPendingSession(
+        string? childProcessDescriptor,
+        string? overlayFrameDescriptor);
 
     /// <summary>Requests the running emulator to stop and records the stop intent.</summary>
     void Stop();

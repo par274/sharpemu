@@ -577,6 +577,8 @@ internal static unsafe class VulkanVideoPresenter
     private static Thread? _thread;
     private static VulkanHostSurface? _hostSurface;
     private static VulkanHostSurface? _hostSurfacePendingDetach;
+    private static VulkanOverlayFrameReader? _hostOverlay;
+    private static bool _hostOverlayPendingDetach;
     internal static event Action<VulkanHostSurface>? FirstHostFramePresented;
     private static Presentation? _latestPresentation;
     private static byte[]? _copyFragmentSpirv;
@@ -810,6 +812,43 @@ internal static unsafe class VulkanVideoPresenter
             _closed = false;
             _presenterCloseRequested = false;
             return true;
+        }
+    }
+
+    internal static bool TryAttachHostOverlay(string descriptor, out string? error)
+    {
+        lock (_gate)
+        {
+            if (_thread is not null || _hostOverlay is not null)
+            {
+                error = "a GUI overlay channel is already active";
+                return false;
+            }
+
+            if (!VulkanOverlayFrameReader.TryOpen(descriptor, out var reader, out error))
+            {
+                return false;
+            }
+
+            _hostOverlay = reader;
+            _hostOverlayPendingDetach = false;
+            return true;
+        }
+    }
+
+    internal static void DetachHostOverlay()
+    {
+        lock (_gate)
+        {
+            if (_thread is not null)
+            {
+                _hostOverlayPendingDetach = true;
+                return;
+            }
+
+            _hostOverlay?.Dispose();
+            _hostOverlay = null;
+            _hostOverlayPendingDetach = false;
         }
     }
 
@@ -2306,11 +2345,13 @@ internal static unsafe class VulkanVideoPresenter
         uint width;
         uint height;
         VulkanHostSurface? hostSurface;
+        VulkanOverlayFrameReader? hostOverlay;
         lock (_gate)
         {
             width = _windowWidth == 0 ? _latestPresentation?.Width ?? 1280 : _windowWidth;
             height = _windowHeight == 0 ? _latestPresentation?.Height ?? 720 : _windowHeight;
             hostSurface = _hostSurface;
+            hostOverlay = _hostOverlay;
         }
 
         if (hostSurface is null)
@@ -2321,7 +2362,7 @@ internal static unsafe class VulkanVideoPresenter
 
         try
         {
-            using var presenter = new Presenter(width, height, hostSurface);
+            using var presenter = new Presenter(width, height, hostSurface, hostOverlay);
             presenter.Run();
         }
         catch (Exception exception)
@@ -2339,6 +2380,12 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     _hostSurface = null;
                     _hostSurfacePendingDetach = null;
+                }
+                if (_hostOverlayPendingDetach)
+                {
+                    _hostOverlay?.Dispose();
+                    _hostOverlay = null;
+                    _hostOverlayPendingDetach = false;
                 }
                 System.Threading.Monitor.PulseAll(_gate);
             }
@@ -3001,6 +3048,28 @@ internal static unsafe class VulkanVideoPresenter
         private VkBuffer[] _overlayStagingBuffers = [];
         private DeviceMemory[] _overlayStagingMemory = [];
         private nint[] _overlayStagingMapped = [];
+        // Full GUI overlay: Avalonia rasterizes premultiplied BGRA in the host
+        // process; this process uploads it and alpha-composites it over the
+        // completed swapchain image before presentation.
+        private readonly VulkanOverlayFrameReader? _gameOverlayReader;
+        private Image _gameOverlayImage;
+        private DeviceMemory _gameOverlayImageMemory;
+        private ImageView _gameOverlayImageView;
+        private Sampler _gameOverlaySampler;
+        private VkBuffer[] _gameOverlayStagingBuffers = [];
+        private DeviceMemory[] _gameOverlayStagingMemory = [];
+        private nint[] _gameOverlayStagingMapped = [];
+        private DescriptorSetLayout _gameOverlayDescriptorSetLayout;
+        private DescriptorPool _gameOverlayDescriptorPool;
+        private DescriptorSet _gameOverlayDescriptorSet;
+        private RenderPass _gameOverlayRenderPass;
+        private Framebuffer[] _gameOverlayFramebuffers = [];
+        private PipelineLayout _gameOverlayPipelineLayout;
+        private Pipeline _gameOverlayPipeline;
+        private uint _gameOverlayWidth;
+        private uint _gameOverlayHeight;
+        private long _gameOverlayFrameSequence = -1;
+        private bool _gameOverlayImageInitialized;
         private long _presentedSequence;
         private long _presentNotTakenLoggedSequence = long.MinValue;
         private bool _vulkanReady;
@@ -3331,9 +3400,14 @@ internal static unsafe class VulkanVideoPresenter
             VulkanGuestQueueIdentity Queue,
             long WorkSequence);
 
-        public Presenter(uint width, uint height, VulkanHostSurface? hostSurface)
+        public Presenter(
+            uint width,
+            uint height,
+            VulkanHostSurface? hostSurface,
+            VulkanOverlayFrameReader? hostOverlay)
         {
             _hostSurface = hostSurface;
+            _gameOverlayReader = hostOverlay;
             _hostBufferPool = new VulkanHostBufferPool(
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);
@@ -4838,6 +4912,560 @@ internal static unsafe class VulkanVideoPresenter
             _overlayImageInitialized = true;
         }
 
+        private void CreateGameOverlayResources()
+        {
+            if (_gameOverlayReader is null)
+            {
+                return;
+            }
+
+            var frameSize = VulkanOverlayFrameProtocol.GetFrameSize(
+                checked((int)_extent.Width),
+                checked((int)_extent.Height));
+            _gameOverlayWidth = (uint)frameSize.Width;
+            _gameOverlayHeight = (uint)frameSize.Height;
+            var overlayBytes =
+                (ulong)_gameOverlayWidth *
+                _gameOverlayHeight *
+                VulkanOverlayFrameProtocol.BytesPerPixel;
+
+            var imageInfo = new ImageCreateInfo
+            {
+                SType = StructureType.ImageCreateInfo,
+                ImageType = ImageType.Type2D,
+                Format = Format.B8G8R8A8Unorm,
+                Extent = new Extent3D(_gameOverlayWidth, _gameOverlayHeight, 1),
+                MipLevels = 1,
+                ArrayLayers = 1,
+                Samples = SampleCountFlags.Count1Bit,
+                Tiling = ImageTiling.Optimal,
+                Usage = ImageUsageFlags.TransferDstBit | ImageUsageFlags.SampledBit,
+                SharingMode = SharingMode.Exclusive,
+                InitialLayout = ImageLayout.Undefined,
+            };
+            Check(
+                _vk.CreateImage(_device, &imageInfo, null, out _gameOverlayImage),
+                "vkCreateImage(game overlay)");
+            _vk.GetImageMemoryRequirements(_device, _gameOverlayImage, out var requirements);
+            var memoryInfo = new MemoryAllocateInfo
+            {
+                SType = StructureType.MemoryAllocateInfo,
+                AllocationSize = requirements.Size,
+                MemoryTypeIndex = FindMemoryType(
+                    requirements.MemoryTypeBits,
+                    MemoryPropertyFlags.DeviceLocalBit),
+            };
+            Check(
+                _vk.AllocateMemory(
+                    _device,
+                    &memoryInfo,
+                    null,
+                    out _gameOverlayImageMemory),
+                "vkAllocateMemory(game overlay)");
+            Check(
+                _vk.BindImageMemory(
+                    _device,
+                    _gameOverlayImage,
+                    _gameOverlayImageMemory,
+                    0),
+                "vkBindImageMemory(game overlay)");
+
+            var imageViewInfo = new ImageViewCreateInfo
+            {
+                SType = StructureType.ImageViewCreateInfo,
+                Image = _gameOverlayImage,
+                ViewType = ImageViewType.Type2D,
+                Format = Format.B8G8R8A8Unorm,
+                Components = new ComponentMapping(
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity,
+                    ComponentSwizzle.Identity),
+                SubresourceRange = ColorSubresourceRange(),
+            };
+            Check(
+                _vk.CreateImageView(
+                    _device,
+                    &imageViewInfo,
+                    null,
+                    out _gameOverlayImageView),
+                "vkCreateImageView(game overlay)");
+
+            var samplerInfo = new SamplerCreateInfo
+            {
+                SType = StructureType.SamplerCreateInfo,
+                MagFilter = Filter.Linear,
+                MinFilter = Filter.Linear,
+                MipmapMode = SamplerMipmapMode.Linear,
+                AddressModeU = SamplerAddressMode.ClampToEdge,
+                AddressModeV = SamplerAddressMode.ClampToEdge,
+                AddressModeW = SamplerAddressMode.ClampToEdge,
+                MinLod = 0,
+                MaxLod = 0,
+            };
+            Check(
+                _vk.CreateSampler(
+                    _device,
+                    &samplerInfo,
+                    null,
+                    out _gameOverlaySampler),
+                "vkCreateSampler(game overlay)");
+
+            _gameOverlayStagingBuffers = new VkBuffer[MaxFramesInFlight];
+            _gameOverlayStagingMemory = new DeviceMemory[MaxFramesInFlight];
+            _gameOverlayStagingMapped = new nint[MaxFramesInFlight];
+            for (var slot = 0; slot < MaxFramesInFlight; slot++)
+            {
+                _gameOverlayStagingBuffers[slot] = CreateBuffer(
+                    overlayBytes,
+                    BufferUsageFlags.TransferSrcBit,
+                    MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
+                    out _gameOverlayStagingMemory[slot]);
+                void* mapped;
+                Check(
+                    _vk.MapMemory(
+                        _device,
+                        _gameOverlayStagingMemory[slot],
+                        0,
+                        overlayBytes,
+                        0,
+                        &mapped),
+                    "vkMapMemory(game overlay staging)");
+                _gameOverlayStagingMapped[slot] = (nint)mapped;
+            }
+
+            var descriptorBinding = new DescriptorSetLayoutBinding
+            {
+                Binding = 1,
+                DescriptorType = DescriptorType.CombinedImageSampler,
+                DescriptorCount = 1,
+                StageFlags = ShaderStageFlags.FragmentBit,
+            };
+            var descriptorLayoutInfo = new DescriptorSetLayoutCreateInfo
+            {
+                SType = StructureType.DescriptorSetLayoutCreateInfo,
+                BindingCount = 1,
+                PBindings = &descriptorBinding,
+            };
+            Check(
+                _vk.CreateDescriptorSetLayout(
+                    _device,
+                    &descriptorLayoutInfo,
+                    null,
+                    out _gameOverlayDescriptorSetLayout),
+                "vkCreateDescriptorSetLayout(game overlay)");
+
+            var poolSize = new DescriptorPoolSize
+            {
+                Type = DescriptorType.CombinedImageSampler,
+                DescriptorCount = 1,
+            };
+            var poolInfo = new DescriptorPoolCreateInfo
+            {
+                SType = StructureType.DescriptorPoolCreateInfo,
+                MaxSets = 1,
+                PoolSizeCount = 1,
+                PPoolSizes = &poolSize,
+            };
+            Check(
+                _vk.CreateDescriptorPool(
+                    _device,
+                    &poolInfo,
+                    null,
+                    out _gameOverlayDescriptorPool),
+                "vkCreateDescriptorPool(game overlay)");
+
+            var setLayout = _gameOverlayDescriptorSetLayout;
+            var allocateInfo = new DescriptorSetAllocateInfo
+            {
+                SType = StructureType.DescriptorSetAllocateInfo,
+                DescriptorPool = _gameOverlayDescriptorPool,
+                DescriptorSetCount = 1,
+                PSetLayouts = &setLayout,
+            };
+            Check(
+                _vk.AllocateDescriptorSets(
+                    _device,
+                    &allocateInfo,
+                    out _gameOverlayDescriptorSet),
+                "vkAllocateDescriptorSets(game overlay)");
+
+            var descriptorImage = new DescriptorImageInfo
+            {
+                Sampler = _gameOverlaySampler,
+                ImageView = _gameOverlayImageView,
+                ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+            };
+            var descriptorWrite = new WriteDescriptorSet
+            {
+                SType = StructureType.WriteDescriptorSet,
+                DstSet = _gameOverlayDescriptorSet,
+                DstBinding = 1,
+                DescriptorCount = 1,
+                DescriptorType = DescriptorType.CombinedImageSampler,
+                PImageInfo = &descriptorImage,
+            };
+            _vk.UpdateDescriptorSets(_device, 1, &descriptorWrite, 0, null);
+
+            CreateGameOverlayRenderPass();
+            CreateGameOverlayPipeline();
+            _gameOverlayFrameSequence = -1;
+            _gameOverlayImageInitialized = false;
+        }
+
+        private void CreateGameOverlayRenderPass()
+        {
+            var attachment = new AttachmentDescription
+            {
+                Format = _swapchainFormat,
+                Samples = SampleCountFlags.Count1Bit,
+                LoadOp = AttachmentLoadOp.Load,
+                StoreOp = AttachmentStoreOp.Store,
+                StencilLoadOp = AttachmentLoadOp.DontCare,
+                StencilStoreOp = AttachmentStoreOp.DontCare,
+                InitialLayout = ImageLayout.PresentSrcKhr,
+                FinalLayout = ImageLayout.PresentSrcKhr,
+            };
+            var colorReference = new AttachmentReference
+            {
+                Attachment = 0,
+                Layout = ImageLayout.ColorAttachmentOptimal,
+            };
+            var subpass = new SubpassDescription
+            {
+                PipelineBindPoint = PipelineBindPoint.Graphics,
+                ColorAttachmentCount = 1,
+                PColorAttachments = &colorReference,
+            };
+            var dependencies = stackalloc SubpassDependency[2];
+            dependencies[0] = new SubpassDependency
+            {
+                SrcSubpass = Vk.SubpassExternal,
+                DstSubpass = 0,
+                SrcStageMask =
+                    PipelineStageFlags.TransferBit |
+                    PipelineStageFlags.ColorAttachmentOutputBit,
+                DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
+                SrcAccessMask =
+                    AccessFlags.TransferWriteBit |
+                    AccessFlags.ColorAttachmentWriteBit,
+                DstAccessMask =
+                    AccessFlags.ColorAttachmentReadBit |
+                    AccessFlags.ColorAttachmentWriteBit,
+            };
+            dependencies[1] = new SubpassDependency
+            {
+                SrcSubpass = 0,
+                DstSubpass = Vk.SubpassExternal,
+                SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
+                DstStageMask = PipelineStageFlags.BottomOfPipeBit,
+                SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
+            };
+            var renderPassInfo = new RenderPassCreateInfo
+            {
+                SType = StructureType.RenderPassCreateInfo,
+                AttachmentCount = 1,
+                PAttachments = &attachment,
+                SubpassCount = 1,
+                PSubpasses = &subpass,
+                DependencyCount = 2,
+                PDependencies = dependencies,
+            };
+            Check(
+                _vk.CreateRenderPass(
+                    _device,
+                    &renderPassInfo,
+                    null,
+                    out _gameOverlayRenderPass),
+                "vkCreateRenderPass(game overlay)");
+
+            _gameOverlayFramebuffers = new Framebuffer[_swapchainImageViews.Length];
+            for (var index = 0; index < _swapchainImageViews.Length; index++)
+            {
+                var view = _swapchainImageViews[index];
+                var framebufferInfo = new FramebufferCreateInfo
+                {
+                    SType = StructureType.FramebufferCreateInfo,
+                    RenderPass = _gameOverlayRenderPass,
+                    AttachmentCount = 1,
+                    PAttachments = &view,
+                    Width = _extent.Width,
+                    Height = _extent.Height,
+                    Layers = 1,
+                };
+                Check(
+                    _vk.CreateFramebuffer(
+                        _device,
+                        &framebufferInfo,
+                        null,
+                        out _gameOverlayFramebuffers[index]),
+                    "vkCreateFramebuffer(game overlay)");
+            }
+        }
+
+        private void CreateGameOverlayPipeline()
+        {
+            var setLayout = _gameOverlayDescriptorSetLayout;
+            var pipelineLayoutInfo = new PipelineLayoutCreateInfo
+            {
+                SType = StructureType.PipelineLayoutCreateInfo,
+                SetLayoutCount = 1,
+                PSetLayouts = &setLayout,
+            };
+            Check(
+                _vk.CreatePipelineLayout(
+                    _device,
+                    &pipelineLayoutInfo,
+                    null,
+                    out _gameOverlayPipelineLayout),
+                "vkCreatePipelineLayout(game overlay)");
+
+            var vertexModule = CreateShaderModule(
+                SpirvFixedShaders.CreateFullscreenVertex(attributeCount: 1));
+            var fragmentModule = CreateShaderModule(
+                SpirvFixedShaders.CreateCopyFragment());
+            var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
+            try
+            {
+                var stages = stackalloc PipelineShaderStageCreateInfo[2];
+                stages[0] = new PipelineShaderStageCreateInfo
+                {
+                    SType = StructureType.PipelineShaderStageCreateInfo,
+                    Stage = ShaderStageFlags.VertexBit,
+                    Module = vertexModule,
+                    PName = entryPoint,
+                };
+                stages[1] = new PipelineShaderStageCreateInfo
+                {
+                    SType = StructureType.PipelineShaderStageCreateInfo,
+                    Stage = ShaderStageFlags.FragmentBit,
+                    Module = fragmentModule,
+                    PName = entryPoint,
+                };
+                var vertexInput = new PipelineVertexInputStateCreateInfo
+                {
+                    SType = StructureType.PipelineVertexInputStateCreateInfo,
+                };
+                var inputAssembly = new PipelineInputAssemblyStateCreateInfo
+                {
+                    SType = StructureType.PipelineInputAssemblyStateCreateInfo,
+                    Topology = PrimitiveTopology.TriangleList,
+                };
+                var viewport = new Viewport(0, 0, _extent.Width, _extent.Height, 0, 1);
+                var scissor = new Rect2D(new Offset2D(0, 0), _extent);
+                var viewportState = new PipelineViewportStateCreateInfo
+                {
+                    SType = StructureType.PipelineViewportStateCreateInfo,
+                    ViewportCount = 1,
+                    PViewports = &viewport,
+                    ScissorCount = 1,
+                    PScissors = &scissor,
+                };
+                var rasterization = new PipelineRasterizationStateCreateInfo
+                {
+                    SType = StructureType.PipelineRasterizationStateCreateInfo,
+                    PolygonMode = PolygonMode.Fill,
+                    CullMode = CullModeFlags.None,
+                    FrontFace = FrontFace.CounterClockwise,
+                    LineWidth = 1,
+                };
+                var multisample = new PipelineMultisampleStateCreateInfo
+                {
+                    SType = StructureType.PipelineMultisampleStateCreateInfo,
+                    RasterizationSamples = SampleCountFlags.Count1Bit,
+                };
+                var blendAttachment = new PipelineColorBlendAttachmentState
+                {
+                    BlendEnable = true,
+                    SrcColorBlendFactor = BlendFactor.One,
+                    DstColorBlendFactor = BlendFactor.OneMinusSrcAlpha,
+                    ColorBlendOp = BlendOp.Add,
+                    SrcAlphaBlendFactor = BlendFactor.One,
+                    DstAlphaBlendFactor = BlendFactor.OneMinusSrcAlpha,
+                    AlphaBlendOp = BlendOp.Add,
+                    ColorWriteMask =
+                        ColorComponentFlags.RBit |
+                        ColorComponentFlags.GBit |
+                        ColorComponentFlags.BBit |
+                        ColorComponentFlags.ABit,
+                };
+                var blendState = new PipelineColorBlendStateCreateInfo
+                {
+                    SType = StructureType.PipelineColorBlendStateCreateInfo,
+                    AttachmentCount = 1,
+                    PAttachments = &blendAttachment,
+                };
+                var pipelineInfo = new GraphicsPipelineCreateInfo
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo,
+                    StageCount = 2,
+                    PStages = stages,
+                    PVertexInputState = &vertexInput,
+                    PInputAssemblyState = &inputAssembly,
+                    PViewportState = &viewportState,
+                    PRasterizationState = &rasterization,
+                    PMultisampleState = &multisample,
+                    PColorBlendState = &blendState,
+                    Layout = _gameOverlayPipelineLayout,
+                    RenderPass = _gameOverlayRenderPass,
+                    Subpass = 0,
+                };
+                Check(
+                    _vk.CreateGraphicsPipelines(
+                        _device,
+                        _pipelineCache,
+                        1,
+                        &pipelineInfo,
+                        null,
+                        out _gameOverlayPipeline),
+                    "vkCreateGraphicsPipelines(game overlay)");
+                MarkPipelineCacheDirty();
+            }
+            finally
+            {
+                SilkMarshal.Free((nint)entryPoint);
+                _vk.DestroyShaderModule(_device, fragmentModule, null);
+                _vk.DestroyShaderModule(_device, vertexModule, null);
+            }
+        }
+
+        private void RecordGameOverlay(uint imageIndex, int frameSlot)
+        {
+            if (_gameOverlayReader is null ||
+                _gameOverlayImage.Handle == 0 ||
+                _gameOverlayStagingMapped.Length <= frameSlot)
+            {
+                return;
+            }
+
+            var byteCount = checked(
+                (int)(_gameOverlayWidth *
+                    _gameOverlayHeight *
+                    VulkanOverlayFrameProtocol.BytesPerPixel));
+            var staging = new Span<byte>(
+                (void*)_gameOverlayStagingMapped[frameSlot],
+                byteCount);
+            if (!_gameOverlayReader.TryCopyLatest(
+                    staging,
+                    checked((int)_gameOverlayWidth),
+                    checked((int)_gameOverlayHeight),
+                    _gameOverlayFrameSequence,
+                    out var visible,
+                    out var sequence,
+                    out var copied))
+            {
+                return;
+            }
+
+            if (!visible)
+            {
+                HostSessionControl.SetOverlayInputCaptured(false);
+                _gameOverlayFrameSequence = sequence;
+                return;
+            }
+
+            HostSessionControl.SetOverlayInputCaptured(true);
+            _gameOverlayFrameSequence = sequence;
+            if (copied)
+            {
+                var toTransfer = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = _gameOverlayImageInitialized
+                        ? AccessFlags.ShaderReadBit
+                        : 0,
+                    DstAccessMask = AccessFlags.TransferWriteBit,
+                    OldLayout = _gameOverlayImageInitialized
+                        ? ImageLayout.ShaderReadOnlyOptimal
+                        : ImageLayout.Undefined,
+                    NewLayout = ImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = _gameOverlayImage,
+                    SubresourceRange = ColorSubresourceRange(),
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    _gameOverlayImageInitialized
+                        ? PipelineStageFlags.FragmentShaderBit
+                        : PipelineStageFlags.TopOfPipeBit,
+                    PipelineStageFlags.TransferBit,
+                    0, 0, null, 0, null, 1, &toTransfer);
+
+                var copy = new BufferImageCopy
+                {
+                    ImageSubresource = new ImageSubresourceLayers(
+                        ImageAspectFlags.ColorBit,
+                        0,
+                        0,
+                        1),
+                    ImageExtent = new Extent3D(
+                        _gameOverlayWidth,
+                        _gameOverlayHeight,
+                        1),
+                };
+                _vk.CmdCopyBufferToImage(
+                    _commandBuffer,
+                    _gameOverlayStagingBuffers[frameSlot],
+                    _gameOverlayImage,
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &copy);
+
+                var toShaderRead = new ImageMemoryBarrier
+                {
+                    SType = StructureType.ImageMemoryBarrier,
+                    SrcAccessMask = AccessFlags.TransferWriteBit,
+                    DstAccessMask = AccessFlags.ShaderReadBit,
+                    OldLayout = ImageLayout.TransferDstOptimal,
+                    NewLayout = ImageLayout.ShaderReadOnlyOptimal,
+                    SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                    Image = _gameOverlayImage,
+                    SubresourceRange = ColorSubresourceRange(),
+                };
+                _vk.CmdPipelineBarrier(
+                    _commandBuffer,
+                    PipelineStageFlags.TransferBit,
+                    PipelineStageFlags.FragmentShaderBit,
+                    0, 0, null, 0, null, 1, &toShaderRead);
+                _gameOverlayImageInitialized = true;
+            }
+
+            if (!_gameOverlayImageInitialized)
+            {
+                return;
+            }
+
+            var renderPassInfo = new RenderPassBeginInfo
+            {
+                SType = StructureType.RenderPassBeginInfo,
+                RenderPass = _gameOverlayRenderPass,
+                Framebuffer = _gameOverlayFramebuffers[imageIndex],
+                RenderArea = new Rect2D(new Offset2D(0, 0), _extent),
+            };
+            _vk.CmdBeginRenderPass(
+                _commandBuffer,
+                &renderPassInfo,
+                SubpassContents.Inline);
+            _vk.CmdBindPipeline(
+                _commandBuffer,
+                PipelineBindPoint.Graphics,
+                _gameOverlayPipeline);
+            var descriptorSet = _gameOverlayDescriptorSet;
+            _vk.CmdBindDescriptorSets(
+                _commandBuffer,
+                PipelineBindPoint.Graphics,
+                _gameOverlayPipelineLayout,
+                0,
+                1,
+                &descriptorSet,
+                0,
+                null);
+            _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
+            _vk.CmdEndRenderPass(_commandBuffer);
+        }
+
         private CommandBuffer AllocateGuestCommandBuffer()
         {
             // The pool has ResetCommandBufferBit, so vkBeginCommandBuffer
@@ -6021,6 +6649,7 @@ internal static unsafe class VulkanVideoPresenter
                 _vk.CreatePipelineLayout(_device, &layoutInfo, null, out _pipelineLayout),
                 "vkCreatePipelineLayout");
             CreateBarycentricPipeline();
+            CreateGameOverlayResources();
         }
 
         private void CreateBarycentricPipeline()
@@ -13958,6 +14587,8 @@ internal static unsafe class VulkanVideoPresenter
                 RecordOverlayBlit(imageIndex, frameSlot);
             }
 
+            RecordGameOverlay(imageIndex, frameSlot);
+
             Check(_vk.EndCommandBuffer(_commandBuffer), "vkEndCommandBuffer");
 
             var imageAvailable = _frameImageAvailable[frameSlot];
@@ -16989,6 +17620,7 @@ internal static unsafe class VulkanVideoPresenter
 
         private void DestroySwapchainResources()
         {
+            DestroyGameOverlayResources();
             DestroyHostMovieImage();
             DestroyPresentEncodeImage();
             for (var slot = 0; slot < _frameUploadBuffers.Length; slot++)
@@ -17127,6 +17759,97 @@ internal static unsafe class VulkanVideoPresenter
             _swapchainImageViews = [];
             _framebuffers = [];
             _imageInitialized = [];
+        }
+
+        private void DestroyGameOverlayResources()
+        {
+            if (_gameOverlayPipeline.Handle != 0)
+            {
+                _vk.DestroyPipeline(_device, _gameOverlayPipeline, null);
+                _gameOverlayPipeline = default;
+            }
+            if (_gameOverlayPipelineLayout.Handle != 0)
+            {
+                _vk.DestroyPipelineLayout(_device, _gameOverlayPipelineLayout, null);
+                _gameOverlayPipelineLayout = default;
+            }
+            foreach (var framebuffer in _gameOverlayFramebuffers)
+            {
+                if (framebuffer.Handle != 0)
+                {
+                    _vk.DestroyFramebuffer(_device, framebuffer, null);
+                }
+            }
+            _gameOverlayFramebuffers = [];
+            if (_gameOverlayRenderPass.Handle != 0)
+            {
+                _vk.DestroyRenderPass(_device, _gameOverlayRenderPass, null);
+                _gameOverlayRenderPass = default;
+            }
+            if (_gameOverlayDescriptorPool.Handle != 0)
+            {
+                _vk.DestroyDescriptorPool(_device, _gameOverlayDescriptorPool, null);
+                _gameOverlayDescriptorPool = default;
+                _gameOverlayDescriptorSet = default;
+            }
+            if (_gameOverlayDescriptorSetLayout.Handle != 0)
+            {
+                _vk.DestroyDescriptorSetLayout(
+                    _device,
+                    _gameOverlayDescriptorSetLayout,
+                    null);
+                _gameOverlayDescriptorSetLayout = default;
+            }
+            if (_gameOverlaySampler.Handle != 0)
+            {
+                _vk.DestroySampler(_device, _gameOverlaySampler, null);
+                _gameOverlaySampler = default;
+            }
+            if (_gameOverlayImageView.Handle != 0)
+            {
+                _vk.DestroyImageView(_device, _gameOverlayImageView, null);
+                _gameOverlayImageView = default;
+            }
+            if (_gameOverlayImage.Handle != 0)
+            {
+                _vk.DestroyImage(_device, _gameOverlayImage, null);
+                _gameOverlayImage = default;
+            }
+            if (_gameOverlayImageMemory.Handle != 0)
+            {
+                _vk.FreeMemory(_device, _gameOverlayImageMemory, null);
+                _gameOverlayImageMemory = default;
+            }
+            for (var slot = 0; slot < _gameOverlayStagingBuffers.Length; slot++)
+            {
+                if (_gameOverlayStagingMapped.Length > slot &&
+                    _gameOverlayStagingMapped[slot] != 0)
+                {
+                    _vk.UnmapMemory(_device, _gameOverlayStagingMemory[slot]);
+                }
+                if (_gameOverlayStagingBuffers[slot].Handle != 0)
+                {
+                    _vk.DestroyBuffer(
+                        _device,
+                        _gameOverlayStagingBuffers[slot],
+                        null);
+                }
+                if (_gameOverlayStagingMemory[slot].Handle != 0)
+                {
+                    _vk.FreeMemory(
+                        _device,
+                        _gameOverlayStagingMemory[slot],
+                        null);
+                }
+            }
+            _gameOverlayStagingBuffers = [];
+            _gameOverlayStagingMemory = [];
+            _gameOverlayStagingMapped = [];
+            _gameOverlayWidth = 0;
+            _gameOverlayHeight = 0;
+            _gameOverlayFrameSequence = -1;
+            _gameOverlayImageInitialized = false;
+            HostSessionControl.SetOverlayInputCaptured(false);
         }
 
         private static void CheckSwapchainResult(Result result, string operation)

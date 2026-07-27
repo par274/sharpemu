@@ -266,5 +266,10 @@ public static class VulkanVideoHost
 
     public static void RequestClose() => VulkanVideoPresenter.RequestClose();
 
+    public static bool TryAttachOverlay(string descriptor, out string? error) =>
+        VulkanVideoPresenter.TryAttachHostOverlay(descriptor, out error);
+
+    public static void DetachOverlay() => VulkanVideoPresenter.DetachHostOverlay();
+
     public static bool IsEmbedded => VulkanVideoPresenter.UsesHostSurface;
 }

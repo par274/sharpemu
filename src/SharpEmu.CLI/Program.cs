@@ -244,7 +244,12 @@ internal static partial class Program
             return childExitCode;
         }
 
-        if (!TryExtractHostSurfaceArgument(args, out var emulatorArgs, out var hostSurface, out var hostSurfaceError))
+        if (!TryExtractHostArguments(
+                args,
+                out var emulatorArgs,
+                out var hostSurface,
+                out var hostOverlay,
+                out var hostSurfaceError))
         {
             Console.Error.WriteLine($"[LOADER][ERROR] {hostSurfaceError}");
             return 1;
@@ -312,6 +317,13 @@ internal static partial class Program
             if (hostSurface is not null && !VulkanVideoHost.TryAttachSurface(hostSurface))
             {
                 Console.Error.WriteLine("[LOADER][ERROR] The requested GUI host surface is already active.");
+                return 3;
+            }
+            if (hostOverlay is not null &&
+                !VulkanVideoHost.TryAttachOverlay(hostOverlay, out var overlayError))
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][ERROR] Could not attach the GUI overlay channel: {overlayError}");
                 return 3;
             }
 
@@ -385,6 +397,10 @@ internal static partial class Program
             }
 
             HostSessionControl.SetEmbeddedHostSurface(0);
+            if (hostOverlay is not null)
+            {
+                VulkanVideoHost.DetachOverlay();
+            }
             if (hostSurface is not null)
             {
                 VulkanVideoHost.RequestClose();
@@ -394,18 +410,40 @@ internal static partial class Program
         }
     }
 
-    private static bool TryExtractHostSurfaceArgument(
+    private static bool TryExtractHostArguments(
         IReadOnlyList<string> args,
         out string[] emulatorArgs,
         out VulkanHostSurface? hostSurface,
+        out string? hostOverlay,
         out string? error)
     {
         const string hostSurfacePrefix = "--host-surface=";
+        const string hostOverlayPrefix = "--host-overlay=";
         var remaining = new List<string>(args.Count);
         hostSurface = null;
+        hostOverlay = null;
         error = null;
         foreach (var argument in args)
         {
+            if (argument.StartsWith(hostOverlayPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                if (hostOverlay is not null)
+                {
+                    emulatorArgs = [];
+                    error = "more than one GUI overlay channel was specified";
+                    return false;
+                }
+
+                hostOverlay = argument[hostOverlayPrefix.Length..];
+                if (string.IsNullOrWhiteSpace(hostOverlay))
+                {
+                    emulatorArgs = [];
+                    error = "the GUI overlay descriptor is empty";
+                    return false;
+                }
+                continue;
+            }
+
             if (!argument.StartsWith(hostSurfacePrefix, StringComparison.OrdinalIgnoreCase))
             {
                 remaining.Add(argument);
@@ -472,10 +510,12 @@ internal static partial class Program
             Console.OutputEncoding = Encoding.UTF8;
             return;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             // No attached console (GUI-subsystem child with piped output):
             // wrap the raw handles instead.
+            System.Diagnostics.Debug.WriteLine(
+                $"Console UTF-8 initialization fell back to raw handles: {exception.Message}");
         }
 
         if (Console.IsOutputRedirected)
@@ -794,9 +834,11 @@ internal static partial class Program
                 }
             }
         }
-        catch
+        catch (Exception exception)
         {
             // Logging should never block launch; unknown title ids use a stable fallback.
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Could not read the title id used for log naming: {exception.Message}");
         }
 
         return null;
@@ -896,8 +938,10 @@ internal static partial class Program
                 _consoleMirrorFile?.Flush();
                 _consoleMirrorFile?.Dispose();
             }
-            catch
+            catch (Exception exception)
             {
+                System.Diagnostics.Debug.WriteLine(
+                    $"Console log mirror cleanup failed: {exception.Message}");
             }
 
             _consoleMirrorFile = null;

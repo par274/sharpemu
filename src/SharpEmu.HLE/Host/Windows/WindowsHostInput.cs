@@ -20,6 +20,11 @@ internal sealed partial class WindowsHostInput : IHostInput
 
     public int GetGamepadStates(Span<HostGamepadState> destination)
     {
+        if (HostSessionControl.IsOverlayInputCaptured)
+        {
+            return 0;
+        }
+
         var count = 0;
         if (count < destination.Length && WindowsDualSenseReader.TryGetState(out var dualSense))
         {
@@ -83,6 +88,7 @@ internal sealed partial class WindowsHostInput : IHostInput
     }
 
     public bool IsKeyDown(int virtualKey) =>
+        !HostSessionControl.IsOverlayInputCaptured &&
         (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 
     [LibraryImport("user32.dll")]
