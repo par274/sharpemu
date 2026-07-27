@@ -89,7 +89,7 @@ public sealed class Gen5ShaderDecoderBoundaryTests
 
         Assert.False(decoded);
         Assert.Empty(program.Instructions);
-        Assert.Equal("unterminated", error);
+        Assert.Equal("instruction-limit", error);
         Assert.Equal(MaximumInstructionCount, memory.Reads.Count);
         Assert.All(memory.Reads, read => Assert.True(read.Succeeded));
         Assert.Equal(
