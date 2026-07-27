@@ -1,0 +1,32 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Shared colors and brushes used throughout the launcher.
+-->
+
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Color x:Key="SystemAccentColor">#7C5CFC</Color>
+
+  <LinearGradientBrush x:Key="BgBrush" StartPoint="0%,0%" EndPoint="100%,100%">
+    <GradientStop Offset="0" Color="#12151F" />
+    <GradientStop Offset="0.55" Color="#0D1017" />
+    <GradientStop Offset="1" Color="#0B0D14" />
+  </LinearGradientBrush>
+
+  <SolidColorBrush x:Key="ChromeBrush" Color="#090C12" />
+  <SolidColorBrush x:Key="CardBrush" Color="#141924" />
+  <SolidColorBrush x:Key="CardBorderBrush" Color="#232B3A" />
+  <SolidColorBrush x:Key="ElevatedBrush" Color="#1B2230" />
+  <SolidColorBrush x:Key="TextBrush" Color="#E8ECF4" />
+  <SolidColorBrush x:Key="MutedBrush" Color="#8B94A7" />
+  <SolidColorBrush x:Key="FaintBrush" Color="#5A6478" />
+  <SolidColorBrush x:Key="AccentBrush" Color="#7C5CFC" />
+  <SolidColorBrush x:Key="AccentHoverBrush" Color="#8F73FF" />
+  <SolidColorBrush x:Key="DangerBrush" Color="#E5484D" />
+  <SolidColorBrush x:Key="DangerHoverBrush" Color="#F2555A" />
+  <SolidColorBrush x:Key="SuccessBrush" Color="#46C46B" />
+  <SolidColorBrush x:Key="InfoBrush" Color="#58A6FF" />
+  <SolidColorBrush x:Key="TileHoverBrush" Color="#1A2130" />
+  <SolidColorBrush x:Key="TileSelectedBrush" Color="#212A3F" />
+</ResourceDictionary>
