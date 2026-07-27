@@ -54,18 +54,23 @@ internal static class SourceIndexCommand
 
     private static async Task<int> StatusAsync(GitRepository repository, SourceIndexStore store, CommandArguments arguments)
     {
-        if (!File.Exists(store.IndexPath))
+        var status = await store.GetStatusAsync();
+        if (!status.Exists)
         {
             var missing = new { exists = false, path = store.IndexPath, commit = repository.Commit };
             if (arguments.Has("--json")) Program.WriteJson(missing); else Console.WriteLine("Index is missing; run index build.");
             return 2;
         }
 
-        var index = await store.LoadOrBuildAsync();
-        var tracked = repository.TrackedFiles().ToHashSet(StringComparer.Ordinal);
-        var indexed = index.Files.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);
-        var missingFiles = tracked.Where(path => IsLikelyText(repository.ResolvePath(path)) && !indexed.Contains(path)).Take(20).ToArray();
-        var removedFiles = indexed.Where(path => !tracked.Contains(path)).Take(20).ToArray();
+        var index = status.Index;
+        if (index is null || index.SchemaVersion != SourceIndexStore.SchemaVersion)
+        {
+            var invalid = new { exists = true, path = store.IndexPath, current = false, reason = "unsupported-or-invalid-schema" };
+            if (arguments.Has("--json")) Program.WriteJson(invalid); else Console.WriteLine("Index schema is invalid; run index build.");
+            return 2;
+        }
+
+        const int detailLimit = 20;
         var result = new
         {
             exists = true,
@@ -74,9 +79,14 @@ internal static class SourceIndexCommand
             currentCommit = repository.Commit,
             fileCount = index.Files.Count,
             symbolCount = index.Symbols.Count,
-            missingTrackedTextFiles = missingFiles,
-            removedTrackedFiles = removedFiles,
-            current = index.Commit == repository.Commit && missingFiles.Length == 0 && removedFiles.Length == 0,
+            addedTrackedTextFileCount = status.AddedTrackedTextFiles.Count,
+            removedTrackedFileCount = status.RemovedTrackedFiles.Count,
+            contentModifiedTrackedFileCount = status.ContentModifiedTrackedFiles.Count,
+            addedTrackedTextFiles = status.AddedTrackedTextFiles.Take(detailLimit).ToArray(),
+            removedTrackedFiles = status.RemovedTrackedFiles.Take(detailLimit).ToArray(),
+            contentModifiedTrackedFiles = status.ContentModifiedTrackedFiles.Take(detailLimit).ToArray(),
+            truncated = status.AddedTrackedTextFiles.Count > detailLimit || status.RemovedTrackedFiles.Count > detailLimit || status.ContentModifiedTrackedFiles.Count > detailLimit,
+            current = status.Current,
         };
         if (arguments.Has("--json"))
         {
@@ -92,7 +102,8 @@ internal static class SourceIndexCommand
 
     private static async Task<int> QueryAsync(SourceIndexStore store, CommandArguments arguments)
     {
-        var index = await store.LoadOrBuildAsync();
+        var index = await LoadForQueryAsync(store);
+        if (index is null) return 2;
         var symbol = arguments.Value("--symbol");
         var namespaceName = arguments.Value("--namespace");
         var kind = arguments.Value("--kind");
@@ -126,7 +137,8 @@ internal static class SourceIndexCommand
 
     private static async Task<int> OutlineAsync(SourceIndexStore store, CommandArguments arguments)
     {
-        var index = await store.LoadOrBuildAsync();
+        var index = await LoadForQueryAsync(store);
+        if (index is null) return 2;
         var path = arguments.Value("--path");
         var symbol = arguments.Value("--symbol");
         if (string.IsNullOrWhiteSpace(path) == string.IsNullOrWhiteSpace(symbol))
@@ -160,7 +172,8 @@ internal static class SourceIndexCommand
         {
             return Program.Fail("index text requires --pattern.");
         }
-        var index = await store.LoadOrBuildAsync();
+        var index = await LoadForQueryAsync(store);
+        if (index is null) return 2;
         var limit = arguments.IntValue("--limit", 20, 1, 160);
         var matches = new List<TextMatch>();
         var total = 0;
@@ -189,7 +202,7 @@ internal static class SourceIndexCommand
 
     private static async Task<int> MapAsync(GitRepository repository, SourceIndexStore store, CommandArguments arguments)
     {
-        _ = await store.LoadOrBuildAsync();
+        if (await LoadForQueryAsync(store) is null) return 2;
         var requested = arguments.Value("--project");
         if (string.IsNullOrWhiteSpace(requested))
         {
@@ -255,13 +268,17 @@ internal static class SourceIndexCommand
         (string.Equals(item.Name, requested, StringComparison.OrdinalIgnoreCase) ||
          string.Equals(item.FullyQualifiedName, requested, StringComparison.OrdinalIgnoreCase)) ? 0 : 1;
 
-    private static bool IsLikelyText(string path)
+    private static async Task<SourceIndexDocument?> LoadForQueryAsync(SourceIndexStore store)
     {
-        if (!File.Exists(path)) return false;
-        using var stream = File.OpenRead(path);
-        Span<byte> bytes = stackalloc byte[8192];
-        var read = stream.Read(bytes);
-        return !SourceIndexStore.IsBinary(bytes[..read]);
+        try
+        {
+            return await store.LoadCurrentAsync();
+        }
+        catch (SourceIndexStaleException)
+        {
+            Console.Error.WriteLine("The source index is stale; run index build before querying.");
+            return null;
+        }
     }
 
     private sealed record TextMatch(string Path, int Line, int Column, string Excerpt);

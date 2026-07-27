@@ -27,6 +27,7 @@ internal sealed record VisualFrame(
     string SourcePixelFormat,
     string CanonicalFormat,
     string? ColorSpace,
+    string? NearestMilestone,
     bool VerticalFlipApplied,
     string EncoderStatus,
     ImageMetrics Metrics,

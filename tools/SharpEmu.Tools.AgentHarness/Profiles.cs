@@ -61,6 +61,8 @@ internal sealed record TargetMetadata
 {
     public bool TitleIdVerified { get; init; }
 
+    public string? VerifiedTitleId { get; init; }
+
     public bool VersionVerified { get; init; }
 
     public string? VerifiedVersion { get; init; }
@@ -78,7 +80,9 @@ internal sealed record ProfileValidation(
     string? ExpectedVersion,
     bool EbootExists,
     bool EbootHashMatches,
+    string HashStatus,
     bool TitleIdVerified,
+    string? VerifiedTitleId,
     string VersionStatus,
     IReadOnlyList<string> Errors,
     IReadOnlyList<string> Warnings);
@@ -97,7 +101,7 @@ internal static class ProfileLoader
         if (!File.Exists(fullPath))
         {
             errors.Add("Profile file does not exist.");
-            return (null, new ProfileValidation(false, Redact(repository, fullPath), null, null, null, false, false, false, "unknown", errors, warnings));
+            return (null, InvalidProfile(repository, fullPath, errors, warnings));
         }
 
         LocalRunProfile? profile;
@@ -108,14 +112,14 @@ internal static class ProfileLoader
         }
         catch (Exception exception) when (exception is JsonException or IOException)
         {
-            errors.Add($"Profile JSON is invalid: {exception.Message}");
-            return (null, new ProfileValidation(false, Redact(repository, fullPath), null, null, null, false, false, false, "unknown", errors, warnings));
+            errors.Add($"Profile JSON is invalid: {RunArtifactRedactor.SanitizeMessage(exception.Message, repository)}");
+            return (null, InvalidProfile(repository, fullPath, errors, warnings));
         }
 
         if (profile is null)
         {
             errors.Add("Profile JSON was empty.");
-            return (null, new ProfileValidation(false, Redact(repository, fullPath), null, null, null, false, false, false, "unknown", errors, warnings));
+            return (null, InvalidProfile(repository, fullPath, errors, warnings));
         }
 
         if (profile.SchemaVersion != "1.0.0") errors.Add($"Unsupported profile schema '{profile.SchemaVersion}'.");
@@ -135,29 +139,46 @@ internal static class ProfileLoader
             errors.Add("Selected eboot does not exist.");
         }
         var hashMatches = false;
+        var hashStatus = "not-verified";
         if (ebootExists && verifyHash)
         {
             hashMatches = string.Equals(
                 GitRepository.Sha256File(ebootPath),
                 profile.EbootSha256,
                 StringComparison.OrdinalIgnoreCase);
+            hashStatus = hashMatches ? "matched" : "mismatched";
             if (!hashMatches) errors.Add("Selected eboot SHA-256 does not match the profile.");
         }
-        else if (ebootExists)
-        {
-            hashMatches = !string.IsNullOrWhiteSpace(profile.EbootSha256);
-        }
 
-        if (!profile.Metadata.TitleIdVerified)
+        var (metadataTitleId, metadataVersion) = ReadMetadataIdentity(repository, profile.Metadata.MetadataSource);
+        if (!string.IsNullOrWhiteSpace(metadataTitleId) &&
+            !string.IsNullOrWhiteSpace(profile.Metadata.VerifiedTitleId) &&
+            !string.Equals(metadataTitleId, profile.Metadata.VerifiedTitleId, StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add("Actual target metadata Title ID contradicts the profile verification record.");
+        }
+        if (!string.IsNullOrWhiteSpace(metadataVersion) &&
+            !string.IsNullOrWhiteSpace(profile.Metadata.VerifiedVersion) &&
+            !string.Equals(metadataVersion, profile.Metadata.VerifiedVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add("Actual target metadata version contradicts the profile verification record.");
+        }
+        var verifiedTitleId = metadataTitleId ?? profile.Metadata.VerifiedTitleId;
+        var verifiedVersion = metadataVersion ?? profile.Metadata.VerifiedVersion;
+        if (!profile.Metadata.TitleIdVerified || string.IsNullOrWhiteSpace(verifiedTitleId))
         {
             errors.Add("The target Title ID is not independently verified.");
         }
-        if (!profile.Metadata.VersionVerified)
+        else if (!string.Equals(verifiedTitleId, profile.ExpectedTitleId, StringComparison.OrdinalIgnoreCase))
         {
-            warnings.Add("Target version is unverified; the run may proceed only because no contradictory version was found.");
+            errors.Add("Verified target Title ID contradicts expectedTitleId.");
+        }
+        if (!profile.Metadata.VersionVerified || string.IsNullOrWhiteSpace(verifiedVersion))
+        {
+            errors.Add("The target version is not independently verified.");
         }
         if (profile.Metadata.VersionVerified &&
-            !string.Equals(profile.Metadata.VerifiedVersion, profile.ExpectedVersion, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(verifiedVersion, profile.ExpectedVersion, StringComparison.OrdinalIgnoreCase))
         {
             errors.Add("Verified target version contradicts expectedVersion.");
         }
@@ -165,6 +186,14 @@ internal static class ProfileLoader
         {
             warnings.Add("Strict dynamic-library resolution is enabled by the profile; confirm this is intentional evidence, not a faster-failure shortcut.");
         }
+        profile = profile with
+        {
+            Metadata = profile.Metadata with
+            {
+                VerifiedTitleId = verifiedTitleId,
+                VerifiedVersion = verifiedVersion,
+            },
+        };
 
         return (profile, new ProfileValidation(
             errors.Count == 0,
@@ -174,7 +203,9 @@ internal static class ProfileLoader
             profile.ExpectedVersion,
             ebootExists,
             hashMatches,
-            profile.Metadata.TitleIdVerified,
+            hashStatus,
+            profile.Metadata.TitleIdVerified && !string.IsNullOrWhiteSpace(verifiedTitleId),
+            verifiedTitleId,
             profile.Metadata.VersionStatus,
             errors,
             warnings));
@@ -184,6 +215,35 @@ internal static class ProfileLoader
         path.StartsWith(repository.Root, StringComparison.OrdinalIgnoreCase)
             ? "<repo>/" + GitRepository.NormalizeRelativePath(Path.GetRelativePath(repository.Root, path))
             : "<private>/" + Path.GetFileName(path);
+
+    private static ProfileValidation InvalidProfile(
+        GitRepository repository,
+        string path,
+        IReadOnlyList<string> errors,
+        IReadOnlyList<string> warnings) =>
+        new(false, Redact(repository, path), null, null, null, false, false, "not-verified", false, null, "unknown", errors, warnings);
+
+    private static (string? TitleId, string? Version) ReadMetadataIdentity(GitRepository repository, string? source)
+    {
+        if (string.IsNullOrWhiteSpace(source)) return (null, null);
+        try
+        {
+            var path = Path.IsPathFullyQualified(source) ? Path.GetFullPath(source) : repository.ResolvePath(source);
+            if (!File.Exists(path)) return (null, null);
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var root = document.RootElement;
+            return (
+                StringProperty(root, "titleId") ?? StringProperty(root, "titleID") ?? StringProperty(root, "TITLE_ID"),
+                StringProperty(root, "contentVersion") ?? StringProperty(root, "masterVersion") ?? StringProperty(root, "targetContentVersion") ?? StringProperty(root, "version"));
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return (null, null);
+        }
+    }
+
+    private static string? StringProperty(JsonElement root, string name) =>
+        root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 }
 
 internal static class ProfileCommand
@@ -193,7 +253,7 @@ internal static class ProfileCommand
         if (!arguments.Is("validate")) return Program.Fail("profile requires validate.");
         var path = arguments.Value("--profile");
         if (string.IsNullOrWhiteSpace(path)) return Program.Fail("profile validate requires --profile.");
-        var (_, validation) = await ProfileLoader.LoadAndValidateAsync(repository, path);
+        var (_, validation) = await ProfileLoader.LoadAndValidateAsync(repository, path, verifyHash: !arguments.Has("--fast"));
         if (arguments.Has("--json"))
         {
             Program.WriteJson(validation);

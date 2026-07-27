@@ -15,9 +15,10 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        GitRepository? repository = null;
         try
         {
-            var repository = GitRepository.Discover(Environment.CurrentDirectory);
+            repository = GitRepository.Discover(Environment.CurrentDirectory);
             var arguments = new CommandArguments(args);
             if (arguments.Count == 0 || arguments.Is("help") || arguments.Has("--help") || arguments.Has("-h"))
             {
@@ -46,7 +47,10 @@ internal static class Program
         }
         catch (Exception exception)
         {
-            Console.Error.WriteLine($"agent-harness: {exception.Message}");
+            var message = repository is null
+                ? exception.GetType().Name
+                : RunArtifactRedactor.SanitizeMessage(exception.Message, repository);
+            Console.Error.WriteLine($"agent-harness: {message}");
             return 1;
         }
     }
@@ -66,16 +70,16 @@ internal static class Program
             """
             SharpEmu agent harness
 
-              agent-harness doctor [--json]
+              agent-harness doctor [--profile <local-profile.json>] [--fast] [--environment-only] [--json]
               agent-harness index build|status [--json]
               agent-harness index query --symbol <name> [--namespace <name>] [--kind <kind>] [--limit 20] [--json]
               agent-harness index outline (--path <tracked-path> | --symbol <name>) [--limit 20] [--json]
               agent-harness index text --pattern <text> [--limit 20] [--json]
               agent-harness index map --project <name> [--json]
-              agent-harness profile validate --profile <local-profile.json> [--json]
+              agent-harness profile validate --profile <local-profile.json> [--fast] [--json]
               agent-harness run --profile <local-profile.json>
               agent-harness visual analyze --run <run-id-or-path> [--json]
-              agent-harness visual compare --before <run-id-or-path> --after <run-id-or-path> [--json]
+              agent-harness visual compare --before <run-id-or-path> --after <run-id-or-path> [--frame <number>] [--exploratory] [--json]
               agent-harness synthetic visual [--output <directory>] [--json]
               agent-harness game inspect|extract|resume --metadata <phase-00-json> [--json]
               agent-harness skills validate [--json]

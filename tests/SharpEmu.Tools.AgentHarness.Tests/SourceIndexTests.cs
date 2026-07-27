@@ -65,11 +65,23 @@ public sealed class SourceIndexTests
         var oldHash = first.Files.Single(file => file.Path == "src/App/Tracked.cs").Sha256;
 
         repository.Write("src/App/Tracked.cs", "namespace App; public class After { public void Changed() { } }");
+        var stale = await store.GetStatusAsync();
+        Assert.False(stale.Current);
+        Assert.Empty(stale.AddedTrackedTextFiles);
+        Assert.Empty(stale.RemovedTrackedFiles);
+        Assert.Equal(["src/App/Tracked.cs"], stale.ContentModifiedTrackedFiles);
+        await Assert.ThrowsAsync<SourceIndexStaleException>(() => store.LoadCurrentAsync());
+
         var second = await store.BuildAsync();
         Assert.NotEqual(oldHash, second.Files.Single(file => file.Path == "src/App/Tracked.cs").Sha256);
         Assert.Contains(second.Symbols, symbol => symbol.Name == "Changed");
         Assert.DoesNotContain(second.Symbols, symbol => symbol.Name == "Before");
         Assert.Equal(first.Commit, second.Commit);
+        var current = await store.GetStatusAsync();
+        Assert.True(current.Current);
+        var queryable = await store.LoadCurrentAsync();
+        var changed = Assert.Single(queryable.Symbols, symbol => symbol.Name == "Changed");
+        Assert.Equal(1, changed.StartLine);
 
         var json = await File.ReadAllTextAsync(store.IndexPath);
         using var document = JsonDocument.Parse(json);

@@ -9,6 +9,8 @@ internal static class DoctorCommand
 {
     public static async Task<int> RunAsync(GitRepository repository, CommandArguments arguments)
     {
+        var environmentOnly = arguments.Has("--environment-only");
+        var fast = arguments.Has("--fast");
         var phaseZeroPath = Path.Combine(repository.LocalRoot, "reports", "phase-00-environment.json");
         JsonDocument? phaseZero = null;
         if (File.Exists(phaseZeroPath))
@@ -24,10 +26,11 @@ internal static class DoctorCommand
         var configuration = arguments.Value("--configuration") ?? "Debug";
         var executable = FindEmulator(repository, configuration);
         var profilePath = arguments.Value("--profile") ?? Path.Combine(repository.LocalRoot, "profiles", "demons-souls-01.004.000.json");
+        LocalRunProfile? loadedProfile = null;
         ProfileValidation? profile = null;
-        if (File.Exists(profilePath))
+        if (!environmentOnly)
         {
-            (_, profile) = await ProfileLoader.LoadAndValidateAsync(repository, profilePath, verifyHash: false);
+            (loadedProfile, profile) = await ProfileLoader.LoadAndValidateAsync(repository, profilePath, verifyHash: !fast);
         }
 
         var gpuNames = ReadGpuNames(phaseZero);
@@ -50,37 +53,53 @@ internal static class DoctorCommand
             Tool("dotnet-counters", "dotnet-counters", true, ".NET live counter investigation"),
             Tool("dotnet-dump", "dotnet-dump", true, ".NET crash dump investigation"),
         };
-        var privateScan = ScanTrackedPrivateData(repository, phaseZero);
+        var scanRoots = PrivateRoots(phaseZero, loadedProfile);
+        var scanHashes = PrivateHashes(phaseZero, loadedProfile);
+        var privateScan = PrivateDataScanner.Scan(repository, scanRoots, scanHashes);
         var outputDirectoryWritable = EnsureWritable(repository.LocalRoot);
         var vulkanAvailable = !OperatingSystem.IsWindows() || File.Exists(vulkanRuntime);
         var driveRoot = Path.GetPathRoot(repository.Root)!;
         var drive = new DriveInfo(driveRoot);
+        var environmentReady = dotnet.ExitCode == 0 && vulkanAvailable && outputDirectoryWritable;
+        var repositoryReady = executable is not null && privateScan.Passed;
+        var targetReady = IsTargetReady(profile, environmentOnly);
+        var overallReady = environmentReady && (environmentOnly || repositoryReady && targetReady);
+        var redactionMap = RunArtifactRedactor.CreateStandardMap(repository, scanRoots);
         var report = new
         {
-            schemaVersion = "1.0.0",
+            schemaVersion = "1.1.0",
             generatedUtc = DateTimeOffset.UtcNow,
+            mode = environmentOnly ? "environment-only" : "target",
+            fast,
             repository = "<repo>",
             repository.Branch,
             commit = repository.Commit,
             dirty = repository.IsDirty,
             dotnetSdk = dotnet.ExitCode == 0 ? dotnet.Stdout.Trim() : null,
-            build = new { configuration, executableAvailable = executable is not null, executable = executable is null ? null : "<repo>/" + GitRepository.NormalizeRelativePath(Path.GetRelativePath(repository.Root, executable)) },
+            build = new { configuration, executableAvailable = executable is not null, executable = executable is null ? null : RunArtifactRedactor.RedactText(executable, redactionMap) },
             vulkan = new { available = vulkanAvailable, runtime = OperatingSystem.IsWindows() ? "<windows>/System32/vulkan-1.dll" : vulkanRuntime },
             gpu = gpuNames,
             optionalTools,
             profile,
             outputDirectoryWritable,
             disk = new { root = drive.Name, freeBytes = drive.AvailableFreeSpace },
-            privateDataScan = new { passed = privateScan.Count == 0, matches = privateScan },
-            status = dotnet.ExitCode == 0 && executable is not null && vulkanAvailable && outputDirectoryWritable && privateScan.Count == 0 ? "ready" : "attention-required",
+            privateDataScan = privateScan,
+            readiness = new
+            {
+                environment = environmentReady ? "ready" : "attention-required",
+                repositoryBuild = repositoryReady ? "ready" : "attention-required",
+                targetProfile = environmentOnly ? "not-evaluated" : targetReady ? "ready" : "attention-required",
+            },
+            status = overallReady ? "ready" : "attention-required",
         };
         var reportDirectory = Path.Combine(repository.LocalRoot, "reports");
         Directory.CreateDirectory(reportDirectory);
         var reportPath = Path.Combine(reportDirectory, "agent-harness-doctor.json");
-        await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(report, Program.JsonOptions));
+        var reportJson = RunArtifactRedactor.RedactText(JsonSerializer.Serialize(report, Program.JsonOptions), redactionMap);
+        await File.WriteAllTextAsync(reportPath, reportJson);
         if (arguments.Has("--json"))
         {
-            Program.WriteJson(report);
+            Console.WriteLine(reportJson);
         }
         else
         {
@@ -88,7 +107,8 @@ internal static class DoctorCommand
             Console.WriteLine($"Branch {repository.Branch}, commit {repository.Commit[..12]}, SDK {report.dotnetSdk ?? "missing"}.");
             Console.WriteLine(executable is null ? "Emulator build: missing" : $"Emulator build: {report.build.executable}");
             Console.WriteLine($"Vulkan runtime: {(report.vulkan.available ? "available" : "missing")}");
-            Console.WriteLine($"Private-data scan: {(privateScan.Count == 0 ? "passed" : "FAILED")}");
+            Console.WriteLine($"Environment readiness: {report.readiness.environment}; repository/build readiness: {report.readiness.repositoryBuild}; target-profile readiness: {report.readiness.targetProfile}.");
+            Console.WriteLine($"Private-data scan: {(privateScan.Passed ? "passed" : "FAILED")}");
             Console.WriteLine($"Optional tools: {optionalTools.Count(tool => tool.Status == "available")} available, {optionalTools.Count(tool => tool.Status == "missing")} missing, {optionalTools.Count(tool => tool.Status == "unsupported-on-current-hardware")} unsupported on current hardware.");
             Console.WriteLine($"Report: {reportPath}");
         }
@@ -105,6 +125,9 @@ internal static class DoctorCommand
         };
         return candidates.FirstOrDefault(File.Exists);
     }
+
+    internal static bool IsTargetReady(ProfileValidation? profile, bool environmentOnly) =>
+        environmentOnly || profile is { Valid: true, HashStatus: "matched" };
 
     private static ToolStatus Tool(string name, string command, bool supported, string recommendation)
     {
@@ -126,26 +149,34 @@ internal static class DoctorCommand
             .ToArray();
     }
 
-    private static List<string> ScanTrackedPrivateData(GitRepository repository, JsonDocument? phaseZero)
+    private static IReadOnlyList<string> PrivateRoots(JsonDocument? phaseZero, LocalRunProfile? profile)
     {
-        var needles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (!string.IsNullOrWhiteSpace(userProfile)) needles.Add(userProfile);
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (phaseZero is not null && phaseZero.RootElement.TryGetProperty("archive", out var archive) && archive.TryGetProperty("path", out var archivePath))
         {
             var value = archivePath.GetString();
-            if (!string.IsNullOrWhiteSpace(value)) needles.Add(value);
+            if (!string.IsNullOrWhiteSpace(value)) roots.Add(Path.GetDirectoryName(Path.GetFullPath(value)) ?? value);
         }
-        var matches = new List<string>();
-        foreach (var needle in needles)
+        if (profile is not null)
         {
-            var result = ProcessUtility.RunCapture("git", ["-C", repository.Root, "grep", "-I", "-l", "-F", needle, "--"], repository.Root);
-            if (result.ExitCode == 0)
+            foreach (var root in profile.RedactionRoots) if (!string.IsNullOrWhiteSpace(root)) roots.Add(Path.GetFullPath(root));
+            if (!string.IsNullOrWhiteSpace(profile.EbootPath)) roots.Add(Path.GetDirectoryName(Path.GetFullPath(profile.EbootPath))!);
+        }
+        return roots.ToArray();
+    }
+
+    private static IReadOnlyList<string> PrivateHashes(JsonDocument? phaseZero, LocalRunProfile? profile)
+    {
+        var hashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(profile?.EbootSha256)) hashes.Add(profile.EbootSha256);
+        if (phaseZero is not null && phaseZero.RootElement.TryGetProperty("archive", out var archive))
+        {
+            foreach (var name in new[] { "sha256", "archiveSha256", "archive_sha256" })
             {
-                matches.AddRange(result.Stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries));
+                if (archive.TryGetProperty(name, out var value) && !string.IsNullOrWhiteSpace(value.GetString())) hashes.Add(value.GetString()!);
             }
         }
-        return matches.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToList();
+        return hashes.ToArray();
     }
 
     private static bool EnsureWritable(string path)

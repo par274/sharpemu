@@ -44,6 +44,16 @@ internal sealed record GameBootstrapResult(
     IReadOnlyList<string> Blockers,
     IReadOnlyList<string> Warnings);
 
+internal sealed record ExtractionProvenance(
+    string SchemaVersion,
+    DateTimeOffset CreatedUtc,
+    string ArchiveSha256,
+    long ArchiveSizeBytes,
+    string ExtractionUtility,
+    string ExtractionUtilityPath,
+    string ExtractionUtilityVersion,
+    string IntendedFinalRoot);
+
 internal static class GameInputCommand
 {
     public static async Task<int> RunAsync(GitRepository repository, CommandArguments arguments)
@@ -85,6 +95,10 @@ internal static class GameInputCommand
         var inspection = JsonSerializer.Deserialize<ArchiveInspection>(await File.ReadAllTextAsync(path), Program.JsonOptions)
             ?? throw new InvalidDataException("The Phase 01 archive inspection is empty.");
         var actualSize = File.Exists(metadata.ArchivePath) ? new FileInfo(metadata.ArchivePath).Length : -1;
+        var actualHash = actualSize >= 0 ? await HashFileAsync(metadata.ArchivePath) : null;
+        var utilityVersion = File.Exists(metadata.ArchiveUtilityPath)
+            ? ParseUtilityVersion((await RunUtilityAsync(metadata.ArchiveUtilityPath, ["i"], repository.Root, TimeSpan.FromMinutes(1))).Stdout)
+            : null;
         if (inspection.GeneratedUtc < DateTimeOffset.UtcNow.AddHours(-4) ||
             inspection.Blockers.Count > 0 ||
             !inspection.HashMatchesPhaseZero ||
@@ -92,7 +106,9 @@ internal static class GameInputCommand
             inspection.IntegrityExitCode != 0 ||
             !string.Equals(inspection.ArchiveSha256, metadata.ArchiveSha256, StringComparison.OrdinalIgnoreCase) ||
             inspection.ArchiveSizeBytes != metadata.ArchiveSizeBytes ||
-            actualSize != metadata.ArchiveSizeBytes)
+            actualSize != metadata.ArchiveSizeBytes ||
+            !string.Equals(actualHash, metadata.ArchiveSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(utilityVersion, inspection.UtilityVersion, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("The cached archive inspection is absent, stale, or inconsistent; run game extract for full revalidation.");
         }
@@ -120,7 +136,7 @@ internal static class GameInputCommand
         var hashMatches = string.Equals(archiveHash, metadata.ArchiveSha256, StringComparison.OrdinalIgnoreCase);
         if (!hashMatches) blockers.Add("archive: SHA-256 differs from the Phase 00 record");
         var versionResult = await RunUtilityAsync(metadata.ArchiveUtilityPath, ["i"], repository.Root, TimeSpan.FromMinutes(1));
-        var utilityVersion = versionResult.Stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(line => line.Contains("7-Zip", StringComparison.OrdinalIgnoreCase))?.Trim() ?? "unknown";
+        var utilityVersion = ParseUtilityVersion(versionResult.Stdout);
 
         var listing = await ListAndValidateAsync(metadata.ArchiveUtilityPath, metadata.ArchivePath, repository.Root);
         blockers.AddRange(listing.Blockers);
@@ -169,7 +185,7 @@ internal static class GameInputCommand
         var blockers = new List<string>();
         var warnings = new List<string>();
         var workspace = Directory.GetParent(repository.Root)?.FullName ?? throw new InvalidOperationException("Repository has no workspace parent.");
-        var finalRoot = Path.Combine(workspace, "private", "games", metadata.ExpectedTitleId, metadata.ExpectedVersion);
+        var finalRoot = Path.GetFullPath(Path.Combine(workspace, "private", "games", metadata.ExpectedTitleId, metadata.ExpectedVersion));
         var privateParent = Path.GetDirectoryName(finalRoot)!;
         Directory.CreateDirectory(privateParent);
         if (!string.Equals(Path.GetPathRoot(finalRoot), Path.GetPathRoot(metadata.ArchivePath), StringComparison.OrdinalIgnoreCase))
@@ -184,9 +200,18 @@ internal static class GameInputCommand
             {
                 using var existing = JsonDocument.Parse(await File.ReadAllTextAsync(existingManifestPath));
                 var root = existing.RootElement;
-                var sourceMatches = root.TryGetProperty("sourceArchiveSha256", out var sourceHash) && string.Equals(sourceHash.GetString(), inspection.ArchiveSha256, StringComparison.OrdinalIgnoreCase);
-                var ebootExists = root.TryGetProperty("selectedEbootPath", out var ebootElement) && File.Exists(ebootElement.GetString());
-                if (sourceMatches && ebootExists)
+                var sourceMatches = string.Equals(StringProperty(root, "sourceArchiveSha256"), inspection.ArchiveSha256, StringComparison.OrdinalIgnoreCase);
+                var sizeMatches = root.TryGetProperty("sourceArchiveSizeBytes", out var sourceSize) && sourceSize.TryGetInt64(out var manifestSize) && manifestSize == inspection.ArchiveSizeBytes;
+                var utilityMatches = string.Equals(StringProperty(root, "extractionUtility"), inspection.Utility, StringComparison.Ordinal) &&
+                    StringProperty(root, "extractionUtilityPath") is { } utilityPath && string.Equals(CanonicalPath(utilityPath), CanonicalPath(metadata.ArchiveUtilityPath), StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(StringProperty(root, "extractionUtilityVersion"), inspection.UtilityVersion, StringComparison.Ordinal);
+                var rootMatches = StringProperty(root, "extractionRoot") is { } extractionRoot && string.Equals(CanonicalPath(extractionRoot), finalRoot, StringComparison.OrdinalIgnoreCase);
+                var ebootExists = root.TryGetProperty("selectedEbootPath", out var ebootElement) &&
+                    ebootElement.ValueKind == JsonValueKind.String &&
+                    IsCanonicalDescendant(finalRoot, ebootElement.GetString()!) &&
+                    File.Exists(CanonicalPath(ebootElement.GetString()!)) &&
+                    !HasReparsePoint(finalRoot, ebootElement.GetString()!);
+                if (sourceMatches && sizeMatches && utilityMatches && rootMatches && ebootExists)
                 {
                     warnings.Add("Existing extraction was reused after manifest and selected-eboot validation.");
                     return await CreateProfileFromExistingAsync(repository, metadata, existing.RootElement.Clone(), blockers, warnings);
@@ -212,14 +237,45 @@ internal static class GameInputCommand
         }
         var staging = stagingCandidates.SingleOrDefault()
             ?? finalRoot + $".staging-{DateTime.UtcNow:yyyyMMddTHHmmssZ}-{Environment.ProcessId}";
+        staging = CanonicalPath(staging);
+        var provenancePath = Path.Combine(staging, ".sharpemu-staging-provenance.json");
+        var expectedProvenance = new ExtractionProvenance(
+            "1.0.0",
+            DateTimeOffset.UtcNow,
+            inspection.ArchiveSha256,
+            inspection.ArchiveSizeBytes,
+            inspection.Utility,
+            CanonicalPath(metadata.ArchiveUtilityPath),
+            inspection.UtilityVersion,
+            finalRoot);
         var recoveredStaging = stagingCandidates.Length == 1;
         if (recoveredStaging)
         {
+            if (!File.Exists(provenancePath))
+            {
+                blockers.Add("archive: staging provenance is missing; resume was refused");
+                return Result("blocked", staging, null, null, null, null, blockers, warnings);
+            }
+            ExtractionProvenance? actualProvenance;
+            try
+            {
+                actualProvenance = JsonSerializer.Deserialize<ExtractionProvenance>(await File.ReadAllTextAsync(provenancePath), Program.JsonOptions);
+            }
+            catch (JsonException)
+            {
+                actualProvenance = null;
+            }
+            if (actualProvenance is null || !ProvenanceMatches(expectedProvenance, actualProvenance))
+            {
+                blockers.Add("archive: staging provenance is invalid or does not match the validated archive; resume was refused");
+                return Result("blocked", staging, null, null, null, null, blockers, warnings);
+            }
             warnings.Add("A single isolated staging tree from the current validated archive was recovered and fully revalidated.");
         }
         else
         {
             Directory.CreateDirectory(staging);
+            await File.WriteAllTextAsync(provenancePath, JsonSerializer.Serialize(expectedProvenance, Program.JsonOptions));
             var extraction = await RunUtilityAsync(
                 metadata.ArchiveUtilityPath,
                 ["x", "-bb0", "-bd", "-bso0", "-bsp0", "-y", $"-o{staging}", "--", metadata.ArchivePath],
@@ -242,7 +298,7 @@ internal static class GameInputCommand
                 blockers.Add("archive: extracted content contains a symlink, junction, or reparse point");
                 break;
             }
-            if (!Path.GetFullPath(entry).StartsWith(Path.GetFullPath(staging) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            if (!IsCanonicalDescendant(staging, entry))
             {
                 blockers.Add("archive: extracted path escaped staging");
                 break;
@@ -250,7 +306,7 @@ internal static class GameInputCommand
         }
         if (blockers.Count > 0) return Result("failed-validation", staging, null, null, null, null, blockers, warnings);
 
-        var candidates = Directory.EnumerateFiles(staging, "eboot.bin", SearchOption.AllDirectories).ToArray();
+        var candidates = Directory.EnumerateFiles(staging, "eboot.bin", SearchOption.AllDirectories).Select(CanonicalPath).Where(path => IsCanonicalDescendant(staging, path)).ToArray();
         var selections = new List<Candidate>();
         foreach (var candidate in candidates)
         {
@@ -283,18 +339,29 @@ internal static class GameInputCommand
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            blockers.Add($"archive: validated staging could not be promoted to the final root: {exception.Message}");
+            var safeMessage = RunArtifactRedactor.SanitizeMessage(
+                exception.Message,
+                repository,
+                [finalRoot, staging, Path.GetDirectoryName(metadata.ArchivePath)!]);
+            blockers.Add($"archive: validated staging could not be promoted to the final root: {safeMessage}");
             return Result("promotion-failed", staging, selected.Path, ebootHash, selected.Metadata.TitleId, verifiedVersion, blockers, warnings, versionStatus);
         }
-        var finalEboot = Path.Combine(finalRoot, Path.GetRelativePath(staging, selected.Path));
-        var finalMetadata = selected.Metadata.SourcePath is null ? null : Path.Combine(finalRoot, Path.GetRelativePath(staging, selected.Metadata.SourcePath));
+        var finalEboot = CanonicalPath(Path.Combine(finalRoot, Path.GetRelativePath(staging, selected.Path)));
+        var finalMetadata = selected.Metadata.SourcePath is null ? null : CanonicalPath(Path.Combine(finalRoot, Path.GetRelativePath(staging, selected.Metadata.SourcePath)));
+        if (!IsCanonicalDescendant(finalRoot, finalEboot) || finalMetadata is not null && !IsCanonicalDescendant(finalRoot, finalMetadata))
+        {
+            blockers.Add("archive: selected eboot or metadata escaped the canonical final root");
+            return Result("failed-validation", finalRoot, null, null, null, null, blockers, warnings);
+        }
         var manifest = new
         {
             schemaVersion = "1.0.0",
             sourceArchivePath = metadata.ArchivePath,
             sourceArchiveSha256 = inspection.ArchiveSha256,
+            sourceArchiveSizeBytes = inspection.ArchiveSizeBytes,
             extractionUtcTimestamp = DateTimeOffset.UtcNow,
             extractionUtility = inspection.Utility,
+            extractionUtilityPath = CanonicalPath(metadata.ArchiveUtilityPath),
             extractionUtilityVersion = inspection.UtilityVersion,
             extractionRoot = finalRoot,
             selectedEbootPath = finalEboot,
@@ -310,7 +377,7 @@ internal static class GameInputCommand
             warnings,
         };
         await File.WriteAllTextAsync(existingManifestPath, JsonSerializer.Serialize(manifest, Program.JsonOptions));
-        await WriteProfileAsync(repository, metadata, finalEboot, ebootHash, selected.Metadata.TitleId!, verifiedVersion, versionStatus, finalMetadata);
+        await WriteProfileAsync(repository, metadata, finalRoot, finalEboot, ebootHash, selected.Metadata.TitleId!, verifiedVersion, versionStatus, finalMetadata);
         return Result("passed", finalRoot, finalEboot, ebootHash, selected.Metadata.TitleId, verifiedVersion, blockers, warnings, versionStatus);
     }
 
@@ -336,24 +403,32 @@ internal static class GameInputCommand
 
     private static async Task<GameBootstrapResult> CreateProfileFromExistingAsync(GitRepository repository, GameInputMetadata metadata, JsonElement manifest, List<string> blockers, List<string> warnings)
     {
-        var eboot = manifest.GetProperty("selectedEbootPath").GetString()!;
-        var extractionRoot = manifest.TryGetProperty("extractionRoot", out var root)
-            ? root.GetString()!
-            : Path.GetDirectoryName(eboot)!;
+        var eboot = CanonicalPath(manifest.GetProperty("selectedEbootPath").GetString()!);
+        var extractionRoot = CanonicalPath(manifest.GetProperty("extractionRoot").GetString()!);
+        if (!IsCanonicalDescendant(extractionRoot, eboot))
+        {
+            blockers.Add("archive: reusable extraction eboot is outside the canonical extraction root");
+            return Result("blocked", extractionRoot, null, null, null, null, blockers, warnings);
+        }
         var expectedEbootHash = manifest.GetProperty("ebootSha256").GetString()!;
         var ebootHash = await HashFileAsync(eboot);
-        var titleId = manifest.GetProperty("titleId").GetString()!;
-        var verifiedVersion = manifest.TryGetProperty("verifiedVersion", out var version) ? version.GetString() : null;
-        var versionStatus = manifest.TryGetProperty("versionStatus", out var status) ? status.GetString() ?? "unverified" : "unverified";
-        var metadataSource = manifest.TryGetProperty("metadataSource", out var source) ? source.GetString() : null;
+        var reparsed = TryFindMetadata(eboot, extractionRoot);
+        var titleId = reparsed.TitleId;
+        var verifiedVersion = reparsed.Version;
+        var versionStatus = string.IsNullOrWhiteSpace(verifiedVersion) ? "unverified" : "verified";
+        var metadataSource = reparsed.SourcePath;
+        if (metadataSource is null ||
+            !IsCanonicalDescendant(extractionRoot, metadataSource) ||
+            HasReparsePoint(extractionRoot, metadataSource)) blockers.Add("archive: reusable extraction metadata is missing or outside the canonical extraction root");
+        if (HasReparsePoint(extractionRoot, eboot)) blockers.Add("archive: reusable extraction eboot traverses a reparse point");
         if (!string.Equals(ebootHash, expectedEbootHash, StringComparison.OrdinalIgnoreCase)) blockers.Add("archive: reusable extraction eboot hash mismatch");
         if (!string.Equals(titleId, metadata.ExpectedTitleId, StringComparison.OrdinalIgnoreCase)) blockers.Add("archive: reusable extraction Title ID mismatch");
         if (!string.IsNullOrWhiteSpace(verifiedVersion) && !string.Equals(verifiedVersion, metadata.ExpectedVersion, StringComparison.OrdinalIgnoreCase)) blockers.Add("target version: reusable extraction version mismatch");
-        if (blockers.Count == 0) await WriteProfileAsync(repository, metadata, eboot, ebootHash, titleId, verifiedVersion, versionStatus, metadataSource);
+        if (blockers.Count == 0) await WriteProfileAsync(repository, metadata, extractionRoot, eboot, ebootHash, titleId!, verifiedVersion, versionStatus, metadataSource);
         return Result(blockers.Count == 0 ? "reused" : "blocked", extractionRoot, eboot, ebootHash, titleId, verifiedVersion, blockers, warnings, versionStatus);
     }
 
-    private static async Task WriteProfileAsync(GitRepository repository, GameInputMetadata metadata, string eboot, string hash, string titleId, string? verifiedVersion, string versionStatus, string? metadataSource)
+    private static async Task WriteProfileAsync(GitRepository repository, GameInputMetadata metadata, string extractionRoot, string eboot, string hash, string titleId, string? verifiedVersion, string versionStatus, string? metadataSource)
     {
         var profile = new LocalRunProfile
         {
@@ -376,10 +451,11 @@ internal static class GameInputCommand
                 MaxFrames = 8,
                 WindowSampleSeconds = [15, 45, 90, 150],
             },
-            RedactionRoots = [Path.GetDirectoryName(eboot)!],
+            RedactionRoots = [CanonicalPath(extractionRoot)],
             Metadata = new TargetMetadata
             {
                 TitleIdVerified = true,
+                VerifiedTitleId = titleId,
                 VersionVerified = string.Equals(versionStatus, "verified", StringComparison.OrdinalIgnoreCase),
                 VerifiedVersion = verifiedVersion,
                 MetadataSource = metadataSource,
@@ -391,10 +467,11 @@ internal static class GameInputCommand
         await File.WriteAllTextAsync(Path.Combine(profileDirectory, "demons-souls-01.004.000.json"), JsonSerializer.Serialize(profile, Program.JsonOptions));
     }
 
-    private static (string? TitleId, string? Version, string? SourcePath) TryFindMetadata(string eboot, string staging)
+    internal static (string? TitleId, string? Version, string? SourcePath) TryFindMetadata(string eboot, string staging)
     {
-        var directory = Path.GetDirectoryName(eboot)!;
-        for (var level = 0; level < 4 && directory.StartsWith(staging, StringComparison.OrdinalIgnoreCase); level++)
+        staging = CanonicalPath(staging);
+        var directory = Path.GetDirectoryName(CanonicalPath(eboot))!;
+        for (var level = 0; level < 4 && IsCanonicalDescendant(staging, directory, allowRoot: true); level++)
         {
             foreach (var candidate in new[] { Path.Combine(directory, "sce_sys", "param.json"), Path.Combine(directory, "param.json") })
             {
@@ -442,22 +519,34 @@ internal static class GameInputCommand
             currentSize = 0;
             await Task.CompletedTask;
         }
-        while (await process.StandardOutput.ReadLineAsync() is { } line)
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+        try
         {
-            if (line.Length == 0)
+            while (await process.StandardOutput.ReadLineAsync(timeout.Token) is { } line)
             {
-                await FinishEntry();
-                continue;
+                if (line.Length == 0)
+                {
+                    await FinishEntry();
+                    continue;
+                }
+                if (line.StartsWith("Path = ", StringComparison.Ordinal)) currentPath = line[7..];
+                else if (line.StartsWith("Size = ", StringComparison.Ordinal) && long.TryParse(line[7..], out var size)) currentSize = size;
+                else if (line.StartsWith("Attributes = ", StringComparison.Ordinal)) currentAttributes = line[13..];
+                else if (HasArchiveLinkTarget(line)) currentAttributes = (currentAttributes ?? string.Empty) + " link";
             }
-            if (line.StartsWith("Path = ", StringComparison.Ordinal)) currentPath = line[7..];
-            else if (line.StartsWith("Size = ", StringComparison.Ordinal) && long.TryParse(line[7..], out var size)) currentSize = size;
-            else if (line.StartsWith("Attributes = ", StringComparison.Ordinal)) currentAttributes = line[13..];
-            else if (HasArchiveLinkTarget(line)) currentAttributes = (currentAttributes ?? string.Empty) + " link";
+            await FinishEntry();
+            await process.WaitForExitAsync(timeout.Token);
         }
-        await FinishEntry();
-        await process.WaitForExitAsync();
+        catch (OperationCanceledException)
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync(CancellationToken.None);
+            blockers.Add("archive: directory listing exceeded the 10-minute hard timeout");
+            _ = await stderrTask;
+            return (entryCount, total, blockers);
+        }
         var stderr = await stderrTask;
-        if (process.ExitCode != 0) blockers.Add($"archive: directory listing failed with exit {process.ExitCode}: {FirstLine(stderr)}");
+        if (process.ExitCode != 0) blockers.Add($"archive: directory listing failed with exit {process.ExitCode}");
         return (entryCount, total, blockers);
     }
 
@@ -487,6 +576,45 @@ internal static class GameInputCommand
         return !string.IsNullOrWhiteSpace(target);
     }
 
+    internal static bool ProvenanceMatches(ExtractionProvenance expected, ExtractionProvenance actual) =>
+        actual.SchemaVersion == "1.0.0" &&
+        string.Equals(expected.ArchiveSha256, actual.ArchiveSha256, StringComparison.OrdinalIgnoreCase) &&
+        expected.ArchiveSizeBytes == actual.ArchiveSizeBytes &&
+        string.Equals(expected.ExtractionUtility, actual.ExtractionUtility, StringComparison.Ordinal) &&
+        string.Equals(CanonicalPath(expected.ExtractionUtilityPath), CanonicalPath(actual.ExtractionUtilityPath), StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(expected.ExtractionUtilityVersion, actual.ExtractionUtilityVersion, StringComparison.Ordinal) &&
+        string.Equals(CanonicalPath(expected.IntendedFinalRoot), CanonicalPath(actual.IntendedFinalRoot), StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsCanonicalDescendant(string root, string path, bool allowRoot = false)
+    {
+        var canonicalRoot = CanonicalPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var canonicalPath = CanonicalPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (allowRoot && string.Equals(canonicalRoot, canonicalPath, StringComparison.OrdinalIgnoreCase)) return true;
+        return canonicalPath.StartsWith(canonicalRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool HasReparsePoint(string root, string path)
+    {
+        if (!IsCanonicalDescendant(root, path, allowRoot: true)) return true;
+        try
+        {
+            var current = CanonicalPath(root);
+            if (File.GetAttributes(current).HasFlag(FileAttributes.ReparsePoint)) return true;
+            foreach (var segment in Path.GetRelativePath(current, CanonicalPath(path)).Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+            {
+                current = Path.Combine(current, segment);
+                if (File.GetAttributes(current).HasFlag(FileAttributes.ReparsePoint)) return true;
+            }
+            return false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    private static string CanonicalPath(string path) => Path.GetFullPath(path);
+
     private static async Task<GameInputMetadata> ReadMetadataAsync(string path)
     {
         using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
@@ -499,7 +627,7 @@ internal static class GameInputCommand
         string utility;
         if (root.TryGetProperty("archive_utility", out var utilityObject)) utility = utilityObject.GetProperty("path").GetString()!;
         else utility = root.GetProperty("tools").EnumerateArray().First(tool => tool.GetProperty("name").GetString() == "7-Zip").GetProperty("path").GetString()!;
-        return new GameInputMetadata(archivePath, size, hash, title, version, utility);
+        return new GameInputMetadata(CanonicalPath(archivePath), size, hash, title, version, CanonicalPath(utility));
     }
 
     private static async Task<string> HashFileAsync(string path)
@@ -526,7 +654,7 @@ internal static class GameInputCommand
         return process;
     }
 
-    private static async Task<CapturedProcess> RunUtilityAsync(string executable, IReadOnlyList<string> arguments, string workingDirectory, TimeSpan timeout)
+    internal static async Task<CapturedProcess> RunUtilityAsync(string executable, IReadOnlyList<string> arguments, string workingDirectory, TimeSpan timeout)
     {
         using var process = StartUtility(executable, arguments, workingDirectory);
         var stdout = process.StandardOutput.ReadToEndAsync();
@@ -542,7 +670,9 @@ internal static class GameInputCommand
         return new CapturedProcess(process.ExitCode, await stdout, await stderr);
     }
 
-    private static string FirstLine(string value) => value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "no diagnostics";
+    private static string ParseUtilityVersion(string output) =>
+        output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault(line => line.Contains("7-Zip", StringComparison.OrdinalIgnoreCase))?.Trim() ?? "unknown";
 
     private static void PrintInspection(ArchiveInspection inspection)
     {

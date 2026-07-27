@@ -30,6 +30,24 @@ internal sealed record VisualReport(
     string? ContactSheet,
     IReadOnlyList<string> Warnings);
 
+internal sealed record ComparisonField(string Name, string? Before, string? After, string Status);
+
+internal sealed record VisualComparisonReport(
+    string SchemaVersion,
+    string BeforeRun,
+    string AfterRun,
+    string Classification,
+    bool StrictComparabilityProven,
+    bool ExploratoryOverride,
+    long? SelectedFrame,
+    IReadOnlyList<ComparisonField> Fields,
+    ImageDifference? PixelDifference,
+    string PixelConclusion,
+    string? AbsoluteDifference,
+    string? ContactSheet,
+    object? MetricDeltas,
+    IReadOnlyList<string> Warnings);
+
 internal static class VisualCommand
 {
     public static async Task<int> RunAsync(GitRepository repository, CommandArguments arguments)
@@ -67,7 +85,7 @@ internal static class VisualCommand
             }
             catch (Exception exception)
             {
-                warnings.Add($"Failed to encode {Path.GetFileName(descriptorPath)}: {exception.Message}");
+                warnings.Add($"Failed to encode {Path.GetFileName(descriptorPath)}: {exception.GetType().Name}.");
             }
         }
 
@@ -98,6 +116,7 @@ internal static class VisualCommand
                 descriptor?.Format ?? (inferredSource == "synthetic" ? "generated RGBA8" : "unknown"),
                 "RGBA8 PNG",
                 descriptor?.ColorSpace,
+                descriptor?.NearestMilestone,
                 descriptor?.FlipVertical ?? false,
                 "success",
                 metrics,
@@ -119,12 +138,13 @@ internal static class VisualCommand
             contactSheetRelative = "contact-sheet.png";
         }
         var sources = frames.Select(frame => frame.CaptureSource).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var captureFailed = frames.Count == 0 && warnings.Count > 0;
         var report = new VisualReport(
             "1.0.0",
             runId,
             DateTimeOffset.UtcNow,
-            frames.Count == 0 ? "not-observed" : "observed",
-            frames.Count == 0 ? "no-frame-produced" : string.Join('+', sources),
+            frames.Count == 0 ? captureFailed ? "capture-failed" : "not-observed" : "observed",
+            frames.Count == 0 ? captureFailed ? "capture-failed" : "no-frame-produced" : string.Join('+', sources),
             VisualAnalyzer.IsFrozen(images),
             frames,
             contactSheetRelative,
@@ -157,55 +177,168 @@ internal static class VisualCommand
         if (string.IsNullOrWhiteSpace(beforeValue) || string.IsNullOrWhiteSpace(afterValue)) return Program.Fail("visual compare requires --before and --after.");
         var beforeDirectory = ResolveRun(repository, beforeValue);
         var afterDirectory = ResolveRun(repository, afterValue);
+        var selectedFrame = arguments.Value("--frame");
+        if (selectedFrame is not null && !long.TryParse(selectedFrame, out _)) return Program.Fail("visual compare --frame requires an integer frame number.");
+        var frameNumber = long.TryParse(selectedFrame, out var parsedFrame) ? parsedFrame : (long?)null;
+        var (result, exitCode) = await CompareRunsAsync(beforeDirectory, afterDirectory, frameNumber, arguments.Has("--exploratory"));
+        if (arguments.Has("--json")) Program.WriteJson(result);
+        else Console.WriteLine($"Visual comparison: {result.Classification}; pixels {(result.PixelDifference is null ? "not compared" : "compared for exploration/evidence only")}.");
+        return exitCode;
+    }
+
+    internal static async Task<(VisualComparisonReport Report, int ExitCode)> CompareRunsAsync(
+        string beforeDirectory,
+        string afterDirectory,
+        long? requestedFrame,
+        bool exploratory)
+    {
         var before = await AnalyzeRunAsync(beforeDirectory);
         var after = await AnalyzeRunAsync(afterDirectory);
-        if (before.Frames.Count == 0 || after.Frames.Count == 0) return Program.Fail("Both runs must contain at least one frame.");
-        var beforeFrame = before.Frames[0];
-        var afterFrame = after.Frames[0];
+        var fields = new List<ComparisonField>();
+        var warnings = new List<string>();
+        var pair = SelectFramePair(before.Frames, after.Frames, requestedFrame);
+        if (pair is null)
+        {
+            warnings.Add(requestedFrame.HasValue
+                ? $"Frame {requestedFrame.Value} with a matching capture source is not present in both runs."
+                : "No common capture-source/frame-number pair exists; unlike first frames were not compared.");
+            return (new VisualComparisonReport(
+                "1.1.0", before.RunId, after.RunId, "not-comparable", false, exploratory, requestedFrame,
+                fields, null, "No pixel comparison was performed and no correctness conclusion is available.", null, null, null, warnings), 2);
+        }
+
+        var (beforeFrame, afterFrame) = pair.Value;
         var beforeImage = PngCodec.Read(Path.Combine(beforeDirectory, beforeFrame.File));
         var afterImage = PngCodec.Read(Path.Combine(afterDirectory, afterFrame.File));
-        var sourceMatches = string.Equals(beforeFrame.CaptureSource, afterFrame.CaptureSource, StringComparison.OrdinalIgnoreCase);
-        var resolutionMatches = beforeImage.Width == afterImage.Width && beforeImage.Height == afterImage.Height;
-        var compatible = sourceMatches && resolutionMatches;
+        var beforeMetadata = await ReadRunMetadataAsync(beforeDirectory);
+        var afterMetadata = await ReadRunMetadataAsync(afterDirectory);
+        AddField(fields, "target/profile identity", beforeMetadata.ProfileIdentity, afterMetadata.ProfileIdentity);
+        AddField(fields, "capture source", beforeFrame.CaptureSource, afterFrame.CaptureSource);
+        AddField(fields, "frame number", beforeFrame.FrameNumber?.ToString(), afterFrame.FrameNumber?.ToString());
+        AddField(fields, "width", beforeImage.Width.ToString(), afterImage.Width.ToString());
+        AddField(fields, "height", beforeImage.Height.ToString(), afterImage.Height.ToString());
+        AddField(fields, "canonical pixel format", beforeFrame.CanonicalFormat, afterFrame.CanonicalFormat);
+        AddField(fields, "capture policy", beforeMetadata.CapturePolicy, afterMetadata.CapturePolicy);
+        var pixelFields = fields.Count;
+        AddField(fields, "build configuration", beforeMetadata.BuildConfiguration, afterMetadata.BuildConfiguration);
+        AddField(fields, "repository commit", beforeMetadata.RepositoryCommit, afterMetadata.RepositoryCommit);
+        AddField(fields, "executable SHA-256", beforeMetadata.ExecutableSha256, afterMetadata.ExecutableSha256);
+        AddField(fields, "hardware fingerprint", beforeMetadata.HardwareFingerprint, afterMetadata.HardwareFingerprint);
+        AddField(fields, "GPU and driver", beforeMetadata.GpuAndDriver, afterMetadata.GpuAndDriver);
+
+        var pixelComparable = fields.Take(pixelFields).All(field => field.Status == "matched");
+        var strict = pixelComparable && fields.Skip(pixelFields).All(field => field.Status == "matched");
+        var classification = strict
+            ? "strictly-comparable"
+            : pixelComparable ? "pixel-comparable-environment-unverified" : "not-comparable";
         ImageDifference? difference = null;
         string? differencePath = null;
         string? sheetPath = null;
+        object? metricDeltas = null;
         var outputDirectory = Path.Combine(afterDirectory, "diffs", $"vs-{before.RunId}");
         Directory.CreateDirectory(outputDirectory);
-        if (resolutionMatches)
+        if (strict || exploratory && pixelComparable)
         {
             difference = VisualAnalyzer.Compare(beforeImage, afterImage);
-            differencePath = Path.Combine(outputDirectory, "absolute-difference.png");
-            PngCodec.Write(differencePath, VisualAnalyzer.AbsoluteDifference(beforeImage, afterImage));
-            sheetPath = Path.Combine(outputDirectory, "comparison.png");
-            PngCodec.Write(sheetPath, ContactSheet.Create(
+            var absolute = VisualAnalyzer.AbsoluteDifference(beforeImage, afterImage);
+            var differenceFullPath = Path.Combine(outputDirectory, $"frame-{beforeFrame.FrameNumber:D8}-absolute-difference.png");
+            PngCodec.Write(differenceFullPath, absolute);
+            differencePath = Path.GetRelativePath(afterDirectory, differenceFullPath).Replace('\\', '/');
+            var sheetFullPath = Path.Combine(outputDirectory, $"frame-{beforeFrame.FrameNumber:D8}-comparison.png");
+            PngCodec.Write(sheetFullPath, ContactSheet.Create(
                 $"{before.RunId} VS {after.RunId}",
-                [(beforeImage, $"BEFORE {beforeFrame.CaptureSource}"), (afterImage, $"AFTER {afterFrame.CaptureSource}"), (VisualAnalyzer.AbsoluteDifference(beforeImage, afterImage), $"DIFF CHANGED={difference.ChangedPixelRatio:P2} MAD={difference.NormalizedMeanAbsoluteDifference:F4}")]));
-        }
-        var result = new
-        {
-            schemaVersion = "1.0.0",
-            beforeRun = before.RunId,
-            afterRun = after.RunId,
-            sourceMatches,
-            resolutionMatches,
-            hardwareAndBuildProfileCheck = "not-proven-by-image-data",
-            compatible,
-            warning = compatible ? null : "Runs are not directly comparable; capture source or resolution differs.",
-            difference,
-            absoluteDifference = differencePath,
-            contactSheet = sheetPath,
+                [(beforeImage, $"BEFORE {beforeFrame.CaptureSource} F={beforeFrame.FrameNumber}"), (afterImage, $"AFTER {afterFrame.CaptureSource} F={afterFrame.FrameNumber}"), (absolute, $"PIXEL DIFF CHANGED={difference.ChangedPixelRatio:P2} MAD={difference.NormalizedMeanAbsoluteDifference:F4}")]));
+            sheetPath = Path.GetRelativePath(afterDirectory, sheetFullPath).Replace('\\', '/');
             metricDeltas = new
             {
                 meanLuminance = afterFrame.Metrics.MeanLuminance - beforeFrame.Metrics.MeanLuminance,
                 luminanceStandardDeviation = afterFrame.Metrics.LuminanceStandardDeviation - beforeFrame.Metrics.LuminanceStandardDeviation,
                 nearBlackPercent = afterFrame.Metrics.NearBlackPercent - beforeFrame.Metrics.NearBlackPercent,
-            },
-        };
-        await File.WriteAllTextAsync(Path.Combine(outputDirectory, "comparison.json"), JsonSerializer.Serialize(result, Program.JsonOptions));
-        if (arguments.Has("--json")) Program.WriteJson(result); else Console.WriteLine(sheetPath ?? result.warning);
-        return compatible ? 0 : 2;
+            };
+        }
+        else if (pixelComparable)
+        {
+            warnings.Add("Pixel inputs align, but strict environment/build identity is not proven; use --exploratory to generate a non-correctness pixel comparison.");
+        }
+
+        var report = new VisualComparisonReport(
+            "1.1.0", before.RunId, after.RunId, classification, strict, exploratory, beforeFrame.FrameNumber,
+            fields, difference, "Pixel differences are evidence only and do not establish rendering correctness or compatibility.",
+            differencePath, sheetPath, metricDeltas, warnings);
+        await File.WriteAllTextAsync(Path.Combine(outputDirectory, "comparison.json"), JsonSerializer.Serialize(report, Program.JsonOptions));
+        return (report, strict || exploratory && pixelComparable ? 0 : 2);
     }
+
+    private static (VisualFrame Before, VisualFrame After)? SelectFramePair(
+        IReadOnlyList<VisualFrame> before,
+        IReadOnlyList<VisualFrame> after,
+        long? requestedFrame)
+    {
+        var pairs = from left in before
+                    where left.FrameNumber.HasValue && (!requestedFrame.HasValue || left.FrameNumber == requestedFrame)
+                    join right in after on new { Source = left.CaptureSource.ToUpperInvariant(), Frame = left.FrameNumber }
+                        equals new { Source = right.CaptureSource.ToUpperInvariant(), Frame = right.FrameNumber }
+                    orderby left.FrameNumber
+                    select (left, right);
+        foreach (var pair in pairs) return pair;
+        return null;
+    }
+
+    private static void AddField(List<ComparisonField> fields, string name, string? before, string? after)
+    {
+        var status = string.IsNullOrWhiteSpace(before) || string.IsNullOrWhiteSpace(after)
+            ? "missing"
+            : string.Equals(before, after, StringComparison.OrdinalIgnoreCase) ? "matched" : "different";
+        fields.Add(new ComparisonField(name, before, after, status));
+    }
+
+    private static async Task<RunComparisonMetadata> ReadRunMetadataAsync(string runDirectory)
+    {
+        using var run = await ReadJsonIfPresentAsync(Path.Combine(runDirectory, "run.json"));
+        using var environment = await ReadJsonIfPresentAsync(Path.Combine(runDirectory, "environment.json"));
+        using var config = await ReadJsonIfPresentAsync(Path.Combine(runDirectory, "harness-config.json"));
+        var runRoot = run?.RootElement;
+        var environmentRoot = environment?.RootElement;
+        var profileIdentity = JoinIdentity(runRoot, "profile", "targetId", "expectedVersion", "verifiedVersion");
+        var capturePolicy = config is not null && config.RootElement.TryGetProperty("capture", out var capture)
+            ? CanonicalJson(capture)
+            : null;
+        var gpu = environmentRoot.HasValue && environmentRoot.Value.TryGetProperty("phaseZeroHardware", out var hardware) && hardware.TryGetProperty("gpus", out var gpus)
+            ? CanonicalJson(gpus)
+            : null;
+        return new RunComparisonMetadata(
+            profileIdentity,
+            Property(runRoot, "buildConfiguration"),
+            Property(runRoot, "repositorySha"),
+            Property(runRoot, "executableSha256"),
+            capturePolicy,
+            Property(environmentRoot, "hardwareFingerprint"),
+            gpu);
+    }
+
+    private static async Task<JsonDocument?> ReadJsonIfPresentAsync(string path) =>
+        File.Exists(path) ? JsonDocument.Parse(await File.ReadAllTextAsync(path)) : null;
+
+    private static string? JoinIdentity(JsonElement? root, params string[] names)
+    {
+        if (!root.HasValue) return null;
+        var values = names.Select(name => Property(root, name)).ToArray();
+        return values.Any(string.IsNullOrWhiteSpace) ? null : string.Join('|', values);
+    }
+
+    private static string? Property(JsonElement? root, string name) =>
+        root.HasValue && root.Value.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private static string CanonicalJson(JsonElement element) => JsonSerializer.Serialize(element, Program.JsonOptions);
+
+    private sealed record RunComparisonMetadata(
+        string? ProfileIdentity,
+        string? BuildConfiguration,
+        string? RepositoryCommit,
+        string? ExecutableSha256,
+        string? CapturePolicy,
+        string? HardwareFingerprint,
+        string? GpuAndDriver);
 
     private static string ResolveRun(GitRepository repository, string value)
     {

@@ -40,6 +40,30 @@ internal sealed record IndexedSymbol(
     int EndLine,
     string Path);
 
+internal sealed record SourceIndexStatus(
+    bool Exists,
+    string Path,
+    string CurrentCommit,
+    SourceIndexDocument? Index,
+    IReadOnlyList<string> AddedTrackedTextFiles,
+    IReadOnlyList<string> RemovedTrackedFiles,
+    IReadOnlyList<string> ContentModifiedTrackedFiles)
+{
+    public bool Current =>
+        Exists &&
+        Index is { SchemaVersion: SourceIndexStore.SchemaVersion } &&
+        Index.Commit == CurrentCommit &&
+        AddedTrackedTextFiles.Count == 0 &&
+        RemovedTrackedFiles.Count == 0 &&
+        ContentModifiedTrackedFiles.Count == 0;
+}
+
+internal sealed class SourceIndexStaleException(SourceIndexStatus status)
+    : InvalidOperationException("The source index is stale; run index build before querying.")
+{
+    public SourceIndexStatus Status { get; } = status;
+}
+
 internal sealed class SourceIndexStore
 {
     public const string SchemaVersion = "1.0.0";
@@ -167,6 +191,84 @@ internal sealed class SourceIndexStore
         return document is { SchemaVersion: SchemaVersion }
             ? document
             : await BuildAsync(cancellationToken);
+    }
+
+    public async Task<SourceIndexDocument> LoadCurrentAsync(CancellationToken cancellationToken = default)
+    {
+        var status = await GetStatusAsync(cancellationToken);
+        if (!status.Current || status.Index is null)
+        {
+            throw new SourceIndexStaleException(status);
+        }
+
+        return status.Index;
+    }
+
+    public async Task<SourceIndexStatus> GetStatusAsync(CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(IndexPath))
+        {
+            return new SourceIndexStatus(false, IndexPath, _repository.Commit, null, [], [], []);
+        }
+
+        SourceIndexDocument? index;
+        try
+        {
+            await using var stream = File.OpenRead(IndexPath);
+            index = await JsonSerializer.DeserializeAsync<SourceIndexDocument>(stream, Program.JsonOptions, cancellationToken);
+        }
+        catch (JsonException)
+        {
+            index = null;
+        }
+
+        if (index is null || index.SchemaVersion != SchemaVersion)
+        {
+            return new SourceIndexStatus(true, IndexPath, _repository.Commit, index, [], [], []);
+        }
+
+        var tracked = _repository.TrackedFiles().ToHashSet(StringComparer.Ordinal);
+        var indexed = index.Files.ToDictionary(file => file.Path, StringComparer.Ordinal);
+        var added = new List<string>();
+        var modified = new List<string>();
+        foreach (var relativePath in tracked)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var fullPath = _repository.ResolvePath(relativePath);
+            if (!File.Exists(fullPath))
+            {
+                continue;
+            }
+
+            var bytes = await File.ReadAllBytesAsync(fullPath, cancellationToken);
+            if (IsBinary(bytes))
+            {
+                if (indexed.ContainsKey(relativePath))
+                {
+                    modified.Add(relativePath);
+                }
+                continue;
+            }
+
+            if (!indexed.TryGetValue(relativePath, out var indexedFile))
+            {
+                added.Add(relativePath);
+            }
+            else if (!string.Equals(GitRepository.Sha256Bytes(bytes), indexedFile.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                modified.Add(relativePath);
+            }
+        }
+
+        var removed = indexed.Keys.Where(path => !tracked.Contains(path) || !File.Exists(_repository.ResolvePath(path))).ToArray();
+        return new SourceIndexStatus(
+            true,
+            IndexPath,
+            _repository.Commit,
+            index,
+            added.Order(StringComparer.Ordinal).ToArray(),
+            removed.Order(StringComparer.Ordinal).ToArray(),
+            modified.Order(StringComparer.Ordinal).ToArray());
     }
 
     internal static bool IsBinary(ReadOnlySpan<byte> bytes)

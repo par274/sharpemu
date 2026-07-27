@@ -5,6 +5,8 @@ using System.Text.Json;
 
 namespace SharpEmu.Tools.AgentHarness;
 
+internal sealed record RedactionRoot(string Path, string Token);
+
 internal static class RunArtifactRedactor
 {
     private static readonly string[] TextArtifactNames =
@@ -16,6 +18,7 @@ internal static class RunArtifactRedactor
         "run.json",
         "environment.json",
         "harness-config.json",
+        "vulkan-validation.json",
     ];
 
     public static async Task<int> RunAsync(GitRepository repository, CommandArguments arguments)
@@ -31,13 +34,16 @@ internal static class RunArtifactRedactor
         if (!Directory.Exists(runDirectory)) return Program.Fail($"Run '{value}' was not found.");
         var roots = await ReadRootsAsync(runDirectory);
         if (roots.Count == 0) return Program.Fail("Run has no readable configured redaction roots.");
-        var redacted = await RedactAsync(runDirectory, roots);
+        var redacted = await RedactAsync(runDirectory, CreatePrivateMap(roots));
         var result = new { runId = Path.GetFileName(runDirectory), redactedFiles = redacted, rootCount = roots.Count };
         if (arguments.Has("--json")) Program.WriteJson(result); else Console.WriteLine($"Redacted {redacted.Count} artifact(s) for {result.runId}.");
         return 0;
     }
 
     public static async Task<IReadOnlyList<string>> RedactAsync(string runDirectory, IReadOnlyList<string> roots)
+        => await RedactAsync(runDirectory, CreatePrivateMap(roots));
+
+    public static async Task<IReadOnlyList<string>> RedactAsync(string runDirectory, IReadOnlyList<RedactionRoot> roots)
     {
         var redacted = new List<string>();
         foreach (var name in TextArtifactNames)
@@ -53,17 +59,61 @@ internal static class RunArtifactRedactor
         return redacted;
     }
 
-    internal static string RedactText(string value, IReadOnlyList<string> roots)
+    internal static string RedactText(string value, IReadOnlyList<string> roots) =>
+        RedactText(value, CreatePrivateMap(roots));
+
+    internal static string RedactText(string value, IReadOnlyList<RedactionRoot> roots)
     {
         var redacted = value;
-        for (var index = 0; index < roots.Count; index++)
+        foreach (var item in roots.OrderByDescending(item => item.Path.Length))
         {
-            var replacement = $"<private-root-{index + 1}>";
-            var root = Path.GetFullPath(roots[index]);
-            redacted = redacted.Replace(root, replacement, StringComparison.OrdinalIgnoreCase);
-            redacted = redacted.Replace(JsonEncodedText.Encode(root).ToString(), replacement, StringComparison.OrdinalIgnoreCase);
+            foreach (var root in PathForms(item.Path))
+            {
+                redacted = redacted.Replace(root, item.Token, StringComparison.OrdinalIgnoreCase);
+                redacted = redacted.Replace(JsonEncodedText.Encode(root).ToString(), item.Token, StringComparison.OrdinalIgnoreCase);
+            }
         }
         return redacted;
+    }
+
+    internal static IReadOnlyList<RedactionRoot> CreateStandardMap(
+        GitRepository repository,
+        IEnumerable<string> privateRoots)
+    {
+        var result = new List<RedactionRoot>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var privateIndex = 0;
+        foreach (var value in privateRoots.Where(value => !string.IsNullOrWhiteSpace(value)))
+        {
+            var root = Path.GetFullPath(value);
+            if (!seen.Add(root)) continue;
+            result.Add(new RedactionRoot(root, privateIndex++ == 0 ? "<private-game-root>" : $"<private-root-{privateIndex}>"));
+        }
+
+        if (seen.Add(repository.Root)) result.Add(new RedactionRoot(repository.Root, "<repo>"));
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(home) && seen.Add(Path.GetFullPath(home)))
+        {
+            result.Add(new RedactionRoot(home, "<user-home>"));
+        }
+        return result;
+    }
+
+    internal static string SanitizeMessage(
+        string message,
+        GitRepository repository,
+        IEnumerable<string>? privateRoots = null) =>
+        RedactText(message, CreateStandardMap(repository, privateRoots ?? []));
+
+    private static IReadOnlyList<RedactionRoot> CreatePrivateMap(IReadOnlyList<string> roots) =>
+        roots.Select((root, index) => new RedactionRoot(Path.GetFullPath(root), $"<private-root-{index + 1}>")).ToArray();
+
+    private static IEnumerable<string> PathForms(string path)
+    {
+        var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        yield return full;
+        var forward = full.Replace('\\', '/');
+        if (!string.Equals(forward, full, StringComparison.Ordinal)) yield return forward;
     }
 
     private static async Task<IReadOnlyList<string>> ReadRootsAsync(string runDirectory)

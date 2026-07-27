@@ -7,6 +7,13 @@ using System.Text.Json;
 
 namespace SharpEmu.Tools.AgentHarness;
 
+internal sealed record VulkanValidationEvidence(
+    bool Requested,
+    string Status,
+    int MessageCount,
+    IReadOnlyList<string> Messages,
+    bool Truncated);
+
 internal static class RunCommand
 {
     public static async Task<int> RunAsync(GitRepository repository, CommandArguments arguments)
@@ -45,6 +52,7 @@ internal static class RunCommand
             .Select(Path.GetFullPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        var redactionMap = RunArtifactRedactor.CreateStandardMap(repository, redactionRoots);
         var harnessConfig = new
         {
             schemaVersion = "1.0.0",
@@ -85,7 +93,8 @@ internal static class RunCommand
             expectedVersion = profile.ExpectedVersion,
             verifiedVersion = profile.Metadata.VerifiedVersion,
             versionStatus = profile.Metadata.VersionStatus,
-            commandArguments = RedactArguments(emulatorArguments, redactionRoots),
+            ebootHashStatus = validation.HashStatus,
+            commandArguments = RedactArguments(emulatorArguments, redactionMap),
             startUtc = DateTimeOffset.UtcNow,
         };
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "run.json"), JsonSerializer.Serialize(preliminary, Program.JsonOptions));
@@ -108,6 +117,13 @@ internal static class RunCommand
         }
 
         BoundedProcessResult processResult;
+        using var externalCancellation = new CancellationTokenSource();
+        ConsoleCancelEventHandler cancellationHandler = (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            externalCancellation.Cancel();
+        };
+        Console.CancelKeyPress += cancellationHandler;
         try
         {
             processResult = await BoundedProcessRunner.RunAsync(
@@ -118,17 +134,18 @@ internal static class RunCommand
                 TimeSpan.FromSeconds(profile.TimeoutSeconds),
                 stdoutPath,
                 stderrPath,
-                Sample);
+                Sample,
+                externalCancellation.Token);
         }
         catch (Exception exception)
         {
-            await RunArtifactRedactor.RedactAsync(runDirectory, redactionRoots);
+            var safeMessage = RunArtifactRedactor.RedactText(exception.Message, redactionMap);
             var failed = new
             {
                 schemaVersion = "1.0.0",
                 runId,
                 status = "launch-failed",
-                error = exception.Message,
+                error = safeMessage,
                 repositorySha = repository.Commit,
                 dirty = repository.IsDirty,
                 targetId = profile.ExpectedTitleId,
@@ -136,18 +153,28 @@ internal static class RunCommand
                 blockers = new[] { "environment: emulator process could not be launched" },
             };
             await File.WriteAllTextAsync(Path.Combine(runDirectory, "run.json"), JsonSerializer.Serialize(failed, Program.JsonOptions));
-            Console.Error.WriteLine($"Run {runId} failed to launch: {exception.Message}");
+            await RunArtifactRedactor.RedactAsync(runDirectory, redactionMap);
+            Console.Error.WriteLine($"Run {runId} failed to launch: {safeMessage}");
             return 3;
         }
+        finally
+        {
+            Console.CancelKeyPress -= cancellationHandler;
+        }
 
-        await RunArtifactRedactor.RedactAsync(runDirectory, redactionRoots);
+        await RunArtifactRedactor.RedactAsync(runDirectory, redactionMap);
         var visual = await VisualCommand.AnalyzeRunAsync(runDirectory);
-        var events = await ReadEventsAsync(eventsPath);
+        var eventEvidence = await ReadEventsAsync(eventsPath);
+        var events = eventEvidence.Events;
         var milestoneValues = events.Select(item => item.Milestone).Where(value => value.HasValue).Select(value => value!.Value).ToArray();
         var firstMilestone = milestoneValues.Length == 0 ? 0 : milestoneValues.Min();
         var highestMilestone = milestoneValues.Length == 0 ? 0 : milestoneValues.Max();
         var hasHostException = events.Any(item => string.Equals(item.Kind, "host.exception", StringComparison.OrdinalIgnoreCase));
-        var exitStatus = processResult.TimedOut
+        var hostMilestone = events.Where(item => item.Kind is "frame.presented" or "capture.frame-written").Select(item => item.Milestone ?? 0).DefaultIfEmpty(0).Max();
+        var guestMilestone = events.Where(item => item.Kind is not ("session.started" or "frame.presented" or "capture.frame-written" or "host.exception")).Select(item => item.Milestone ?? 0).DefaultIfEmpty(0).Max();
+        var exitStatus = processResult.Canceled
+            ? "canceled"
+            : processResult.TimedOut
             ? "timeout"
             : hasHostException || processResult.Crash
                 ? "emulator-crash"
@@ -165,7 +192,10 @@ internal static class RunCommand
         var warnings = validation.Warnings
             .Concat(processResult.Warnings)
             .Concat(windowStatuses.Select(value => "window-fallback: " + value))
+            .Concat(eventEvidence.ParseErrorCount > 0 ? ["Structured-event evidence is incomplete because one or more JSONL lines could not be parsed."] : [])
             .ToArray();
+        var vulkanValidation = await CollectVulkanValidationAsync(stderrPath, environment);
+        await File.WriteAllTextAsync(Path.Combine(runDirectory, "vulkan-validation.json"), JsonSerializer.Serialize(vulkanValidation, Program.JsonOptions));
         var result = new
         {
             schemaVersion = "1.0.0",
@@ -179,6 +209,7 @@ internal static class RunCommand
             expectedVersion = profile.ExpectedVersion,
             verifiedVersion = profile.Metadata.VerifiedVersion,
             versionStatus = profile.Metadata.VersionStatus,
+            ebootHashStatus = validation.HashStatus,
             commandArguments = preliminary.commandArguments,
             processResult.StartUtc,
             processResult.EndUtc,
@@ -186,10 +217,20 @@ internal static class RunCommand
             exitCode = processResult.ExitCode,
             exitStatus,
             timedOut = processResult.TimedOut,
+            canceled = processResult.Canceled,
             crash = hasHostException || processResult.Crash,
-            processTree = new { processResult.JobObjectOwned, processResult.ProcessTreeCleaned },
+            processTree = new { processResult.JobObjectOwned, processResult.ProcessTreeCleaned, processResult.ActiveProcessCountAfterCleanup },
             firstObservedMilestone = firstMilestone,
             highestObservedMilestone = highestMilestone,
+            highestProvenHostMilestone = hostMilestone,
+            highestProvenGuestMilestone = guestMilestone,
+            structuredEvents = new
+            {
+                parsedCount = events.Count,
+                parseErrorCount = eventEvidence.ParseErrorCount,
+                parseErrors = eventEvidence.ParseErrors,
+                milestoneEvidenceComplete = eventEvidence.ParseErrorCount == 0,
+            },
             firstFrameStatus = visual.FirstFrameStatus,
             captureStatus = visual.CaptureStatus,
             artifacts = new
@@ -203,6 +244,7 @@ internal static class RunCommand
                 metrics = "metrics.json",
                 frames = "frames/",
                 visual = "visual.json",
+                vulkanValidation = "vulkan-validation.json",
                 contactSheet = visual.ContactSheet,
             },
             environmentFingerprint = environmentReport.Fingerprint,
@@ -211,26 +253,20 @@ internal static class RunCommand
             nextRunCommand = $".\\scripts\\agent-harness.ps1 run --profile .local\\profiles\\{Path.GetFileName(profileValue)}",
         };
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "run.json"), JsonSerializer.Serialize(result, Program.JsonOptions));
+        await RunArtifactRedactor.RedactAsync(runDirectory, redactionMap);
         Console.WriteLine($"Run ID: {runId}");
         Console.WriteLine($"Exit: {exitStatus}; elapsed {processResult.ElapsedSeconds:F1}s; highest milestone {highestMilestone}.");
         Console.WriteLine($"Frames: {visual.Frames.Count}; capture {visual.CaptureStatus}.");
         Console.WriteLine($"Blocker: {blocker}");
         Console.WriteLine(runDirectory);
-        return processResult.TimedOut ? 124 : processResult.ExitCode ?? 3;
+        return processResult.Canceled ? 130 : processResult.TimedOut ? 124 : processResult.ExitCode ?? 3;
     }
 
     private static bool ContainsOption(IReadOnlyList<string> arguments, string option) =>
         arguments.Any(argument => string.Equals(argument, option, StringComparison.OrdinalIgnoreCase) || argument.StartsWith(option + "=", StringComparison.OrdinalIgnoreCase));
 
-    private static string[] RedactArguments(IEnumerable<string> arguments, IReadOnlyList<string> roots) =>
-        arguments.Select(argument => Redact(argument, roots)).ToArray();
-
-    private static string Redact(string value, IReadOnlyList<string> roots)
-    {
-        var redacted = value;
-        for (var index = 0; index < roots.Count; index++) redacted = redacted.Replace(roots[index], $"<private-root-{index + 1}>", StringComparison.OrdinalIgnoreCase);
-        return redacted;
-    }
+    private static string[] RedactArguments(IEnumerable<string> arguments, IReadOnlyList<RedactionRoot> roots) =>
+        arguments.Select(argument => RunArtifactRedactor.RedactText(argument, roots)).ToArray();
 
     private static string Sanitize(string value) => new(value.Select(character => char.IsLetterOrDigit(character) || character is '-' or '_' ? character : '-').ToArray());
 
@@ -274,25 +310,72 @@ internal static class RunCommand
         return (fingerprint, report);
     }
 
-    private static async Task<IReadOnlyList<HarnessEvent>> ReadEventsAsync(string path)
+    internal static async Task<EventEvidence> ReadEventsAsync(string path)
     {
         var events = new List<HarnessEvent>();
+        var errors = new List<EventParseError>();
+        var parseErrorCount = 0;
+        var lineNumber = 0;
         foreach (var line in await File.ReadAllLinesAsync(path))
         {
+            lineNumber++;
             if (string.IsNullOrWhiteSpace(line)) continue;
             try
             {
                 using var document = JsonDocument.Parse(line);
                 var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    AddParseError(errors, ref parseErrorCount, lineNumber, "non-object-json");
+                    continue;
+                }
+                if (!root.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(kind.GetString()))
+                {
+                    AddParseError(errors, ref parseErrorCount, lineNumber, "missing-or-invalid-kind");
+                    continue;
+                }
+                int? milestoneValue = null;
+                if (root.TryGetProperty("milestone", out var milestone) && milestone.ValueKind != JsonValueKind.Null)
+                {
+                    if (milestone.ValueKind != JsonValueKind.Number || !milestone.TryGetInt32(out var value))
+                    {
+                        AddParseError(errors, ref parseErrorCount, lineNumber, "invalid-milestone");
+                        continue;
+                    }
+                    milestoneValue = value;
+                }
                 events.Add(new HarnessEvent(
-                    root.TryGetProperty("kind", out var kind) ? kind.GetString() ?? "unknown" : "unknown",
-                    root.TryGetProperty("milestone", out var milestone) && milestone.TryGetInt32(out var value) ? value : null));
+                    kind.GetString()!,
+                    milestoneValue));
             }
             catch (JsonException)
             {
+                AddParseError(errors, ref parseErrorCount, lineNumber, "invalid-json");
             }
         }
-        return events;
+        return new EventEvidence(events, parseErrorCount, errors);
+    }
+
+    private static void AddParseError(List<EventParseError> errors, ref int total, int lineNumber, string category)
+    {
+        total++;
+        if (errors.Count < 20) errors.Add(new EventParseError(lineNumber, category));
+    }
+
+    internal static async Task<VulkanValidationEvidence> CollectVulkanValidationAsync(string stderrPath, IReadOnlyDictionary<string, string?> environment)
+    {
+        var requested = environment.TryGetValue("SHARPEMU_VK_VALIDATION", out var value) && string.Equals(value, "1", StringComparison.Ordinal);
+        var lines = File.Exists(stderrPath) ? await File.ReadAllLinesAsync(stderrPath) : [];
+        var active = lines.Any(line => line.Contains("Vulkan Validation Layers active", StringComparison.OrdinalIgnoreCase));
+        var unavailable = lines.Any(line => line.Contains("validation", StringComparison.OrdinalIgnoreCase) && line.Contains("not found", StringComparison.OrdinalIgnoreCase));
+        var messages = lines.Where(line => line.StartsWith("[VULKAN]", StringComparison.OrdinalIgnoreCase)).Take(100).ToArray();
+        var messageCount = lines.Count(line => line.StartsWith("[VULKAN]", StringComparison.OrdinalIgnoreCase));
+        return new VulkanValidationEvidence(
+            requested,
+            !requested ? "not-requested" : active ? "active" : unavailable ? "unavailable" : "requested-not-confirmed",
+            messageCount,
+            messages,
+            messageCount > messages.Length);
     }
 
     private static string ClassifyBlocker(IReadOnlyList<HarnessEvent> events, BoundedProcessResult process, VisualReport visual, int milestone)
@@ -306,5 +389,9 @@ internal static class RunCommand
         return process.ExitCode == 0 ? "none: clean exit" : "loader/runtime: guest execution returned failure";
     }
 
-    private sealed record HarnessEvent(string Kind, int? Milestone);
+    internal sealed record HarnessEvent(string Kind, int? Milestone);
+
+    internal sealed record EventParseError(int Line, string Category);
+
+    internal sealed record EventEvidence(IReadOnlyList<HarnessEvent> Events, int ParseErrorCount, IReadOnlyList<EventParseError> ParseErrors);
 }
