@@ -2989,28 +2989,27 @@ public static partial class KernelMemoryCompatExports
         ulong aligned;
         lock (_memoryGate)
         {
+            var poolBase = _mainDirectMemoryPoolBase == UnsetMainDirectMemoryPoolBase
+                ? AlignUp(GetDirectMemoryHighWaterMarkLocked(), effectiveAlignment)
+                : _mainDirectMemoryPoolBase;
+
             var allocationLimit = DirectMemorySizeBytes;
-            if (_mainDirectMemoryPoolBase != UnsetMainDirectMemoryPoolBase &&
-                !TryAddU64(_mainDirectMemoryPoolBase, DirectMemorySizeBytes, out allocationLimit))
+            if (!TryAddU64(poolBase, DirectMemorySizeBytes, out allocationLimit))
             {
                 allocationLimit = ulong.MaxValue;
             }
 
-            if (!TryAllocateDirectMemoryLocked(0, allocationLimit, length, effectiveAlignment, memoryType, allocationLimit, out aligned))
+            if (!TryAllocateDirectMemoryLocked(poolBase, allocationLimit, length, effectiveAlignment, memoryType, allocationLimit, out aligned))
             {
-                var poolBase = _mainDirectMemoryPoolBase == UnsetMainDirectMemoryPoolBase
-                    ? AlignUp(GetDirectMemoryHighWaterMarkLocked(), effectiveAlignment)
-                    : _mainDirectMemoryPoolBase;
-
                 if (_mainDirectMemoryPoolBase == UnsetMainDirectMemoryPoolBase &&
-                    TryAddU64(poolBase, DirectMemorySizeBytes, out var shiftedLimit) &&
-                    TryAllocateDirectMemoryLocked(0, shiftedLimit, length, effectiveAlignment, memoryType, shiftedLimit, out aligned))
+                    TryAddU64(0, allocationLimit, out var legacyLimit) &&
+                    TryAllocateDirectMemoryLocked(0, legacyLimit, length, effectiveAlignment, memoryType, legacyLimit, out aligned))
                 {
                     _mainDirectMemoryPoolBase = poolBase;
                     if (ShouldTraceDirectMemory())
                     {
                         Console.Error.WriteLine(
-                            $"[LOADER][TRACE] main_direct_pool: base=0x{poolBase:X16} limit=0x{shiftedLimit:X16}");
+                            $"[LOADER][TRACE] main_direct_pool: base=0x{poolBase:X16} limit=0x{legacyLimit:X16}");
                     }
                 }
                 else
@@ -3025,6 +3024,10 @@ public static partial class KernelMemoryCompatExports
                         result: OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN);
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
                 }
+            }
+            else if (_mainDirectMemoryPoolBase == UnsetMainDirectMemoryPoolBase)
+            {
+                _mainDirectMemoryPoolBase = poolBase;
             }
         }
 

@@ -161,6 +161,46 @@ public sealed class KernelMemoryCompatExportsTests
     }
 
     [Fact]
+    public void AllocateMainDirectMemory_GrowsToAdditionalWindowsWhenEarlierWindowsAreFull()
+    {
+        const ulong windowSize = 0x4000_0000UL;
+        const ulong secondWindowStart = 0x4000_0000UL;
+        const ulong thirdWindowStart = 0x8000_0000UL;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        try
+        {
+            context[CpuRegister.Rdi] = 0x4000_0000UL;
+            context[CpuRegister.Rsi] = 0x4000;
+            context[CpuRegister.Rdx] = 0;
+            context[CpuRegister.Rcx] = AllocationOutAddress;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelAllocateMainDirectMemory(context));
+
+            context[CpuRegister.Rcx] = AllocationOutAddress + 0x8;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelAllocateMainDirectMemory(context));
+
+            context[CpuRegister.Rdi] = 0x1000;
+            context[CpuRegister.Rcx] = AllocationOutAddress + 0x10;
+            Assert.Equal(0, KernelMemoryCompatExports.KernelAllocateMainDirectMemory(context));
+            Assert.True(context.TryReadUInt64(AllocationOutAddress + 0x10, out var allocatedAddress));
+            Assert.Equal(thirdWindowStart, allocatedAddress);
+        }
+        finally
+        {
+            context[CpuRegister.Rdi] = 0;
+            context[CpuRegister.Rsi] = windowSize;
+            _ = KernelMemoryCompatExports.KernelReleaseDirectMemory(context);
+            context[CpuRegister.Rdi] = secondWindowStart;
+            context[CpuRegister.Rsi] = windowSize;
+            _ = KernelMemoryCompatExports.KernelReleaseDirectMemory(context);
+            context[CpuRegister.Rdi] = thirdWindowStart;
+            context[CpuRegister.Rsi] = 0x1000;
+            _ = KernelMemoryCompatExports.KernelReleaseDirectMemory(context);
+        }
+    }
+
+    [Fact]
     public void AvailableDirectMemorySize_FragmentedRangeReturnsLargestAlignedSpan()
     {
         const ulong firstAllocationStart = 0x0020_0000;
