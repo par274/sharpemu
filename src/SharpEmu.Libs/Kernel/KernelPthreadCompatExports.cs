@@ -35,9 +35,13 @@ public static class KernelPthreadCompatExports
     private static readonly bool _tracePthreadConds =
         _tracePthreads ||
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_CONDS"), "1", StringComparison.Ordinal);
+    private static readonly bool _tracePthreadFastPath =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_FASTPATH"), "1", StringComparison.Ordinal);
     private static readonly HashSet<ulong>? _tracePthreadMutexFilter = ParseTraceAddressFilter(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREAD_MUTEX_FILTER"));
     private static long _nextSynchronizationWaiterId;
+    private static int _pthreadFastPathTraceWritten;
+    private static readonly ConcurrentDictionary<ulong, byte> _pthreadFastPathBusyTraced = new();
 
     private sealed class PthreadMutexState
     {
@@ -809,6 +813,7 @@ public static class KernelPthreadCompatExports
 
         if (!TryResolveMutexState(ctx, mutexAddress, createIfZero: true, out var resolvedAddress, out var state))
         {
+            TracePthreadFastPathBusy(tryOnly ? "trylock_missing" : "lock_missing", mutexAddress, resolvedAddress, null, KernelPthreadState.GetCurrentThreadHandle(), (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, null, KernelPthreadState.GetCurrentThreadHandle(), (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
@@ -861,6 +866,7 @@ public static class KernelPthreadCompatExports
             var ownedResult = tryOnly
                 ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
+            TracePthreadFastPathBusy(tryOnly ? "trylock_self" : "lock_self", mutexAddress, resolvedAddress, state, currentThreadId, ownedResult);
             TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, ownedResult);
             return ownedResult;
         }
@@ -949,6 +955,7 @@ public static class KernelPthreadCompatExports
 
             if (tryOnly)
             {
+                TracePthreadFastPathBusy("trylock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
                 TracePthreadMutex(ctx, "trylock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
             }
@@ -1021,6 +1028,7 @@ public static class KernelPthreadCompatExports
         {
             if (state.RecursionCount <= 0)
             {
+                TracePthreadFastPathUnlock(ctx, mutexAddress, resolvedAddress, state, currentThreadId);
                 TracePthreadMutex(ctx, "unlock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
             }
@@ -1187,17 +1195,23 @@ public static class KernelPthreadCompatExports
             return 0;
         }
 
-        if (_mutexStates.ContainsKey(mutexAddress))
+        var hasPointedHandle =
+            KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle) &&
+            pointedHandle != 0 &&
+            pointedHandle != mutexAddress;
+
+        if (_mutexStates.TryGetValue(mutexAddress, out var cachedState))
         {
-            return mutexAddress;
+            return hasPointedHandle &&
+                   _mutexStates.TryGetValue(pointedHandle, out var pointedState) &&
+                   !ReferenceEquals(pointedState, cachedState)
+                ? pointedHandle
+                : mutexAddress;
         }
 
-        if (KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle) && pointedHandle != 0)
+        if (hasPointedHandle && _mutexStates.ContainsKey(pointedHandle))
         {
-            if (_mutexStates.ContainsKey(pointedHandle))
-            {
-                return pointedHandle;
-            }
+            return pointedHandle;
         }
 
         return mutexAddress;
@@ -1212,13 +1226,35 @@ public static class KernelPthreadCompatExports
             return false;
         }
 
+        var hasPointedHandle = KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle);
+
         if (_mutexStates.TryGetValue(mutexAddress, out state))
         {
+            // `mutexAddress` is often the address of the guest's ScePthreadMutex
+            // variable rather than the handle itself, and that storage is
+            // reusable — a stack frame recycles the slot, or the guest assigns a
+            // different mutex to it. The slot therefore outranks anything cached
+            // under its address: keeping the stale entry would resolve a release
+            // onto the wrong mutex, leave the real one owned forever and wedge
+            // every waiter on it (Demon's Souls' Scream audio engine did exactly
+            // this and spun on scePthreadMutexTrylock).
+            if (hasPointedHandle &&
+                pointedHandle != 0 &&
+                pointedHandle != mutexAddress &&
+                _mutexStates.TryGetValue(pointedHandle, out var pointedState) &&
+                !ReferenceEquals(pointedState, state))
+            {
+                _mutexStates[mutexAddress] = pointedState;
+                resolvedAddress = pointedHandle;
+                state = pointedState;
+                return true;
+            }
+
             resolvedAddress = mutexAddress;
             return true;
         }
 
-        if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, mutexAddress, out var pointedHandle))
+        if (!hasPointedHandle)
         {
             return false;
         }
@@ -2161,6 +2197,60 @@ public static class KernelPthreadCompatExports
             $"guest[0]=0x{guestWord0:X16} guest[8]=0x{guestWord1:X16} " +
             $"current=0x{currentThreadId:X16} owner=0x{(state?.OwnerThreadId ?? 0):X16} " +
             $"recursion={(state?.RecursionCount ?? 0)} type={(state?.Type ?? 0)} result=0x{unchecked((uint)result):X8}");
+    }
+
+    private static void TracePthreadFastPathUnlock(
+        CpuContext ctx,
+        ulong mutexAddress,
+        ulong resolvedAddress,
+        PthreadMutexState state,
+        ulong currentThreadId)
+    {
+        if (!_tracePthreadFastPath || Interlocked.Increment(ref _pthreadFastPathTraceWritten) > 16)
+        {
+            return;
+        }
+
+        Span<byte> objectBytes = stackalloc byte[0x50];
+        if (!ctx.Memory.TryRead(resolvedAddress, objectBytes))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] pthread_fastpath_unlock: mutex=0x{mutexAddress:X16} resolved=0x{resolvedAddress:X16} read=failed");
+            return;
+        }
+
+        Span<ulong> words = stackalloc ulong[10];
+        for (var index = 0; index < words.Length; index++)
+        {
+            words[index] = BinaryPrimitives.ReadUInt64LittleEndian(objectBytes.Slice(index * sizeof(ulong), sizeof(ulong)));
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] pthread_fastpath_unlock: mutex=0x{mutexAddress:X16} resolved=0x{resolvedAddress:X16} " +
+            $"current=0x{currentThreadId:X16} owner=0x{state.OwnerThreadId:X16} recursion={state.RecursionCount} " +
+            $"q00=0x{words[0]:X16} q08=0x{words[1]:X16} q10=0x{words[2]:X16} q18=0x{words[3]:X16} " +
+            $"q20=0x{words[4]:X16} q28=0x{words[5]:X16} q30=0x{words[6]:X16} q38=0x{words[7]:X16} " +
+            $"q40=0x{words[8]:X16} q48=0x{words[9]:X16}");
+    }
+
+    private static void TracePthreadFastPathBusy(
+        string operation,
+        ulong mutexAddress,
+        ulong resolvedAddress,
+        PthreadMutexState? state,
+        ulong currentThreadId,
+        int result)
+    {
+        if (!_tracePthreadFastPath || !_pthreadFastPathBusyTraced.TryAdd(mutexAddress, 0))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][TRACE] pthread_fastpath_{operation}: mutex=0x{mutexAddress:X16} resolved=0x{resolvedAddress:X16} " +
+            $"current=0x{currentThreadId:X16} owner=0x{(state?.OwnerThreadId ?? 0):X16} " +
+            $"recursion={(state?.RecursionCount ?? 0)} type={(state?.Type ?? 0)} " +
+            $"waiters={(state?.QueuedWaiterCount ?? 0)} result=0x{unchecked((uint)result):X8}");
     }
 
     private static void TracePthreadCond(string operation, ulong condAddress, ulong mutexAddress, PthreadCondState? state, bool timed, int result)

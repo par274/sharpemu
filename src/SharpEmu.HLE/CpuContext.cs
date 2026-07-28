@@ -20,6 +20,15 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
 
     public ulong Rip { get; set; }
 
+    /// <summary>
+    /// Index of the import this context is currently executing, or -1 when it is
+    /// running guest code. Only maintained while guest profiling is enabled;
+    /// <see cref="Rip"/> alone cannot answer "what is this thread inside right
+    /// now" because it keeps pointing at the last import stub after the call
+    /// returns.
+    /// </summary>
+    public int ActiveImportIndex { get; set; } = -1;
+
     public ulong Rflags { get; set; }
 
     public ulong FsBase { get; set; }

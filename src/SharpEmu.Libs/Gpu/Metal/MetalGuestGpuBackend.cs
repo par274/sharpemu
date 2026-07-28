@@ -398,7 +398,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public void SubmitGuestImageFill(ulong address, uint fillValue) =>
         MetalVideoPresenter.SubmitGuestImageFill(address, fillValue);
 
-    public void SubmitGuestImageWrite(ulong address, byte[] pixels) =>
+    public void SubmitGuestImageWrite(ulong address, byte[] pixels, uint rowOffset = 0) =>
         MetalVideoPresenter.SubmitGuestImageWrite(address, pixels);
 
     public void RequestCpuWrittenGuestImageSync(ulong scopeAddress = 0, ulong scopeByteCount = ulong.MaxValue) =>

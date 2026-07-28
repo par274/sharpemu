@@ -38,6 +38,7 @@ public static class SaveDataExports
     private static readonly object _memoryGate = new();
     private static readonly HashSet<int> _preparedTransactionResources = [];
     private static string? _titleId;
+    private static int _legacySaveMigrationChecked;
 
     public static void ConfigureApplicationInfo(string? titleId)
     {
@@ -1115,7 +1116,7 @@ public static class SaveDataExports
     }
 
     // Saves are keyed by title id only (single-user emulation) under
-    // ~/SharpEmu/Saves/<titleId>/; userId is accepted for API fidelity but not
+    // user/savedata/<titleId>/; userId is accepted for API fidelity but not
     // part of the host path.
     private static string ResolveTitleSaveRoot(int userId, string titleId) =>
         SaveDataStorage.TitleRoot(ResolveSaveDataRoot(), titleId);
@@ -1133,7 +1134,24 @@ public static class SaveDataExports
             ctx.TryReadUInt64(address + 0x10, out offset);
     }
 
-    private static string ResolveSaveDataRoot() => SaveDataStorage.Root();
+    private static string ResolveSaveDataRoot()
+    {
+        var root = SaveDataStorage.Root();
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR")) &&
+            Interlocked.Exchange(ref _legacySaveMigrationChecked, 1) == 0)
+        {
+            try
+            {
+                SaveDataStorage.MigrateLegacyLayout(root);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                TraceSaveData($"migration_failed root='{root}' error='{exception.Message}'");
+            }
+        }
+
+        return root;
+    }
 
     private static string ResolveConfiguredTitleId()
     {

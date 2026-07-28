@@ -7,6 +7,7 @@ path = [
     "global.json",
     "**/packages.lock.json",
     "scripts/ps5_names.txt",
+    "src/SharpEmu.LibAtrac9/**",
     "src/SharpEmu.GUI/Languages/**",
     "src/SharpEmu.ShaderCompiler.Metal/Templates/**",
     "tests/SharpEmu.ShaderCompiler.Metal.Tests/Goldens/**",

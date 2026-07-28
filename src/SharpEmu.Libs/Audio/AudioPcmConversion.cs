@@ -43,6 +43,46 @@ internal static class AudioPcmConversion
         }
     }
 
+    /// <summary>
+    /// Copies interleaved PCM without changing its channel layout. SDL can convert
+    /// this directly to the physical device, which preserves surround mixes that
+    /// would otherwise be truncated to the first two guest channels.
+    /// </summary>
+    public static void CopyWithVolume(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        bool isFloat,
+        float volume)
+    {
+        var clampedVolume = Math.Clamp(volume, 0.0f, 1.0f);
+        if (clampedVolume >= 1.0f)
+        {
+            source.CopyTo(destination);
+            return;
+        }
+
+        if (isFloat)
+        {
+            for (var offset = 0; offset < source.Length; offset += sizeof(float))
+            {
+                var sample = BinaryPrimitives.ReadSingleLittleEndian(source.Slice(offset, sizeof(float)));
+                BinaryPrimitives.WriteSingleLittleEndian(
+                    destination.Slice(offset, sizeof(float)),
+                    sample * clampedVolume);
+            }
+
+            return;
+        }
+
+        for (var offset = 0; offset < source.Length; offset += sizeof(short))
+        {
+            var sample = BinaryPrimitives.ReadInt16LittleEndian(source.Slice(offset, sizeof(short)));
+            BinaryPrimitives.WriteInt16LittleEndian(
+                destination.Slice(offset, sizeof(short)),
+                ApplyVolume(sample, clampedVolume));
+        }
+    }
+
     private static short ReadSample(
         ReadOnlySpan<byte> frame,
         int channel,

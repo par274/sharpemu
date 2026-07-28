@@ -50,6 +50,20 @@ public sealed class GuiSettings
 
     public bool CheckForUpdatesOnStartup { get; set; } = true;
 
+    public string WindowMode { get; set; } = "Windowed";
+
+    public string Resolution { get; set; } = "1920x1080";
+
+    public int DisplayIndex { get; set; }
+
+    public int RefreshRate { get; set; }
+
+    public string ScalingMode { get; set; } = "Fit";
+
+    public bool VSync { get; set; } = true;
+
+    public string HdrMode { get; set; } = "Auto";
+
     /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
     public List<string> EnvironmentToggles { get; set; } = new();
 
@@ -103,6 +117,12 @@ public sealed class GuiSettings
         {
             settings.RenderResolutionScale = 1.0;
         }
+        settings.WindowMode = NormalizeChoice(settings.WindowMode, "Windowed", "Borderless", "Exclusive");
+        settings.Resolution = NormalizeResolution(settings.Resolution);
+        settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
+        settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
+        settings.DisplayIndex = Math.Max(0, settings.DisplayIndex);
+        settings.RefreshRate = Math.Clamp(settings.RefreshRate, 0, 1000);
 
         return settings;
     }
@@ -116,6 +136,20 @@ public sealed class GuiSettings
         }
 
         return source.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
+    }
+
+    private static string NormalizeChoice(string? value, string fallback, params string[] choices) =>
+        choices.Prepend(fallback).FirstOrDefault(
+            choice => string.Equals(choice, value, StringComparison.OrdinalIgnoreCase)) ?? fallback;
+
+    private static string NormalizeResolution(string? value)
+    {
+        if (!HostDisplayOptions.TryParseResolution(value, out var width, out var height))
+        {
+            return "1920x1080";
+        }
+
+        return $"{width}x{height}";
     }
 
     public void Save()

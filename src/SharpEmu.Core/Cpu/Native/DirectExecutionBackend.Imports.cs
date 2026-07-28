@@ -54,10 +54,13 @@ public sealed partial class DirectExecutionBackend
 				var startTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 				var r = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
 				RecordPerfHleDispatchTime(System.Diagnostics.Stopwatch.GetTimestamp() - startTicks);
+				directExecutionBackend.ClearActiveImportIndex();
 				return r;
 			}
 
-			return directExecutionBackend.DispatchImport(importIndex, argPackPtr);
+			var result = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
+			directExecutionBackend.ClearActiveImportIndex();
+			return result;
 		}
 		catch (Exception ex)
 		{
@@ -69,16 +72,43 @@ public sealed partial class DirectExecutionBackend
 
 	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
 	{
-		EXCEPTION_RECORD* exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;
-		if (exceptionRecord->ExceptionCode == 3221225477u &&
-			exceptionRecord->NumberParameters >= 2 &&
-			SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
-				exceptionRecord->ExceptionInformation[1]))
+		if (TryHandleGuestImageWriteFault(exceptionInfo))
 		{
 			return -1;
 		}
 
 		return TryRecoverUnresolvedSentinel(exceptionInfo);
+	}
+
+	/// <summary>
+	/// Windows counterpart of the POSIX SIGSEGV bridge into
+	/// <see cref="SharpEmu.HLE.GuestImageWriteTracker"/>. Guest code runs natively,
+	/// so a store into a surface the GPU backend has cached is an ordinary CPU
+	/// write with nothing to intercept — the page is write-protected instead and
+	/// the resulting fault is what tells the backend to re-upload. Without this
+	/// the cache serves the first upload forever, and anything the guest CPU
+	/// draws (a software-decoded movie frame, a memset fog layer) never reaches
+	/// the screen.
+	/// </summary>
+	private unsafe static bool TryHandleGuestImageWriteFault(void* exceptionInfo)
+	{
+		if (!SharpEmu.HLE.GuestImageWriteTracker.Enabled)
+		{
+			return false;
+		}
+
+		var exceptionRecord = ((EXCEPTION_POINTERS*)exceptionInfo)->ExceptionRecord;
+		// STATUS_ACCESS_VIOLATION, and only the write flavour: ExceptionInformation
+		// is [accessKind, address] with 0=read, 1=write, 8=DEP execute.
+		if (exceptionRecord->ExceptionCode != 3221225477u ||
+			exceptionRecord->NumberParameters < 2 ||
+			exceptionRecord->ExceptionInformation[0] != 1uL)
+		{
+			return false;
+		}
+
+		return SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
+			exceptionRecord->ExceptionInformation[1]);
 	}
 
 	private unsafe static int RawUnhandledFilterManaged(void* exceptionInfo)
@@ -174,6 +204,10 @@ public sealed partial class DirectExecutionBackend
 		{
 			RecordPerfHleCall(importStubEntry.Export?.Name ?? importStubEntry.Nid);
 		}
+		if (_profileGuestRip)
+		{
+			EnsureGuestRipSampler();
+		}
 		int num2 = Volatile.Read(in _rawSentinelRecoveries);
 		if (num2 != _lastReportedRawSentinelRecoveries)
 		{
@@ -187,6 +221,10 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		cpuContext.Rip = importStubEntry.Address;
+		if (_profileGuestRip)
+		{
+			cpuContext.ActiveImportIndex = importIndex;
+		}
 		LoadImportVolatileArguments(cpuContext, argPackPtr);
 		cpuContext[CpuRegister.Rdi] = *(ulong*)argPackPtr;
 		cpuContext[CpuRegister.Rsi] = *(ulong*)(argPackPtr + 8);
@@ -1453,7 +1491,7 @@ public sealed partial class DirectExecutionBackend
 			string.Equals(nid, "fzyMKs9kim0", StringComparison.Ordinal) &&
 			result == OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
 		var expectedMutexTrylockBusy =
-			string.Equals(nid, "K-jXhbt2gn4", StringComparison.Ordinal) &&
+			(nid is "K-jXhbt2gn4" or "upoVrzMHFeE") &&
 			result == OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
 		var expectedSemaphoreTrywaitAgain =
 			string.Equals(nid, "H2a+IN9TP0E", StringComparison.Ordinal) &&
@@ -1470,6 +1508,9 @@ public sealed partial class DirectExecutionBackend
 		var expectedPrivacyInvalidParameter =
 			string.Equals(nid, "D-CzAxQL0XI", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80960009);
+		var expectedPlayGoChunkEnumerationEnd =
+			string.Equals(nid, "uWIYLFkkwqk", StringComparison.Ordinal) &&
+			resultValue == unchecked((int)0x80B2000C);
 		if (!expectedFileProbeMiss &&
 			!expectedTimedWaitTimeout &&
 			!expectedEqueueTimeout &&
@@ -1478,7 +1519,8 @@ public sealed partial class DirectExecutionBackend
 			!expectedPollSemaBusy &&
 			!expectedNetAcceptWouldBlock &&
 			!expectedUserServiceNoEvent &&
-			!expectedPrivacyInvalidParameter)
+			!expectedPrivacyInvalidParameter &&
+			!expectedPlayGoChunkEnumerationEnd)
 		{
 			return true;
 		}

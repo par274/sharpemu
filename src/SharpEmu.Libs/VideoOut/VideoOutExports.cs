@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Logging;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Gpu;
@@ -69,11 +70,14 @@ public static class VideoOutExports
     private static readonly Dictionary<int, VideoOutPortState> _ports = new();
     private static int _presentationWindowCloseNotified;
     private static int _vblankStopRequested;
+    private static int _hdrOutputRequested;
     private static readonly Dictionary<(int Handle, int BufferIndex, ulong Address), ulong> _lastFrameFingerprints = new();
     private static int _nextHandle = 1;
     private static int _frameDumpCount;
     private static long _nextFrameDumpIndex;
-    private static string _windowTitle = "SharpEmu VideoOut";
+    private static string _applicationWindowTitle = "VideoOut";
+    private static string _selectedGpuName = string.Empty;
+    private static string _applicationTitleId = "UNKNOWN";
     private static readonly bool _logFrameRate = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
         "1",
@@ -113,7 +117,18 @@ public static class VideoOutExports
         var versionSuffix = string.IsNullOrWhiteSpace(version) ? string.Empty : $" v{version.Trim()}";
         lock (_stateGate)
         {
-            _windowTitle = $"SharpEmu - {application}{versionSuffix}";
+            _applicationTitleId = string.IsNullOrWhiteSpace(titleId)
+                ? "UNKNOWN"
+                : titleId.Trim();
+            _applicationWindowTitle = $"{application}{versionSuffix}";
+        }
+    }
+
+    internal static string GetApplicationTitleId()
+    {
+        lock (_stateGate)
+        {
+            return _applicationTitleId;
         }
     }
 
@@ -121,7 +136,10 @@ public static class VideoOutExports
     {
         lock (_stateGate)
         {
-            return _windowTitle;
+            var gpuSuffix = string.IsNullOrWhiteSpace(_selectedGpuName)
+                ? string.Empty
+                : $" · {_selectedGpuName}";
+            return $"SharpEmu · {BuildInfo.CommitSha ?? "dev"} - {_applicationWindowTitle}{gpuSuffix}";
         }
     }
 
@@ -139,7 +157,7 @@ public static class VideoOutExports
             : string.Empty;
         lock (_stateGate)
         {
-            _windowTitle = $"{_windowTitle} · {gpuName.Trim()}{backendSuffix}";
+            _selectedGpuName = $"{gpuName.Trim()}{backendSuffix}";
         }
     }
 
@@ -166,30 +184,17 @@ public static class VideoOutExports
     private static void RequestHostShutdown(string reason)
     {
         Console.Error.WriteLine($"[LOADER][INFO] Host shutdown requested: {reason}");
-        var embedded = VulkanVideoHost.IsEmbedded;
         AudioOutExports.ShutdownAllPorts();
         Interlocked.Exchange(ref _vblankStopRequested, 1);
         HostSessionControl.RequestShutdown(reason);
+        GuestGpu.Current.RequestClose();
 
-        // A hosted game can still be issuing AGC work after it requests its
-        // own shutdown. Keep the presenter's resources alive until the GUI
-        // session reaches its guest-safe exit path and disposes the host
-        // surface.
-        if (!embedded)
+        // Give guest and GPU threads a bounded window to leave cooperatively.
+        ThreadPool.QueueUserWorkItem(static _ =>
         {
-            GuestGpu.Current.RequestClose();
-        }
-
-        // The embedded GUI owns the process lifetime. A guest shutdown should
-        // end only that session rather than terminating the launcher itself.
-        if (!embedded)
-        {
-            ThreadPool.QueueUserWorkItem(static _ =>
-            {
-                Thread.Sleep(2000);
-                Environment.Exit(0);
-            });
-        }
+            Thread.Sleep(2000);
+            Environment.Exit(0);
+        });
     }
 
     private sealed class VideoOutPortState
@@ -871,6 +876,8 @@ public static class VideoOutExports
         }
     }
 
+    internal static bool IsHdrOutputRequested => Volatile.Read(ref _hdrOutputRequested) != 0;
+
     [SysAbiExport(
         Nid = "MTxxrOCeSig",
         ExportName = "sceVideoOutSetWindowModeMargins",
@@ -1175,16 +1182,21 @@ public static class VideoOutExports
 
         var guestImageSubmitted = false;
         ulong guestImageAddress = 0;
-        if (submitGpuImage &&
-            bufferIndex >= 0 &&
+        if (bufferIndex >= 0 &&
             TryGetDisplayBufferInfo(handle, bufferIndex, out var displayBuffer))
         {
+            Interlocked.Exchange(
+                ref _hdrOutputRequested,
+                IsHdrPixelFormat(displayBuffer.PixelFormat) ? 1 : 0);
             guestImageAddress = displayBuffer.Address;
-            guestImageSubmitted = GuestGpu.Current.TrySubmitGuestImage(
-                displayBuffer.Address,
-                displayBuffer.Width,
-                displayBuffer.Height,
-                displayBuffer.PitchInPixel);
+            if (submitGpuImage)
+            {
+                guestImageSubmitted = GuestGpu.Current.TrySubmitGuestImage(
+                    displayBuffer.Address,
+                    displayBuffer.Width,
+                    displayBuffer.Height,
+                    displayBuffer.PitchInPixel);
+            }
         }
 
         if (_dumpVideoOut)
@@ -1710,6 +1722,12 @@ public static class VideoOutExports
 
     internal static bool IsPacked10BitPixelFormat(ulong pixelFormat) =>
         IsPacked10BitPixelFormatNormalized(NormalizePixelFormat(pixelFormat));
+
+    internal static bool IsHdrPixelFormat(ulong pixelFormat) =>
+        NormalizePixelFormat(pixelFormat) is
+            SceVideoOutPixelFormatA2R10G10B10Bt2020Pq or
+            SceVideoOutPixelFormat2R10G10B10A2Bt2100Pq or
+            SceVideoOutPixelFormat2B10G10R10A2Bt2100Pq;
 
     private static bool IsPacked10BitPixelFormatNormalized(ulong pixelFormat) =>
         pixelFormat is

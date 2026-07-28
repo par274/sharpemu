@@ -4383,6 +4383,14 @@ public static partial class AgcExports
                 _tracedProducerlessWaits.Clear();
             }
 
+            if (!stale)
+            {
+                // Count before the deduplication below: the warning fires once
+                // per label, so on its own it cannot say how often a queue
+                // actually suspends.
+                GpuWaitProfile.RecordSuspend(producer is not null);
+            }
+
             if (!stale && producer is null &&
                 !_tracedProducerlessWaits.Add(
                     (memory, waiter.WaitAddress)))
@@ -5648,6 +5656,8 @@ public static partial class AgcExports
 
                 SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot(
                     ctx.Memory);
+                GpuWaitProfile.RecordMonitorPoll(resumed != 0);
+                GpuWaitProfile.ReportIfDue(remaining);
                 if (remaining == 0)
                 {
                     gpuState.WaitMonitorRunning = false;
@@ -5841,6 +5851,7 @@ public static partial class AgcExports
             $"submission={waiter.SubmissionId} label=0x{waiter.WaitAddress:X16} " +
             $"resume=0x{waiter.ResumeAddress:X16} remaining_dwords={remainingDwords} " +
             $"waited_ms={waitedMilliseconds:F3}");
+        GpuWaitProfile.RecordResume(waiter.WaitAddress, waitedMilliseconds);
         if (remainingDwords == 0)
         {
             state.IsSuspended = false;

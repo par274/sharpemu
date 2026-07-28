@@ -8,6 +8,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using System.Text;
 using System.Text.Json;
 
@@ -45,6 +46,8 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        ConfigureManagedPluginResolution();
+
         try
         {
             return Run(args);
@@ -56,6 +59,25 @@ internal static partial class Program
         }
     }
 
+    private static void ConfigureManagedPluginResolution()
+    {
+        AssemblyLoadContext.Default.Resolving += static (loadContext, assemblyName) =>
+        {
+            if (string.IsNullOrWhiteSpace(assemblyName.Name))
+            {
+                return null;
+            }
+
+            var assemblyPath = Path.Combine(
+                AppContext.BaseDirectory,
+                "plugins",
+                assemblyName.Name + ".dll");
+            return File.Exists(assemblyPath)
+                ? loadContext.LoadFromAssemblyPath(assemblyPath)
+                : null;
+        };
+    }
+
     private static int Run(string[] args)
     {
         if (Updater.TryApply(args, out var updateExitCode))
@@ -64,7 +86,6 @@ internal static partial class Program
         }
 
         args = NormalizeInternalArguments(args, out var isMitigatedChild);
-        PreloadGlfw();
 
         if (args.Length == 0)
         {
@@ -93,14 +114,9 @@ internal static partial class Program
                 PreloadMacVulkanLoader();
             }
 
-            // GLFW requires window creation and event processing on the
-            // process main thread: AppKit demands it on macOS, and X11 has a
-            // single event queue that must be serviced from the main thread
-            // (a window created and polled off it may never map, which showed
-            // as a running game with no visible window on Linux). Emulation
-            // moves to a worker thread and the main thread services the window
-            // work the video presenter posts. Windows keeps a per-thread event
-            // queue, so its window stays on the presenter's own thread.
+            // SDL/AppKit window work belongs on the process main thread on
+            // macOS. Linux uses the same model for consistent X11/Wayland
+            // event ownership. Emulation remains on a worker thread.
             var exitCode = 0;
             HostMainThread.Enable();
             var emulation = new Thread(() =>
@@ -131,10 +147,9 @@ internal static partial class Program
     /// starts: the CPU backend executes guest x86-64 code natively, so the
     /// host process must be x86-64 — win-x64/linux-x64 on x64 hardware, or
     /// osx-x64 under Rosetta 2 on Apple Silicon (Rosetta translates the
-    /// whole process, so it still reports as X64 here). An arm64 process
-    /// (e.g. the osx-arm64 build) can browse the GUI but cannot run games;
-    /// failing up front distinguishes that from MoltenVK, signal-handler,
-    /// or guest-memory startup problems.
+    /// whole process, so it still reports as X64 here). Failing up front on
+    /// any other process architecture distinguishes that from MoltenVK,
+    /// signal-handler, or guest-memory startup problems.
     /// </summary>
     private static bool CheckHostArchitecture()
     {
@@ -178,11 +193,11 @@ internal static partial class Program
     }
 
     /// <summary>
-    /// Makes a Vulkan loader visible to GLFW's dlopen("libvulkan.1.dylib").
+    /// Makes a Vulkan loader visible before SDL creates its Vulkan surface.
     /// Homebrew's Vulkan libraries are arm64-only and cannot load into this
     /// x86-64 (Rosetta 2) process, so a universal libMoltenVK.dylib placed
     /// next to the executable (named libvulkan.1.dylib) is preloaded here;
-    /// dyld then resolves GLFW's bare-name dlopen to the loaded image.
+    /// dyld can then resolve the loader for SDL and Silk.NET.
     /// </summary>
     private static void PreloadMacVulkanLoader()
     {
@@ -214,27 +229,6 @@ internal static partial class Program
             "as libvulkan.1.dylib.");
     }
 
-    /// <summary>
-    /// SharpEmu.CLI.csproj publishes glfw into a "plugins" subfolder rather
-    /// than flat next to the executable, which falls outside the default OS
-    /// DLL/dlopen search path. Preloading it here by full path first means
-    /// any later bare-name lookup (however Silk.NET/GLFW itself resolves the
-    /// library) finds it already loaded in the process and reuses it -- the
-    /// same technique <see cref="PreloadMacVulkanLoader"/> already relies on
-    /// for the Vulkan loader.
-    /// </summary>
-    private static void PreloadGlfw()
-    {
-        var fileName = OperatingSystem.IsWindows() ? "glfw3.dll"
-            : OperatingSystem.IsMacOS() ? "libglfw.3.dylib"
-            : "libglfw.so.3";
-        var candidate = Path.Combine(AppContext.BaseDirectory, "plugins", fileName);
-        if (File.Exists(candidate))
-        {
-            NativeLibrary.TryLoad(candidate, out _);
-        }
-    }
-
     private static int RunEmulator(string[] args, bool isMitigatedChild)
     {
         Console.Error.WriteLine($"[DEBUG] SharpEmu starting with {args.Length} args");
@@ -244,17 +238,13 @@ internal static partial class Program
             return childExitCode;
         }
 
-        if (!TryExtractHostSurfaceArgument(args, out var emulatorArgs, out var hostSurface, out var hostSurfaceError))
-        {
-            Console.Error.WriteLine($"[LOADER][ERROR] {hostSurfaceError}");
-            return 1;
-        }
-
-        HostSessionControl.SetEmbeddedHostSurface(
-            hostSurface?.WindowHandle ?? 0,
-            hostSurface?.DisplayHandle ?? 0);
-
-        if (!TryParseArguments(emulatorArgs, out var ebootPath, out var runtimeOptions, out var logLevel, out var logFilePath))
+        if (!TryParseArguments(
+                args,
+                out var ebootPath,
+                out var runtimeOptions,
+                out var videoOptions,
+                out var logLevel,
+                out var logFilePath))
         {
             PrintUsage();
             return 1;
@@ -266,6 +256,11 @@ internal static partial class Program
         }
 
         SharpEmuLog.MinimumLevel = logLevel;
+        if (!HostVideoHost.TryConfigureVideo(videoOptions))
+        {
+            Console.Error.WriteLine("[LOADER][ERROR] Video options cannot change while a presenter is active.");
+            return 3;
+        }
 
         Log.Info(BuildInfo.Banner);
         Log.Info(HostSystemInfo.Summary);
@@ -309,12 +304,6 @@ internal static partial class Program
 
         try
         {
-            if (hostSurface is not null && !VulkanVideoHost.TryAttachSurface(hostSurface))
-            {
-                Console.Error.WriteLine("[LOADER][ERROR] The requested GUI host surface is already active.");
-                return 3;
-            }
-
             using var runtime = SharpEmuRuntime.CreateDefault(runtimeOptions);
 
             OrbisGen2Result result;
@@ -384,51 +373,7 @@ internal static partial class Program
                 debugHost.DisposeAsync().AsTask().GetAwaiter().GetResult();
             }
 
-            HostSessionControl.SetEmbeddedHostSurface(0);
-            if (hostSurface is not null)
-            {
-                VulkanVideoHost.RequestClose();
-                VulkanVideoHost.DetachSurface(hostSurface);
-                hostSurface.Dispose();
-            }
         }
-    }
-
-    private static bool TryExtractHostSurfaceArgument(
-        IReadOnlyList<string> args,
-        out string[] emulatorArgs,
-        out VulkanHostSurface? hostSurface,
-        out string? error)
-    {
-        const string hostSurfacePrefix = "--host-surface=";
-        var remaining = new List<string>(args.Count);
-        hostSurface = null;
-        error = null;
-        foreach (var argument in args)
-        {
-            if (!argument.StartsWith(hostSurfacePrefix, StringComparison.OrdinalIgnoreCase))
-            {
-                remaining.Add(argument);
-                continue;
-            }
-
-            if (hostSurface is not null)
-            {
-                emulatorArgs = [];
-                error = "more than one GUI host surface was specified";
-                return false;
-            }
-
-            var descriptor = argument[hostSurfacePrefix.Length..];
-            if (!VulkanHostSurface.TryCreateChildProcessSurface(descriptor, out hostSurface, out error))
-            {
-                emulatorArgs = [];
-                return false;
-            }
-        }
-
-        emulatorArgs = remaining.ToArray();
-        return true;
     }
 
     private static void EnsureCliConsole()
@@ -1042,7 +987,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1087,6 +1032,7 @@ internal static partial class Program
         string[] args,
         out string ebootPath,
         out SharpEmuRuntimeOptions runtimeOptions,
+        out HostVideoOptions videoOptions,
         out LogLevel logLevel,
         out string? logFilePath)
     {
@@ -1094,6 +1040,7 @@ internal static partial class Program
         {
             ebootPath = string.Empty;
             runtimeOptions = default;
+            videoOptions = HostVideoOptions.Default;
             logLevel = SharpEmuLog.MinimumLevel;
             logFilePath = null;
             return false;
@@ -1102,12 +1049,99 @@ internal static partial class Program
         var strictDynlibResolution = false;
         var importTraceLimit = 0;
         var cpuEngine = CpuExecutionEngine.NativeOnly;
+        HostWindowMode? windowModeOverride = null;
+        HostScalingMode? scalingModeOverride = null;
+        int? windowWidthOverride = null;
+        int? windowHeightOverride = null;
+        int? displayIndexOverride = null;
+        int? refreshRateOverride = null;
+        bool? vsyncOverride = null;
+        HostHdrMode? hdrModeOverride = null;
+        videoOptions = HostVideoOptions.Default;
         logFilePath = null;
         logLevel = SharpEmuLog.MinimumLevel;
         var pathTokens = new List<string>(args.Length);
         for (var i = 0; i < args.Length; i++)
         {
             var argument = args[i];
+            if (TrySplitOption(argument, "--window-mode", out var windowModeText))
+            {
+                if (!TryParseWindowMode(windowModeText, out var windowMode))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                windowModeOverride = windowMode;
+                continue;
+            }
+            if (TrySplitOption(argument, "--resolution", out var resolutionText))
+            {
+                if (!TryParseResolution(resolutionText, out var windowWidth, out var windowHeight))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                windowWidthOverride = windowWidth;
+                windowHeightOverride = windowHeight;
+                continue;
+            }
+            if (TrySplitOption(argument, "--display", out var displayText))
+            {
+                if (!int.TryParse(displayText, out var displayIndex) || displayIndex < 0)
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                displayIndexOverride = displayIndex;
+                continue;
+            }
+            if (TrySplitOption(argument, "--refresh-rate", out var refreshText))
+            {
+                if (!int.TryParse(refreshText, out var refreshRate) || refreshRate < 0)
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                refreshRateOverride = refreshRate;
+                continue;
+            }
+            if (TrySplitOption(argument, "--scaling", out var scalingText))
+            {
+                if (!TryParseScalingMode(scalingText, out var scalingMode))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                scalingModeOverride = scalingMode;
+                continue;
+            }
+            if (TrySplitOption(argument, "--vsync", out var vsyncText))
+            {
+                if (!TryParseSwitch(vsyncText, out var vsync))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                vsyncOverride = vsync;
+                continue;
+            }
+            if (TrySplitOption(argument, "--hdr", out var hdrText))
+            {
+                if (!TryParseHdrMode(hdrText, out var hdrMode))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                hdrModeOverride = hdrMode;
+                continue;
+            }
             if (string.Equals(argument, "--strict", StringComparison.OrdinalIgnoreCase))
             {
                 strictDynlibResolution = true;
@@ -1269,7 +1303,145 @@ internal static partial class Program
             StrictDynlibResolution = strictDynlibResolution,
             ImportTraceLimit = importTraceLimit,
         };
+        var configuredVideoOptions = LoadConfiguredVideoOptions(ebootPath);
+        videoOptions = (configuredVideoOptions with
+        {
+            WindowMode = windowModeOverride ?? configuredVideoOptions.WindowMode,
+            ScalingMode = scalingModeOverride ?? configuredVideoOptions.ScalingMode,
+            Width = windowWidthOverride ?? configuredVideoOptions.Width,
+            Height = windowHeightOverride ?? configuredVideoOptions.Height,
+            DisplayIndex = displayIndexOverride ?? configuredVideoOptions.DisplayIndex,
+            RefreshRate = refreshRateOverride ?? configuredVideoOptions.RefreshRate,
+            VSync = vsyncOverride ?? configuredVideoOptions.VSync,
+            HdrMode = hdrModeOverride ?? configuredVideoOptions.HdrMode,
+        }).Normalize();
         return true;
+    }
+
+    private static HostVideoOptions LoadConfiguredVideoOptions(string ebootPath)
+    {
+        var defaults = HostVideoOptions.Default;
+        try
+        {
+            var effective = EffectiveLaunchSettings.Resolve(
+                GuiSettings.Load(),
+                PerGameSettings.Load(TryReadTitleId(ebootPath)));
+
+            var windowMode = TryParseWindowMode(effective.WindowMode, out var parsedWindowMode)
+                ? parsedWindowMode
+                : defaults.WindowMode;
+            var scalingMode = TryParseScalingMode(effective.ScalingMode, out var parsedScalingMode)
+                ? parsedScalingMode
+                : defaults.ScalingMode;
+            var hasResolution = TryParseResolution(
+                effective.Resolution,
+                out var configuredWidth,
+                out var configuredHeight);
+            var hdrMode = TryParseHdrMode(effective.HdrMode, out var parsedHdrMode)
+                ? parsedHdrMode
+                : defaults.HdrMode;
+
+            return new HostVideoOptions
+            {
+                WindowMode = windowMode,
+                ScalingMode = scalingMode,
+                Width = hasResolution ? configuredWidth : defaults.Width,
+                Height = hasResolution ? configuredHeight : defaults.Height,
+                DisplayIndex = effective.DisplayIndex,
+                RefreshRate = effective.RefreshRate,
+                VSync = effective.VSync,
+                HdrMode = hdrMode,
+            }.Normalize();
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] GUI video settings could not be loaded; using defaults: {exception.Message}");
+            return defaults;
+        }
+    }
+
+    private static bool TrySplitOption(string argument, string name, out string value)
+    {
+        var prefix = name + "=";
+        if (argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            value = argument[prefix.Length..];
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static bool TryParseWindowMode(string value, out HostWindowMode mode)
+    {
+        mode = value.ToLowerInvariant() switch
+        {
+            "windowed" => HostWindowMode.Windowed,
+            "borderless" => HostWindowMode.Borderless,
+            "exclusive" or "fullscreen" => HostWindowMode.ExclusiveFullscreen,
+            _ => (HostWindowMode)(-1),
+        };
+        return Enum.IsDefined(mode);
+    }
+
+    private static bool TryParseScalingMode(string value, out HostScalingMode mode)
+    {
+        mode = value.ToLowerInvariant() switch
+        {
+            "fit" => HostScalingMode.Fit,
+            "cover" => HostScalingMode.Cover,
+            "stretch" => HostScalingMode.Stretch,
+            "integer" => HostScalingMode.Integer,
+            _ => (HostScalingMode)(-1),
+        };
+        return Enum.IsDefined(mode);
+    }
+
+    private static bool TryParseHdrMode(string value, out HostHdrMode mode)
+    {
+        mode = value.ToLowerInvariant() switch
+        {
+            "auto" => HostHdrMode.Auto,
+            "on" or "true" or "1" => HostHdrMode.On,
+            "off" or "false" or "0" => HostHdrMode.Off,
+            _ => (HostHdrMode)(-1),
+        };
+        return Enum.IsDefined(mode);
+    }
+
+    private static bool TryParseResolution(string value, out int width, out int height)
+    {
+        var parts = value.Split('x', 'X');
+        if (parts.Length == 2 && int.TryParse(parts[0], out width) && int.TryParse(parts[1], out height) &&
+            width >= 640 && height >= 360)
+        {
+            return true;
+        }
+
+        width = 0;
+        height = 0;
+        return false;
+    }
+
+    private static bool TryParseSwitch(string value, out bool enabled)
+    {
+        if (value is "1" || value.Equals("on", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("true", StringComparison.OrdinalIgnoreCase))
+        {
+            enabled = true;
+            return true;
+        }
+        if (value is "0" || value.Equals("off", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("false", StringComparison.OrdinalIgnoreCase))
+        {
+            enabled = false;
+            return true;
+        }
+
+        enabled = false;
+        return false;
     }
 
     private static bool TryParseCpuEngine(string valueText, out CpuExecutionEngine engine)

@@ -129,6 +129,24 @@ public static partial class KernelMemoryCompatExports
     private static readonly HashSet<string> _negativeStatCache = new(HostFsPathComparer);
     private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(HostFsPathComparer);
     private static long _nextFileDescriptor = 2;
+    private static string _applicationTitleId = "UNKNOWN";
+
+    public static void ConfigureApplicationInfo(string? titleId)
+    {
+        var value = string.IsNullOrWhiteSpace(titleId) ? "UNKNOWN" : titleId.Trim();
+        Span<char> sanitized = value.Length <= 128
+            ? stackalloc char[value.Length]
+            : new char[value.Length];
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            sanitized[index] = char.IsAsciiLetterOrDigit(character) || character is '-' or '_'
+                ? char.ToUpperInvariant(character)
+                : '_';
+        }
+
+        Volatile.Write(ref _applicationTitleId, new string(sanitized));
+    }
 
     internal static int AllocateGuestFileDescriptor()
     {
@@ -5350,7 +5368,7 @@ public static partial class KernelMemoryCompatExports
         }
         else
         {
-            root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "logs", "devlog", "app"));
+            root = Path.Combine(ResolveGameLogRoot(), "devlog", "app");
         }
 
         Directory.CreateDirectory(root);
@@ -5419,13 +5437,19 @@ public static partial class KernelMemoryCompatExports
         }
         else
         {
-            root = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "logs", "hostapp"));
-            Environment.SetEnvironmentVariable(hostappVariableName, root);
+            root = Path.Combine(ResolveGameLogRoot(), "hostapp");
         }
 
         Directory.CreateDirectory(root);
         return root;
     }
+
+    private static string ResolveGameLogRoot() =>
+        Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory,
+            "user",
+            "game_logs",
+            Volatile.Read(ref _applicationTitleId)));
 
     private static string GetPerAppWritableRoot()
     {

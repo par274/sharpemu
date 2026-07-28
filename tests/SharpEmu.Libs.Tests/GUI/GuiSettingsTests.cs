@@ -30,6 +30,45 @@ public sealed class GuiSettingsTests
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
         Assert.Empty(settings.EnvironmentToggles);
+        Assert.Equal("Windowed", settings.WindowMode);
+        Assert.Equal("1920x1080", settings.Resolution);
+        Assert.Equal("Fit", settings.ScalingMode);
+        Assert.Equal("Auto", settings.HdrMode);
+        Assert.True(settings.VSync);
+    }
+
+    [Fact]
+    public void NormalizeFromJson_InvalidVideoValues_FallBackAndClamp()
+    {
+        const string json = """
+            {
+              "WindowMode": "not-a-mode",
+              "Resolution": "not-a-resolution",
+              "ScalingMode": "nearest-ish",
+              "HdrMode": "maybe",
+              "DisplayIndex": -4,
+              "RefreshRate": 5000
+            }
+            """;
+
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.Equal("Windowed", settings.WindowMode);
+        Assert.Equal("1920x1080", settings.Resolution);
+        Assert.Equal("Fit", settings.ScalingMode);
+        Assert.Equal("Auto", settings.HdrMode);
+        Assert.Equal(0, settings.DisplayIndex);
+        Assert.Equal(1000, settings.RefreshRate);
+    }
+
+    [Fact]
+    public void NormalizeFromJson_CustomResolution_IsPreserved()
+    {
+        const string json = """{ "Resolution": "3440x1440" }""";
+
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.Equal("3440x1440", settings.Resolution);
     }
 
     [Fact]
@@ -96,5 +135,45 @@ public sealed class GuiSettingsTests
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
         Assert.Empty(settings.EnvironmentToggles);
+    }
+
+    [Fact]
+    public void EffectiveLaunchSettings_PerGameVideoValuesOverrideOnlySelectedFields()
+    {
+        var global = new GuiSettings
+        {
+            WindowMode = "Windowed",
+            Resolution = "1920x1080",
+            DisplayIndex = 1,
+            RefreshRate = 60,
+            ScalingMode = "Fit",
+            HdrMode = "Auto",
+            VSync = true,
+        };
+        var perGame = new PerGameSettings
+        {
+            Resolution = "2560x1440",
+            DisplayIndex = 2,
+            HdrMode = "On",
+            VSync = false,
+        };
+
+        var effective = EffectiveLaunchSettings.Resolve(global, perGame);
+
+        Assert.Equal("Windowed", effective.WindowMode);
+        Assert.Equal("2560x1440", effective.Resolution);
+        Assert.Equal(2, effective.DisplayIndex);
+        Assert.Equal(60, effective.RefreshRate);
+        Assert.Equal("Fit", effective.ScalingMode);
+        Assert.Equal("On", effective.HdrMode);
+        Assert.False(effective.VSync);
+    }
+
+    [Fact]
+    public void PerGameSettings_VideoOverridesParticipateInEmptyCheck()
+    {
+        Assert.True(new PerGameSettings().IsEmpty);
+        Assert.False(new PerGameSettings { ScalingMode = "Integer" }.IsEmpty);
+        Assert.False(new PerGameSettings { HdrMode = "Off" }.IsEmpty);
     }
 }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Libs.Bink;
 
@@ -36,6 +37,8 @@ internal sealed class BinkFramePlayback : IDisposable
     private long _currentFrameIndex = -1;
     private long _nextDecodedFrameIndex;
     private long _playbackStartTimestamp;
+    private double _audioStartSeconds;
+    private long _lastSkewTraceTimestamp;
     private bool _playbackClockStarted;
     private bool _decoderCompleted;
     private bool _stopRequested;
@@ -83,6 +86,26 @@ internal sealed class BinkFramePlayback : IDisposable
         }
     }
 
+    /// <summary>
+    /// Wall-clock seconds since the first frame was presented, and the index of
+    /// the last frame shown. Playback is on its own time base when these agree
+    /// with the movie's frame rate.
+    /// </summary>
+    internal (double Seconds, long FrameIndex) PlaybackProgress
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return (
+                    _playbackClockStarted
+                        ? Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds
+                        : 0,
+                    _currentFrameIndex);
+            }
+        }
+    }
+
     internal bool TryGetFrame(
         bool advanceClock,
         out byte[] pixels,
@@ -118,14 +141,13 @@ internal sealed class BinkFramePlayback : IDisposable
             if (advanceClock && !_playbackClockStarted)
             {
                 _playbackStartTimestamp = Stopwatch.GetTimestamp();
+                _audioStartSeconds = GuestAudioClock.PlayedSeconds;
                 _playbackClockStarted = true;
             }
 
-            var elapsedSeconds = _playbackClockStarted
-                ? Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds
-                : 0;
-            var targetFrameIndex = (long)Math.Floor(
-                elapsedSeconds * FramesPerSecondNumerator / FramesPerSecondDenominator);
+            var elapsedSeconds = CurrentPlaybackSecondsLocked();
+            TraceClockSkewLocked();
+            var targetFrameIndex = CurrentTargetFrameIndexLocked();
             DecodedFrame? replacement = null;
             while (_decodedFrames.Count > 0 &&
                    _decodedFrames.Peek().Index <= targetFrameIndex)
@@ -166,6 +188,86 @@ internal sealed class BinkFramePlayback : IDisposable
         }
     }
 
+    /// <summary>
+    /// Time base for playback. A host-decoded movie runs on whatever clock it is
+    /// given, but the audio that belongs to it comes from the guest, which does
+    /// not advance at wall-clock rate on a slow frame. Following the audio keeps
+    /// the two together; SHARPEMU_MOVIE_CLOCK=wall restores the old behaviour.
+    /// </summary>
+    private static readonly bool _followGuestAudioClock = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_MOVIE_CLOCK"),
+        "wall",
+        StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Seconds of playback elapsed on the movie's time base. Falls back to wall
+    /// clock whenever guest audio is not flowing: a movie whose audio never
+    /// starts — or stops early — must still finish rather than hang on a clock
+    /// that will never advance again.
+    /// </summary>
+    private double CurrentPlaybackSecondsLocked()
+    {
+        if (!_playbackClockStarted)
+        {
+            return 0;
+        }
+
+        var wallSeconds = Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds;
+        if (!_followGuestAudioClock || !GuestAudioClock.IsRunning)
+        {
+            return wallSeconds;
+        }
+
+        return Math.Clamp(GuestAudioClock.PlayedSeconds - _audioStartSeconds, 0, wallSeconds);
+    }
+
+    private static readonly bool _traceClockSkew = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_MOVIE_SYNC"),
+        "1",
+        StringComparison.Ordinal);
+
+    /// <summary>
+    /// Logs how far the movie's wall clock has drifted from the guest audio the
+    /// movie is supposed to be in step with. A skew that is flat across playback
+    /// is a late audio start; one that grows is a rate mismatch, and the two need
+    /// different fixes. Caller holds <see cref="_gate"/>.
+    /// </summary>
+    private void TraceClockSkewLocked()
+    {
+        if (!_traceClockSkew || !_playbackClockStarted)
+        {
+            return;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        if (_lastSkewTraceTimestamp != 0 &&
+            Stopwatch.GetElapsedTime(_lastSkewTraceTimestamp) < TimeSpan.FromSeconds(1))
+        {
+            return;
+        }
+
+        _lastSkewTraceTimestamp = now;
+        var wallSeconds = Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds;
+        var audioSeconds = GuestAudioClock.PlayedSeconds - _audioStartSeconds;
+        Console.Error.WriteLine(
+            $"[PERF][MOVIE] wall_s={wallSeconds:F2} audio_s={audioSeconds:F2} " +
+            $"playback_s={CurrentPlaybackSecondsLocked():F2} " +
+            $"skew_s={wallSeconds - audioSeconds:F2} frame={_currentFrameIndex} " +
+            $"audio_running={GuestAudioClock.IsRunning}");
+    }
+
+    /// <summary>
+    /// The frame the movie's own time base says should be on screen right now.
+    /// Returns -1 until the first frame is presented, so the queue prefills
+    /// instead of instantly declaring everything late.
+    /// </summary>
+    private long CurrentTargetFrameIndexLocked() =>
+        _playbackClockStarted
+            ? (long)Math.Floor(
+                CurrentPlaybackSecondsLocked() *
+                FramesPerSecondNumerator / FramesPerSecondDenominator)
+            : -1;
+
     private void DecodeLoop()
     {
         try
@@ -199,8 +301,28 @@ internal sealed class BinkFramePlayback : IDisposable
 
                 lock (_gate)
                 {
-                    _decodedFrames.Enqueue(new DecodedFrame(
-                        _nextDecodedFrameIndex++, destination));
+                    var frameIndex = _nextDecodedFrameIndex++;
+
+                    // Frames are pulled once per guest flip, so a title running
+                    // well under the movie's frame rate cannot drain a queue
+                    // this shallow fast enough and the movie stretches past its
+                    // real duration — audio finishes while the last picture sits
+                    // on screen and the next movie starts late. Once the clock
+                    // has passed a queued frame it can never be shown, so retire
+                    // it in favour of this newer one. Only superseded frames are
+                    // dropped, never the newest, so a decoder that cannot keep
+                    // up still advances the picture instead of freezing it.
+                    var targetFrameIndex = CurrentTargetFrameIndexLocked();
+                    if (frameIndex <= targetFrameIndex)
+                    {
+                        while (_decodedFrames.Count > 0 &&
+                               _decodedFrames.Peek().Index <= targetFrameIndex)
+                        {
+                            _freeBuffers.Enqueue(_decodedFrames.Dequeue().Pixels);
+                        }
+                    }
+
+                    _decodedFrames.Enqueue(new DecodedFrame(frameIndex, destination));
                     Monitor.PulseAll(_gate);
                 }
             }

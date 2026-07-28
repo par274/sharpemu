@@ -21,6 +21,20 @@ public sealed class PerGameSettings
 
     public bool? LogToFile { get; set; }
 
+    public string? WindowMode { get; set; }
+
+    public string? Resolution { get; set; }
+
+    public int? DisplayIndex { get; set; }
+
+    public int? RefreshRate { get; set; }
+
+    public string? ScalingMode { get; set; }
+
+    public bool? VSync { get; set; }
+
+    public string? HdrMode { get; set; }
+
     public List<string>? EnvironmentToggles { get; set; }
 
     [JsonIgnore]
@@ -29,6 +43,13 @@ public sealed class PerGameSettings
         ImportTraceLimit is null &&
         StrictDynlibResolution is null &&
         LogToFile is null &&
+        WindowMode is null &&
+        Resolution is null &&
+        DisplayIndex is null &&
+        RefreshRate is null &&
+        ScalingMode is null &&
+        VSync is null &&
+        HdrMode is null &&
         EnvironmentToggles is null;
 
     public static string DirectoryPath =>
@@ -116,6 +137,13 @@ public sealed record EffectiveLaunchSettings(
     int ImportTraceLimit,
     bool StrictDynlibResolution,
     bool LogToFile,
+    string WindowMode,
+    string Resolution,
+    int DisplayIndex,
+    int RefreshRate,
+    string ScalingMode,
+    bool VSync,
+    string HdrMode,
     IReadOnlyList<string> EnvironmentToggles)
 {
     public static EffectiveLaunchSettings Resolve(GuiSettings global, PerGameSettings? perGame) => new(
@@ -123,5 +151,12 @@ public sealed record EffectiveLaunchSettings(
         perGame?.ImportTraceLimit ?? global.ImportTraceLimit,
         perGame?.StrictDynlibResolution ?? global.StrictDynlibResolution,
         perGame?.LogToFile ?? global.LogToFile,
+        perGame?.WindowMode ?? global.WindowMode,
+        perGame?.Resolution ?? global.Resolution,
+        Math.Max(0, perGame?.DisplayIndex ?? global.DisplayIndex),
+        Math.Clamp(perGame?.RefreshRate ?? global.RefreshRate, 0, 1000),
+        perGame?.ScalingMode ?? global.ScalingMode,
+        perGame?.VSync ?? global.VSync,
+        perGame?.HdrMode ?? global.HdrMode,
         perGame?.EnvironmentToggles ?? global.EnvironmentToggles);
 }

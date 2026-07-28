@@ -44,6 +44,7 @@ public static class AudioOutExports
             int channels,
             int bytesPerSample,
             bool isFloat,
+            bool preservesGuestFormat,
             IHostAudioStream? backend)
         {
             UserId = userId;
@@ -54,6 +55,7 @@ public static class AudioOutExports
             Channels = channels;
             BytesPerSample = bytesPerSample;
             IsFloat = isFloat;
+            PreservesGuestFormat = preservesGuestFormat;
             Backend = backend;
         }
 
@@ -65,6 +67,7 @@ public static class AudioOutExports
         public int Channels { get; }
         public int BytesPerSample { get; }
         public bool IsFloat { get; }
+        public bool PreservesGuestFormat { get; }
         public IHostAudioStream? Backend { get; }
         public object SubmissionGate { get; } = new();
         public volatile float Volume = 1.0f;
@@ -140,6 +143,7 @@ public static class AudioOutExports
         }
 
         IHostAudioStream? backend = null;
+        var preservesGuestFormat = false;
         string backendName;
         try
         {
@@ -152,7 +156,18 @@ public static class AudioOutExports
             else
             {
                 var audio = HostPlatform.Current.Audio;
-                backend = audio.OpenStereoPcm16Stream(frequency);
+                if (audio is IHostPcmAudioOutput pcmAudio)
+                {
+                    backend = pcmAudio.OpenPcmStream(
+                        frequency,
+                        channels,
+                        isFloat ? HostPcmFormat.Float32 : HostPcmFormat.Signed16);
+                    preservesGuestFormat = true;
+                }
+                else
+                {
+                    backend = audio.OpenStereoPcm16Stream(frequency);
+                }
                 backendName = audio.BackendName;
             }
         }
@@ -173,6 +188,7 @@ public static class AudioOutExports
             channels,
             bytesPerSample,
             isFloat,
+            preservesGuestFormat,
             backend);
         Console.Error.WriteLine(
             $"[LOADER][INFO] AudioOut port {handle}: {frequency} Hz, " +
@@ -321,18 +337,13 @@ public static class AudioOutExports
                 return ctx.SetReturn(0);
             }
 
-            var outputLength = checked((int)port.BufferLength * AudioPcmConversion.OutputFrameSize);
+            var outputLength = port.PreservesGuestFormat
+                ? port.BufferByteLength
+                : checked((int)port.BufferLength * AudioPcmConversion.OutputFrameSize);
             var output = ArrayPool<byte>.Shared.Rent(outputLength);
             try
             {
-                AudioPcmConversion.ConvertToStereoPcm16(
-                    source,
-                    output.AsSpan(0, outputLength),
-                    checked((int)port.BufferLength),
-                    port.Channels,
-                    port.BytesPerSample,
-                    port.IsFloat,
-                    port.Volume);
+                ConvertForHost(port, source, output.AsSpan(0, outputLength));
                 if (!port.Backend.Submit(output.AsSpan(0, outputLength)))
                 {
                     port.PaceSilence();
@@ -449,17 +460,11 @@ public static class AudioOutExports
 
                     TraceOutput(output.Handle, output.Port, source);
 
-                    output.HostBufferLength = checked(
-                        (int)output.Port.BufferLength * AudioPcmConversion.OutputFrameSize);
+                    output.HostBufferLength = output.Port.PreservesGuestFormat
+                        ? output.Port.BufferByteLength
+                        : checked((int)output.Port.BufferLength * AudioPcmConversion.OutputFrameSize);
                     output.HostBuffer = ArrayPool<byte>.Shared.Rent(output.HostBufferLength);
-                    AudioPcmConversion.ConvertToStereoPcm16(
-                        source,
-                        output.HostBuffer.AsSpan(0, output.HostBufferLength),
-                        checked((int)output.Port.BufferLength),
-                        output.Port.Channels,
-                        output.Port.BytesPerSample,
-                        output.Port.IsFloat,
-                        output.Port.Volume);
+                    ConvertForHost(output.Port, source, output.HostBuffer.AsSpan(0, output.HostBufferLength));
                 }
                 finally
                 {
@@ -512,6 +517,24 @@ public static class AudioOutExports
     private static bool HasLongerBufferDuration(PortState candidate, PortState current) =>
         (ulong)candidate.BufferLength * current.Frequency >
         (ulong)current.BufferLength * candidate.Frequency;
+
+    private static void ConvertForHost(PortState port, ReadOnlySpan<byte> source, Span<byte> destination)
+    {
+        if (port.PreservesGuestFormat)
+        {
+            AudioPcmConversion.CopyWithVolume(source, destination, port.IsFloat, port.Volume);
+            return;
+        }
+
+        AudioPcmConversion.ConvertToStereoPcm16(
+            source,
+            destination,
+            checked((int)port.BufferLength),
+            port.Channels,
+            port.BytesPerSample,
+            port.IsFloat,
+            port.Volume);
+    }
 
     private static void TraceOutput(int handle, PortState port, ReadOnlySpan<byte> source)
     {

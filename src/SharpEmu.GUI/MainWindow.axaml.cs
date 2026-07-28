@@ -16,7 +16,7 @@ using Avalonia.VisualTree;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Runtime;
 using SharpEmu.HLE.Host;
-using SharpEmu.HLE.Host.Windows;
+using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
 using System.Collections.Concurrent;
@@ -62,18 +62,17 @@ public partial class MainWindow : Window
     private bool _clearLibraryBlurWhenComplete;
 
     private GuiSettings _settings = new();
+    private IReadOnlyList<HostDisplayOption> _hostDisplays = [];
+    private bool _updatingHostDisplayOptions;
     private EmulatorProcess? _emulator;
-    private GameSurfaceHost? _gameSurfaceHost;
     private ConsoleWindow? _consoleWindow;
     private GuiConsoleMirror? _consoleMirror;
     private StreamWriter? _fileLog;
     private readonly SndPreviewPlayer _sndPreview = new();
     private string? _emulatorExePath;
     private PendingLaunch? _pendingLaunch;
-    private bool _gameFullscreen;
     private bool _isRunning;
     private bool _isStopping;
-    private bool _awaitingFirstFrame;
     private int _autoScrollTicks;
     private int _activePageIndex;
     private Updater.UpdateInfo? _availableUpdate;
@@ -114,7 +113,7 @@ public partial class MainWindow : Window
         string EbootPath,
         string DisplayName,
         string? TitleId,
-        string LogLevel,
+        EffectiveLaunchSettings Settings,
         SharpEmuRuntimeOptions RuntimeOptions);
 
     public MainWindow()
@@ -160,12 +159,10 @@ public partial class MainWindow : Window
         // follow the launcher into the background or a minimized state.
         Activated += (_, _) =>
         {
-            UpdateSessionBarVisibility();
             SessionLoadingPopup.IsOpen = _sessionLoadingActive;
         };
         Deactivated += (_, _) =>
         {
-            SessionBarPopup.IsOpen = false;
             SessionLoadingPopup.IsOpen = false;
         };
 
@@ -181,8 +178,6 @@ public partial class MainWindow : Window
         LaunchButton.Click += (_, _) => LaunchSelected();
         ClearLogButton.Click += (_, _) => { _consoleLines.Clear(); _allConsoleLines.Clear(); };
         StopButton.Click += (_, _) => StopEmulator();
-        SessionStopButton.Click += (_, _) => StopEmulator();
-        SessionConsoleButton.Click += (_, _) => ShowConsoleWindow();
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
@@ -221,6 +216,13 @@ public partial class MainWindow : Window
         };
         AutoUpdateToggle.IsCheckedChanged += (_, _) =>
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
+        WindowModeBox.SelectionChanged += (_, _) => _settings.WindowMode = SelectedComboText(WindowModeBox, "Windowed");
+        DisplayBox.SelectionChanged += (_, _) => OnHostDisplayChanged();
+        ResolutionBox.SelectionChanged += (_, _) => OnHostResolutionChanged();
+        RefreshRateBox.SelectionChanged += (_, _) => OnHostRefreshRateChanged();
+        ScalingModeBox.SelectionChanged += (_, _) => _settings.ScalingMode = SelectedComboText(ScalingModeBox, "Fit");
+        VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
+        HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         EnvBthidToggle.IsCheckedChanged += (_, _) =>
@@ -239,6 +241,8 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("SHARPEMU_LOG_IO", EnvLogIoToggle.IsChecked == true);
         EnvLogNpToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_NP", EnvLogNpToggle.IsChecked == true);
+        EnvGuestImageCpuSyncToggle.IsCheckedChanged += (_, _) =>
+            SetGuestImageCpuSync(EnvGuestImageCpuSyncToggle.IsChecked == true);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
 
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
@@ -255,8 +259,7 @@ public partial class MainWindow : Window
         Opened += async (_, _) => await OnOpenedAsync();
         Closing += (_, _) => OnWindowClosing();
 
-        WindowsDualSenseReader.EnsureStarted();
-        WindowsXInputReader.EnsureStarted();
+        SdlLauncherGamepad.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50),
@@ -427,8 +430,7 @@ public partial class MainWindow : Window
 
     private void PollGamepad()
     {
-        // DualSense wins when both are connected; XInput covers Xbox pads.
-        if (!WindowsDualSenseReader.TryGetState(out var pad) && !WindowsXInputReader.TryGetState(out pad))
+        if (!SdlLauncherGamepad.TryGetState(out var pad))
         {
             _previousPadButtons = HostGamepadButtons.None;
             return;
@@ -444,9 +446,8 @@ public partial class MainWindow : Window
 
         if (_isRunning || _isStopping)
         {
-            // The game renders inside the launcher window, so the launcher
-            // stays active while playing. The controller belongs to the game
-            // then: no navigation, and Circle/B must never stop the session.
+            // The controller belongs to the separate game window while a
+            // session is active; Circle/B must never stop the session.
             _previousPadButtons = pad.Buttons;
             return;
         }
@@ -685,7 +686,25 @@ public partial class MainWindow : Window
         AutoUpdateRow.Label = loc.Get("Updater.Auto.Label");
         AutoUpdateRow.Description = loc.Get("Updater.Auto.Desc");
 
-        foreach (var toggle in new[] { StrictToggle, LogToFileToggle, OverrideLogFileToggle, TitleMusicToggle, DiscordToggle, AutoUpdateToggle })
+        GraphicsTabItem.Header = loc.Get("Options.Graphics");
+        DisplaySectionTitle.Text = loc.Get("Options.Section.Display");
+        WindowModeRow.Label = loc.Get("Options.WindowMode.Label");
+        WindowModeRow.Description = loc.Get("Options.WindowMode.Desc");
+        ResolutionRow.Label = loc.Get("Options.Resolution.Label");
+        ResolutionRow.Description = loc.Get("Options.Resolution.Desc");
+        DisplayRow.Label = loc.Get("Options.Display.Label");
+        DisplayRow.Description = loc.Get("Options.Display.Desc");
+        RefreshRateRow.Label = loc.Get("Options.RefreshRate.Label");
+        RefreshRateRow.Description = loc.Get("Options.RefreshRate.Desc");
+        ScalingRow.Label = loc.Get("Options.Scaling.Label");
+        ScalingRow.Description = loc.Get("Options.Scaling.Desc");
+        VSyncRow.Label = loc.Get("Options.VSync.Label");
+        VSyncRow.Description = loc.Get("Options.VSync.Desc");
+        HdrRow.Label = loc.Get("Options.Hdr.Label");
+        HdrRow.Description = loc.Get("Options.Hdr.Desc");
+        RefreshHostRefreshRates(_settings.RefreshRate);
+
+        foreach (var toggle in new[] { StrictToggle, LogToFileToggle, OverrideLogFileToggle, TitleMusicToggle, DiscordToggle, AutoUpdateToggle, VSyncToggle })
         {
             toggle.OnContent = loc.Get("Common.On");
             toggle.OffContent = loc.Get("Common.Off");
@@ -758,91 +777,21 @@ public partial class MainWindow : Window
 
     private void OnKeyDown(object sender, KeyEventArgs args)
     {
-        args.Handled = true;
-        switch (args.Key)
+        if (args.Key == Key.F11 && !_isRunning)
         {
-            case Key.F11:
-                OnWindowFullScreen(this, new RoutedEventArgs());
-                break;
-            default:
-                args.Handled = false;
-                break;
+            WindowState = WindowState == WindowState.FullScreen
+                ? WindowState.Maximized
+                : WindowState.FullScreen;
+            args.Handled = true;
         }
     }
 
     private void OnPreviewKeyDown(object? sender, KeyEventArgs args)
     {
-        // While a session is on screen, Enter and Space are game input
-        // (Cross button). Keyboard focus stays on the launcher window, so a
-        // previously clicked, still-focused button (console toggle, session
-        // bar) would also activate and reshape the game view. Swallow the
-        // keys before button activation; the emulator process reads raw key
-        // state and is unaffected. Fullscreen hides those buttons, which is
-        // why this only manifested in windowed sessions.
-        if (_isRunning && GameView.IsVisible &&
-            args.Key is Key.Enter or Key.Space)
-        {
-            args.Handled = true;
-        }
-    }
-
-    private void OnWindowFullScreen(object sender, RoutedEventArgs args)
-    {
-        if (WindowState == WindowState.FullScreen)
-        {
-            // Leaving F11 should restore a monitor-sized window with the
-            // launcher chrome, not fall back to the design-time window size.
-            WindowState = WindowState.Maximized;
-            WindowDecorations = WindowDecorations.Full;
-            TitleBar.IsVisible = true;
-            StatusBar.IsVisible = true;
-            if (_gameFullscreen)
-            {
-                _gameFullscreen = false;
-                Grid.SetRow(MainContent, 1);
-                Grid.SetRowSpan(MainContent, 1);
-                MainContent.Margin = _isRunning
-                    ? new Thickness(0)
-                    : new Thickness(32, 24, 32, 20);
-                ContentToolbar.IsVisible = !_isRunning;
-                ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
-                LaunchBar.IsVisible = true;
-                QueueGameSurfaceResize();
-                UpdateSessionBarVisibility();
-            }
-        }
-        else
-        {
-            WindowState = WindowState.FullScreen;
-            WindowDecorations = WindowDecorations.None;
-            TitleBar.IsVisible = false;
-            StatusBar.IsVisible = false;
-            if (_isRunning && !_isStopping && !_awaitingFirstFrame && GameView.IsVisible)
-            {
-                // The native child receives its new physical Bounds as soon
-                // as this grid spans the monitor. The presenter recreates its
-                // swapchain from that size, rather than stretching 720p.
-                _gameFullscreen = true;
-                // Re-arming restarts the idle countdown, so the cursor also
-                // hides a moment after F11 even without further mouse motion.
-                _gameSurfaceHost?.SetCursorAutoHide(true);
-                Grid.SetRow(MainContent, 0);
-                Grid.SetRowSpan(MainContent, 3);
-                MainContent.Margin = new Thickness(0);
-                ContentToolbar.IsVisible = false;
-                ConsolePanel.IsVisible = false;
-                LaunchBar.IsVisible = false;
-                QueueGameSurfaceResize();
-                UpdateSessionBarVisibility();
-            }
-        }
-    }
-
-    private void QueueGameSurfaceResize()
-    {
-        Dispatcher.UIThread.Post(
-            () => _gameSurfaceHost?.RefreshSurfaceSize(),
-            DispatcherPriority.Render);
+        // The session runs in its own SDL window and takes keyboard focus with
+        // it, so launcher buttons no longer see game input and nothing has to
+        // be swallowed here. Kept as the wired handler because the launcher
+        // still needs a preview hook for its own shortcuts.
     }
 
     private void OnWindowClosing()
@@ -851,6 +800,7 @@ public partial class MainWindow : Window
         _consoleFlushTimer.Stop();
         _libraryBlurTimer.Stop();
         _gamepadTimer.Stop();
+        SdlLauncherGamepad.Shutdown();
         _sndPreview.Stop();
         _discord?.Dispose();
         _consoleWindow?.Close();
@@ -903,7 +853,141 @@ public partial class MainWindow : Window
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
+        EnvGuestImageCpuSyncToggle.IsChecked = IsEnvironmentEnabled(
+            _settings.EnvironmentToggles,
+            "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
+            defaultValue: true);
+        WindowModeBox.SelectedIndex = ChoiceIndex(_settings.WindowMode, "Windowed", "Borderless", "Exclusive");
+        LoadHostDisplayOptions();
+        ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
+        VSyncToggle.IsChecked = _settings.VSync;
+        HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
         UpdateLogFilePathText();
+    }
+
+    private static string SelectedComboText(ComboBox comboBox, string fallback) =>
+        comboBox.SelectedItem switch
+        {
+            ComboBoxItem item => item.Content?.ToString() ?? fallback,
+            string value => value,
+            _ => fallback,
+        };
+
+    private void LoadHostDisplayOptions()
+    {
+        _updatingHostDisplayOptions = true;
+        try
+        {
+            _hostDisplays = HostDisplayOptions.BuildDisplays(
+                HostDisplayCatalog.Query(),
+                _settings.DisplayIndex);
+            DisplayBox.ItemsSource = _hostDisplays;
+            var display = HostDisplayOptions.SelectDisplay(_hostDisplays, _settings.DisplayIndex);
+            DisplayBox.SelectedItem = display;
+            PopulateHostModes(display, _settings.Resolution, _settings.RefreshRate);
+        }
+        finally
+        {
+            _updatingHostDisplayOptions = false;
+        }
+
+        SyncHostVideoSettings();
+    }
+
+    private void OnHostDisplayChanged()
+    {
+        if (_updatingHostDisplayOptions || DisplayBox.SelectedItem is not HostDisplayOption display)
+        {
+            return;
+        }
+
+        _updatingHostDisplayOptions = true;
+        try
+        {
+            PopulateHostModes(display, _settings.Resolution, _settings.RefreshRate);
+        }
+        finally
+        {
+            _updatingHostDisplayOptions = false;
+        }
+
+        SyncHostVideoSettings();
+    }
+
+    private void OnHostResolutionChanged()
+    {
+        if (_updatingHostDisplayOptions || DisplayBox.SelectedItem is not HostDisplayOption)
+        {
+            return;
+        }
+
+        _settings.Resolution = SelectedComboText(ResolutionBox, "1920x1080");
+        RefreshHostRefreshRates(_settings.RefreshRate);
+        OnHostRefreshRateChanged();
+    }
+
+    private void OnHostRefreshRateChanged()
+    {
+        if (!_updatingHostDisplayOptions && RefreshRateBox.SelectedItem is HostRefreshRateOption refreshRate)
+        {
+            _settings.RefreshRate = refreshRate.Value;
+        }
+    }
+
+    private void PopulateHostModes(
+        HostDisplayOption display,
+        string selectedResolution,
+        int selectedRefreshRate)
+    {
+        var resolutions = HostDisplayOptions.BuildResolutions(display, selectedResolution);
+        ResolutionBox.ItemsSource = resolutions;
+        ResolutionBox.SelectedItem = resolutions.FirstOrDefault(resolution =>
+            string.Equals(resolution, selectedResolution, StringComparison.OrdinalIgnoreCase)) ?? resolutions[0];
+        RefreshHostRefreshRates(selectedRefreshRate);
+    }
+
+    private void RefreshHostRefreshRates(int selectedRefreshRate)
+    {
+        if (DisplayBox.SelectedItem is not HostDisplayOption display)
+        {
+            return;
+        }
+
+        var wasUpdating = _updatingHostDisplayOptions;
+        _updatingHostDisplayOptions = true;
+        try
+        {
+            var rates = HostDisplayOptions.BuildRefreshRates(
+                display,
+                SelectedComboText(ResolutionBox, _settings.Resolution),
+                selectedRefreshRate,
+                Localization.Instance.Get("Options.RefreshRate.Automatic"));
+            RefreshRateBox.ItemsSource = rates;
+            RefreshRateBox.SelectedItem = rates.FirstOrDefault(rate => rate.Value == selectedRefreshRate) ?? rates[0];
+        }
+        finally
+        {
+            _updatingHostDisplayOptions = wasUpdating;
+        }
+    }
+
+    private void SyncHostVideoSettings()
+    {
+        if (DisplayBox.SelectedItem is HostDisplayOption display)
+        {
+            _settings.DisplayIndex = display.Index;
+        }
+
+        _settings.Resolution = SelectedComboText(ResolutionBox, "1920x1080");
+        _settings.RefreshRate = RefreshRateBox.SelectedItem is HostRefreshRateOption refreshRate
+            ? refreshRate.Value
+            : 0;
+    }
+
+    private static int ChoiceIndex(string value, params string[] choices)
+    {
+        var index = Array.FindIndex(choices, choice => string.Equals(choice, value, StringComparison.OrdinalIgnoreCase));
+        return index < 0 ? 0 : index;
     }
 
     private async Task OnUpdateButtonAsync()
@@ -997,6 +1081,40 @@ public partial class MainWindow : Window
         {
             _settings.EnvironmentToggles.Remove(name);
         }
+    }
+
+    private void SetGuestImageCpuSync(bool enabled)
+    {
+        const string name = "SHARPEMU_GUEST_IMAGE_CPU_SYNC";
+        _settings.EnvironmentToggles.RemoveAll(entry =>
+            string.Equals(entry, name, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(entry, name + "=0", StringComparison.OrdinalIgnoreCase));
+        if (!enabled)
+        {
+            _settings.EnvironmentToggles.Add(name + "=0");
+        }
+    }
+
+    private static bool IsEnvironmentEnabled(
+        IEnumerable<string> entries,
+        string name,
+        bool defaultValue)
+    {
+        foreach (var entry in entries)
+        {
+            if (string.Equals(entry, name + "=0", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (string.Equals(entry, name, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(entry, name + "=1", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return defaultValue;
     }
 
     private string SelectedLogLevel()
@@ -1795,16 +1913,23 @@ public partial class MainWindow : Window
         // launcher process so every platform receives the same launch options.
         foreach (var staleName in _appliedEnvironmentVariables)
         {
-            if (!effective.EnvironmentToggles.Contains(staleName))
+            if (!effective.EnvironmentToggles.Any(entry =>
+                    TryParseEnvironmentEntry(entry, out var name, out _) &&
+                    string.Equals(name, staleName, StringComparison.OrdinalIgnoreCase)))
             {
                 Environment.SetEnvironmentVariable(staleName, null);
             }
         }
 
         _appliedEnvironmentVariables.Clear();
-        foreach (var name in effective.EnvironmentToggles)
+        foreach (var entry in effective.EnvironmentToggles)
         {
-            Environment.SetEnvironmentVariable(name, "1");
+            if (!TryParseEnvironmentEntry(entry, out var name, out var value))
+            {
+                continue;
+            }
+
+            Environment.SetEnvironmentVariable(name, value);
             _appliedEnvironmentVariables.Add(name);
         }
 
@@ -1828,7 +1953,6 @@ public partial class MainWindow : Window
 
         _isRunning = true;
         _runningGameName = displayName;
-        SessionGameTitle.Text = displayName;
         _runningGameTitleId = resolvedTitleId;
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         StatusDot.Fill = SuccessLineBrush;
@@ -1837,18 +1961,25 @@ public partial class MainWindow : Window
         UpdateRunButtons();
         UpdateDiscordPresence();
 
-        ShowGameView();
+        BeginSessionUi();
         _pendingLaunch = new PendingLaunch(
             Path.GetFullPath(ebootPath),
             displayName,
             _runningGameTitleId,
-            effective.LogLevel,
+            effective,
             runtimeOptions);
 
-        if (_gameSurfaceHost?.Surface is { } surface)
-        {
-            StartPendingSession(surface);
-        }
+        StartPendingSession();
+    }
+
+    private static bool TryParseEnvironmentEntry(string entry, out string name, out string value)
+    {
+        var separator = entry.IndexOf('=');
+        name = separator >= 0 ? entry[..separator] : entry;
+        value = separator >= 0 ? entry[(separator + 1)..] : "1";
+        return name.StartsWith("SHARPEMU_", StringComparison.OrdinalIgnoreCase) &&
+               name.Length > "SHARPEMU_".Length &&
+               value.Length != 0;
     }
 
     /// <summary>
@@ -1877,9 +2008,6 @@ public partial class MainWindow : Window
 
         _isStopping = true;
         StopButton.IsEnabled = false;
-        SessionStopButton.IsEnabled = false;
-        SessionHintText.Text = Localization.Instance.Get("Launch.Stopping");
-        SessionF11Badge.IsVisible = false;
         ShowSessionLoading("Closing game", "Waiting for the emulation session to exit...");
         _emulator.Stop();
         _runningGameName = null;
@@ -1887,7 +2015,6 @@ public partial class MainWindow : Window
         StatusText.Text = Localization.Instance.Get("Launch.Stopping");
         StatusBarRight.Text = Localization.Instance.Get("Status.Stopping");
         UpdateDiscordPresence();
-        UpdateSessionBarVisibility();
         ReturnToLibraryWhileStopping();
     }
 
@@ -1930,8 +2057,7 @@ public partial class MainWindow : Window
         _emulator?.Dispose();
         _emulator = null;
         _pendingLaunch = null;
-        DisposeGameSurfaceHost();
-        HideGameView();
+        EndSessionUi();
 
         var meaningKey = exitCode switch
         {
@@ -1964,7 +2090,7 @@ public partial class MainWindow : Window
         UpdateDiscordPresence();
     }
 
-    private void StartPendingSession(VulkanHostSurface surface)
+    private void StartPendingSession()
     {
         if (_pendingLaunch is not { } launch || _emulator is not null)
         {
@@ -1984,7 +2110,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var arguments = BuildEmulatorArguments(launch, surface);
+            var arguments = BuildEmulatorArguments(launch);
             _emulator = process;
             _pendingLaunch = null;
             process.Start(
@@ -2006,12 +2132,12 @@ public partial class MainWindow : Window
         }
     }
 
-    private List<string> BuildEmulatorArguments(PendingLaunch launch, VulkanHostSurface surface)
+    private List<string> BuildEmulatorArguments(PendingLaunch launch)
     {
         var arguments = new List<string>
         {
             "--cpu-engine=native",
-            $"--log-level={launch.LogLevel}",
+            $"--log-level={launch.Settings.LogLevel}",
         };
         if (launch.RuntimeOptions.StrictDynlibResolution)
         {
@@ -2022,16 +2148,13 @@ public partial class MainWindow : Window
             arguments.Add($"--trace-imports={launch.RuntimeOptions.ImportTraceLimit}");
         }
 
-        if (surface.TryGetChildProcessDescriptor(out var descriptor))
-        {
-            arguments.Add($"--host-surface={descriptor}");
-        }
-        else
-        {
-            AppendConsoleLine(
-                "[GUI][WARN] Embedded child surfaces are unavailable on this platform; opening a game window instead.",
-                WarningLineBrush);
-        }
+        arguments.Add($"--window-mode={launch.Settings.WindowMode.ToLowerInvariant()}");
+        arguments.Add($"--resolution={launch.Settings.Resolution}");
+        arguments.Add($"--display={launch.Settings.DisplayIndex}");
+        arguments.Add($"--refresh-rate={launch.Settings.RefreshRate}");
+        arguments.Add($"--scaling={launch.Settings.ScalingMode.ToLowerInvariant()}");
+        arguments.Add($"--vsync={(launch.Settings.VSync ? "on" : "off")}");
+        arguments.Add($"--hdr={launch.Settings.HdrMode.ToLowerInvariant()}");
 
         arguments.Add(launch.EbootPath);
         return arguments;
@@ -2040,8 +2163,8 @@ public partial class MainWindow : Window
     private void OnEmulatorOutput(string line, bool isError)
     {
         _pendingLines.Enqueue((line, isError));
-        if (!line.Contains("[VIDEOOUT][INFO] Hosted splash ready.", StringComparison.Ordinal) &&
-            !line.Contains("[VIDEOOUT][INFO] Hosted first frame presented.", StringComparison.Ordinal))
+        if (!line.Contains("Vulkan VideoOut presented first frame:", StringComparison.Ordinal) &&
+            !line.Contains("Vulkan VideoOut ready:", StringComparison.Ordinal))
         {
             return;
         }
@@ -2050,143 +2173,25 @@ public partial class MainWindow : Window
         {
             if (_isRunning && !_isStopping)
             {
-                _awaitingFirstFrame = false;
-                ClearLibraryBlur();
-                MainContent.Margin = new Thickness(0);
-                RestoreGameViewToFull();
-                GameView.Background = Brushes.Black;
-                GameView.IsHitTestVisible = true;
-                LibraryPage.IsVisible = false;
-                OptionsPage.IsVisible = false;
-                LibraryToolbar.IsVisible = false;
-                ContentToolbar.IsVisible = false;
-                ConsolePanel.IsVisible = false;
-                LaunchBar.IsVisible = false;
-                HideSessionLoading();
-                UpdateSessionBarVisibility();
-
-                // Defer so the layout pass from the margin change above settles first.
-                Dispatcher.UIThread.Post(() =>
-                {
-                    if (!_isRunning || _isStopping)
-                    {
-                        return;
-                    }
-
-                    _gameSurfaceHost?.RefreshSurfaceSize();
-                    _gameSurfaceHost?.SetPresentationVisible(true);
-                    _gameSurfaceHost?.SetCursorAutoHide(true);
-                });
+                ShowSessionStatus("Game is running");
             }
         });
     }
 
-    private GameSurfaceHost EnsureGameSurfaceHost()
-    {
-        if (_gameSurfaceHost is not null)
-        {
-            return _gameSurfaceHost;
-        }
-
-        var host = new GameSurfaceHost();
-        // Configure this before attaching it to Avalonia so its first native
-        // HWND is hidden while the child process starts.
-        host.SetPresentationVisible(false);
-        host.SurfaceAvailable += (_, surface) =>
-        {
-            if (ReferenceEquals(_gameSurfaceHost, host))
-            {
-                StartPendingSession(surface);
-            }
-        };
-        host.SurfaceDestroyed += (_, surface) => OnGameSurfaceDestroyed(host, surface);
-        _gameSurfaceHost = host;
-        GameSurfaceContainer.Children.Add(host);
-        return host;
-    }
-
-    private void DisposeGameSurfaceHost()
-    {
-        var host = _gameSurfaceHost;
-        if (host is null)
-        {
-            return;
-        }
-
-        _gameSurfaceHost = null;
-        host.SetPresentationVisible(false);
-        GameSurfaceContainer.Children.Remove(host);
-    }
-
-    private void OnGameSurfaceDestroyed(GameSurfaceHost host, VulkanHostSurface surface)
-    {
-        if (ReferenceEquals(_gameSurfaceHost, host) && _isRunning)
-        {
-            StopEmulator();
-        }
-    }
-
-    /// <summary>
-    /// The native host attachment is a real child window: it sits above every
-    /// Avalonia control it covers and swallows their mouse input regardless of
-    /// hit-test settings. While the library must stay interactive (loading,
-    /// closing), the surface is parked offscreen AT FULL SIZE via a negative
-    /// margin. It must not be shrunk instead: the emulator child polls the
-    /// HWND client size and its presenter defers swapchain creation while the
-    /// surface is 1px, which would deadlock the loading handshake.
-    /// </summary>
-    private void ParkGameViewOffscreen()
-    {
-        GameView.Margin = new Thickness(-20000, 0, 20000, 0);
-    }
-
-    private void RestoreGameViewToFull()
-    {
-        GameView.Margin = new Thickness(0);
-    }
-
-    private void ShowGameView()
+    private void BeginSessionUi()
     {
         _isStopping = false;
-        _awaitingFirstFrame = true;
-        var host = EnsureGameSurfaceHost();
-        ParkGameViewOffscreen();
-        GameView.IsVisible = true;
-        GameView.Background = Brushes.Transparent;
-        GameView.IsHitTestVisible = false;
-        host.SetPresentationVisible(false);
         AnimateLibraryBlur(LaunchBlurRadius);
-        SessionHintText.Text = "Fullscreen";
-        SessionF11Badge.IsVisible = true;
-        UpdateSessionBarVisibility();
         ShowSessionLoading("Loading game", "Preparing the emulation session...");
+        LaunchBar.IsVisible = true;
     }
 
-    private void HideGameView()
+    private void EndSessionUi()
     {
-        if (_gameFullscreen && WindowState == WindowState.FullScreen)
-        {
-            OnWindowFullScreen(this, new RoutedEventArgs());
-        }
-
-        _gameSurfaceHost?.SetCursorAutoHide(false);
-        _gameSurfaceHost?.SetPresentationVisible(false);
-        _awaitingFirstFrame = false;
-        GameView.IsVisible = false;
-        GameView.IsHitTestVisible = true;
-        SessionBarPopup.IsOpen = false;
         HideSessionLoading();
         AnimateLibraryBlur(0, clearWhenComplete: true);
-        MainContent.Margin = new Thickness(32, 24, 32, 20);
-        ContentToolbar.IsVisible = true;
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
         LaunchBar.IsVisible = true;
-        LibraryPage.IsVisible = _activePageIndex == 0;
-        LibraryToolbar.IsVisible = _activePageIndex == 0;
-        OptionsPage.IsVisible = _activePageIndex == 1;
-        // Game art when the source still holds it, otherwise the bundled
-        // default; a bare color only when neither is available.
-        BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
+        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
     }
 
     private void AnimateLibraryBlur(double targetRadius, bool clearWhenComplete = false)
@@ -2258,7 +2263,20 @@ public partial class MainWindow : Window
     private void ShowSessionLoading(string title, string detail)
     {
         SessionLoadingTitle.Text = title;
+        SessionLoadingTitle.IsVisible = true;
         SessionLoadingDetail.Text = detail;
+        SessionLoadingDetail.IsVisible = true;
+        SessionLoadingProgress.IsVisible = true;
+        _sessionLoadingActive = true;
+        SessionLoadingPopup.IsOpen = IsActive && WindowState != WindowState.Minimized;
+    }
+
+    private void ShowSessionStatus(string message)
+    {
+        SessionLoadingTitle.Text = message;
+        SessionLoadingTitle.IsVisible = true;
+        SessionLoadingDetail.IsVisible = false;
+        SessionLoadingProgress.IsVisible = false;
         _sessionLoadingActive = true;
         SessionLoadingPopup.IsOpen = IsActive && WindowState != WindowState.Minimized;
     }
@@ -2271,33 +2289,11 @@ public partial class MainWindow : Window
 
     private void ReturnToLibraryWhileStopping()
     {
-        if (_gameFullscreen && WindowState == WindowState.FullScreen)
-        {
-            OnWindowFullScreen(this, new RoutedEventArgs());
-        }
-
-        // Keep the native child alive until the session exits, but hide it
-        // immediately. Destroying it while Vulkan still owns the surface can
-        // crash the GUI; parking it in the 1x1 corner lets the library
-        // recover — and stay clickable — while the native closing popup
-        // reports teardown progress.
-        _gameSurfaceHost?.SetPresentationVisible(false);
-        _awaitingFirstFrame = false;
-        ParkGameViewOffscreen();
-        GameView.Background = Brushes.Transparent;
-        GameView.IsHitTestVisible = false;
-        SessionBarPopup.IsOpen = false;
         AnimateLibraryBlur(LaunchBlurRadius);
-        MainContent.Margin = new Thickness(32, 24, 32, 20);
-        ContentToolbar.IsVisible = true;
         ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
         LaunchBar.IsVisible = true;
-        LibraryPage.IsVisible = _activePageIndex == 0;
-        LibraryToolbar.IsVisible = _activePageIndex == 0;
-        OptionsPage.IsVisible = _activePageIndex == 1;
-        BackdropImage.Opacity = BackdropImage.Source is not null ? 1 : 0;
         UpdateRunButtons();
-        Console.Error.WriteLine("[GUI][INFO] Library restored while embedded session is closing.");
+        Console.Error.WriteLine("[GUI][INFO] Waiting for the SDL game process to exit.");
     }
 
     private void OpenFileLog(string? titleId)
@@ -2356,14 +2352,7 @@ public partial class MainWindow : Window
     {
         LaunchButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
         StopButton.IsEnabled = _isRunning && !_isStopping;
-        SessionStopButton.IsEnabled = _isRunning && !_isStopping;
         OpenFileButton.IsEnabled = !_isRunning;
-    }
-
-    private void UpdateSessionBarVisibility()
-    {
-        SessionBarPopup.IsOpen = _isRunning && !_isStopping && !_awaitingFirstFrame && GameView.IsVisible &&
-            !_gameFullscreen && WindowState != WindowState.FullScreen;
     }
 
     // ---- Console ----

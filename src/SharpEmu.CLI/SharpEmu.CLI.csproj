@@ -77,34 +77,46 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <TargetPath>Languages\%(Filename)%(Extension)</TargetPath>
       <Visible>False</Visible>
     </Content>
+    <Content Include="..\SharpEmu.LibAtrac9\LICENSE.txt">
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <TargetPath>licenses\LibAtrac9.txt</TargetPath>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      <Visible>False</Visible>
+    </Content>
   </ItemGroup>
 
-  <!-- Native libraries (glfw, FFmpeg) publish into a subfolder next to the
+  <Target Name="KeepLibAtrac9External" BeforeTargets="_ComputeFilesToBundle">
+    <ItemGroup>
+      <ResolvedFileToPublish Update="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'SharpEmu.LibAtrac9.dll'">
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+        <RelativePath>plugins\SharpEmu.LibAtrac9.dll</RelativePath>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
+  <!-- These are native debug symbols emitted by Skia/HarfBuzz, not managed
+       symbols that single-file publish can bundle. They are not needed at
+       runtime and would otherwise add more than 100 MB to every release. -->
+  <Target Name="RemoveNativeDebugSymbols" AfterTargets="Publish">
+    <ItemGroup>
+      <_NativeDebugSymbols Include="$(PublishDir)**\*.pdb" />
+    </ItemGroup>
+    <Delete Files="@(_NativeDebugSymbols)" />
+  </Target>
+
+  <!-- Native FFmpeg libraries publish into a subfolder next to the
        executable instead of sitting loose beside it, so the publish
        directory stays uncluttered as more native deps get added. The folder
        name is a fixed constant, not derived from the RID/architecture: each
        publish output only ever holds one architecture's binaries anyway, so
        varying the name added a class of bugs (RID resolution timing, host-OS
        vs. target-RID mixups) for no benefit. Runtime code (Program.cs's
-       PreloadGlfw, FfmpegNativeBinkFrameSource's RootPath) uses the same
-       literal "plugins" folder name. -->
+       FfmpegNativeBinkFrameSource uses the same literal "plugins" folder
+       name. -->
   <PropertyGroup>
     <NativeLibraryFolderName>plugins</NativeLibraryFolderName>
   </PropertyGroup>
-
-  <!-- Keep glfw as a loose file in the native subfolder; every other native
-       library is embedded into the single-file bundle. -->
-  <Target Name="KeepGlfwOutsideSingleFile" AfterTargets="ComputeResolvedFilesToPublishList">
-    <ItemGroup>
-      <_GlfwPublishFiles Include="@(ResolvedFileToPublish)"
-        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('glfw')) Or $([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('libglfw'))" />
-      <ResolvedFileToPublish Remove="@(_GlfwPublishFiles)" />
-      <ResolvedFileToPublish Include="@(_GlfwPublishFiles)">
-        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
-        <RelativePath>$(NativeLibraryFolderName)/%(Filename)%(Extension)</RelativePath>
-      </ResolvedFileToPublish>
-    </ItemGroup>
-  </Target>
 
   <PropertyGroup>
     <FfmpegRuntimeTag>2c92585</FfmpegRuntimeTag>

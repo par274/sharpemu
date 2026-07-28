@@ -40,6 +40,15 @@ public sealed partial class DirectExecutionBackend
 			}
 			_rawExceptionHandler = (nint)AddVectoredExceptionHandler(1u, _rawExceptionHandlerStub);
 			Console.Error.WriteLine($"[LOADER][INFO] Raw exception handler installed: 0x{_rawExceptionHandler:X16}");
+
+			// The raw handler carries the guest-image write-fault bridge, so the
+			// path must be compiled before the first protected-page store can
+			// reach it. Guest code has not started yet, so warming here cannot
+			// race a real fault.
+			SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
+			Console.Error.WriteLine(
+				"[LOADER][INFO] Guest image CPU write tracking: " +
+				$"{(SharpEmu.HLE.GuestImageWriteTracker.Enabled ? "enabled" : "disabled")}");
 		}
 		else
 		{

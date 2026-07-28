@@ -37,6 +37,7 @@ public static class PadExports
     private static PadState _cachedInputState;
 
     private static bool _initialized;
+    private static int _motionSensorEnabled;
     private static int _controlsAnnouncementLogged;
 
     [SysAbiExport(
@@ -151,9 +152,13 @@ public static class PadExports
     public static int PadSetMotionSensorState(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return IsPrimaryPadHandle(handle)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        if (!IsPrimaryPadHandle(handle))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        Volatile.Write(ref _motionSensorEnabled, ctx[CpuRegister.Rsi] != 0 ? 1 : 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -362,23 +367,169 @@ public static class PadExports
         }
 
         var triggerMask = parameter[0];
-        HostPlatform.Current.Input.SetTriggerRumble(
-            (triggerMask & 0x01) != 0 ? DecodeTriggerVibration(parameter[8..64]) : null,
-            (triggerMask & 0x02) != 0 ? DecodeTriggerVibration(parameter[64..120]) : null);
+        HostPlatform.Current.Input.SetAdaptiveTriggerEffect(
+            (triggerMask & 0x01) != 0 ? DecodeTriggerEffect(parameter[8..64]) : null,
+            (triggerMask & 0x02) != 0 ? DecodeTriggerEffect(parameter[64..120]) : null);
         return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
-    private static byte DecodeTriggerVibration(ReadOnlySpan<byte> command)
+    private static HostAdaptiveTriggerEffect DecodeTriggerEffect(ReadOnlySpan<byte> command)
     {
         var mode = BinaryPrimitives.ReadUInt32LittleEndian(command);
-        var amplitude = mode switch
+        var parameters = command[8..];
+        Span<byte> native = stackalloc byte[11];
+        native.Clear();
+        byte fallbackStrength = 0;
+        switch (mode)
         {
-            3 when command[10] != 0 => command[9],
-            6 when command[8] != 0 => command[9..19].ToArray().Max(),
-            _ => (byte)0,
-        };
-        return (byte)(Math.Min(amplitude, (byte)8) * 255 / 8);
+            case 1:
+                EncodeFeedback(native, parameters[0], parameters[1]);
+                fallbackStrength = ScaleTriggerStrength(parameters[1]);
+                break;
+            case 2:
+                EncodeWeapon(native, parameters[0], parameters[1], parameters[2]);
+                fallbackStrength = ScaleTriggerStrength(parameters[2]);
+                break;
+            case 3:
+                EncodeZonedEffect(native, 0x26, parameters[0], parameters[1], parameters[2]);
+                fallbackStrength = ScaleTriggerStrength(parameters[1]);
+                break;
+            case 4:
+                EncodeZonedStrengths(native, 0x21, parameters[..10], 0);
+                fallbackStrength = ScaleTriggerStrength(Max(parameters[..10]));
+                break;
+            case 5:
+                EncodeSlope(native, parameters[0], parameters[1], parameters[2], parameters[3]);
+                fallbackStrength = ScaleTriggerStrength(Math.Max(parameters[2], parameters[3]));
+                break;
+            case 6:
+                EncodeZonedStrengths(native, 0x26, parameters[1..11], parameters[0]);
+                fallbackStrength = parameters[0] == 0 ? (byte)0 : ScaleTriggerStrength(Max(parameters[1..11]));
+                break;
+            default:
+                native[0] = 0x05;
+                break;
+        }
+
+        return HostAdaptiveTriggerEffect.FromBytes(native, fallbackStrength);
     }
+
+    private static void EncodeFeedback(Span<byte> destination, byte position, byte strength)
+    {
+        if (position > 9 || strength is 0 or > 8)
+        {
+            destination[0] = 0x05;
+            return;
+        }
+
+        Span<byte> strengths = stackalloc byte[10];
+        strengths[position..].Fill(strength);
+        EncodeZonedStrengths(destination, 0x21, strengths, 0);
+    }
+
+    private static void EncodeWeapon(Span<byte> destination, byte start, byte end, byte strength)
+    {
+        if (start is < 2 or > 7 || end <= start || end > 8 || strength is 0 or > 8)
+        {
+            destination[0] = 0x05;
+            return;
+        }
+
+        var zones = (ushort)((1 << start) | (1 << end));
+        destination[0] = 0x25;
+        BinaryPrimitives.WriteUInt16LittleEndian(destination[1..], zones);
+        destination[3] = (byte)(strength - 1);
+    }
+
+    private static void EncodeZonedEffect(
+        Span<byte> destination,
+        byte nativeMode,
+        byte position,
+        byte strength,
+        byte frequency)
+    {
+        if (position > 9 || strength is 0 or > 8 || frequency == 0)
+        {
+            destination[0] = 0x05;
+            return;
+        }
+
+        Span<byte> strengths = stackalloc byte[10];
+        strengths[position..].Fill(strength);
+        EncodeZonedStrengths(destination, nativeMode, strengths, frequency);
+    }
+
+    private static void EncodeSlope(
+        Span<byte> destination,
+        byte startPosition,
+        byte endPosition,
+        byte startStrength,
+        byte endStrength)
+    {
+        if (startPosition > 8 || endPosition <= startPosition || endPosition > 9 ||
+            startStrength is 0 or > 8 || endStrength is 0 or > 8)
+        {
+            destination[0] = 0x05;
+            return;
+        }
+
+        Span<byte> strengths = stackalloc byte[10];
+        var distance = endPosition - startPosition;
+        for (var index = startPosition; index < strengths.Length; index++)
+        {
+            strengths[index] = index <= endPosition
+                ? (byte)Math.Round(startStrength + ((endStrength - startStrength) * (index - startPosition) / (double)distance))
+                : endStrength;
+        }
+
+        EncodeZonedStrengths(destination, 0x21, strengths, 0);
+    }
+
+    private static void EncodeZonedStrengths(
+        Span<byte> destination,
+        byte nativeMode,
+        ReadOnlySpan<byte> strengths,
+        byte frequency)
+    {
+        ushort activeZones = 0;
+        uint packedStrengths = 0;
+        for (var index = 0; index < Math.Min(strengths.Length, 10); index++)
+        {
+            var strength = strengths[index];
+            if (strength is 0 or > 8)
+            {
+                continue;
+            }
+
+            activeZones |= (ushort)(1 << index);
+            packedStrengths |= (uint)(strength - 1) << (index * 3);
+        }
+
+        if (activeZones == 0 || (nativeMode == 0x26 && frequency == 0))
+        {
+            destination[0] = 0x05;
+            return;
+        }
+
+        destination[0] = nativeMode;
+        BinaryPrimitives.WriteUInt16LittleEndian(destination[1..], activeZones);
+        BinaryPrimitives.WriteUInt32LittleEndian(destination[3..], packedStrengths);
+        destination[9] = frequency;
+    }
+
+    private static byte Max(ReadOnlySpan<byte> values)
+    {
+        byte result = 0;
+        foreach (var value in values)
+        {
+            result = Math.Max(result, value);
+        }
+
+        return result;
+    }
+
+    private static byte ScaleTriggerStrength(byte strength) =>
+        (byte)(Math.Min(strength, (byte)8) * 255 / 8);
 
     [SysAbiExport(
         Nid = "yFVnOdGxvZY",
@@ -478,6 +629,17 @@ public static class PadExports
         data[0x08] = l2;
         data[0x09] = r2;
         BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
+        if (Volatile.Read(ref _motionSensorEnabled) != 0 && input.Motion.Available)
+        {
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x1C..], input.Motion.AccelerationX);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x20..], input.Motion.AccelerationY);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x24..], input.Motion.AccelerationZ);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x28..], input.Motion.AngularVelocityX);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x2C..], input.Motion.AngularVelocityY);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x30..], input.Motion.AngularVelocityZ);
+        }
+
+        WriteTouchData(data, input.Touch);
         data[0x4C] = 1;
         var timestampTicks = Stopwatch.GetTimestamp();
         var timestampMicroseconds =
@@ -508,6 +670,10 @@ public static class PadExports
         var rightY = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x49), input.IsKeyDown(0x4B)) : (byte)128;
         var l2 = acceptsKeyboardInput && input.IsKeyDown(0x52) ? (byte)255 : (byte)0;
         var r2 = acceptsKeyboardInput && input.IsKeyDown(0x46) ? (byte)255 : (byte)0;
+        var gamepadType = HostGamepadType.Generic;
+        var connection = HostGamepadConnection.Unknown;
+        var motion = default(HostMotionState);
+        var touch = default(HostTouchState);
 
         Span<HostGamepadState> gamepads = stackalloc HostGamepadState[2];
         var gamepadCount = input.GetGamepadStates(gamepads);
@@ -523,6 +689,13 @@ public static class PadExports
             rightY = MergeAxis(pad.RightY, rightY);
             l2 = Math.Max(l2, pad.LeftTrigger);
             r2 = Math.Max(r2, pad.RightTrigger);
+            if (index == 0)
+            {
+                gamepadType = pad.Type;
+                connection = pad.Connection;
+                motion = pad.Motion;
+                touch = pad.Touch;
+            }
         }
 
         if (IsAutoCrossActive())
@@ -538,7 +711,11 @@ public static class PadExports
             RightX: rightX,
             RightY: rightY,
             L2: l2,
-            R2: r2);
+            R2: r2,
+            Type: gamepadType,
+            Connection: connection,
+            Motion: motion,
+            Touch: touch);
         _lastInputSampleTicks = now;
         return _cachedInputState;
     }
@@ -592,6 +769,7 @@ public static class PadExports
     private static uint ToOrbisButtons(HostGamepadButtons buttons)
     {
         uint result = 0;
+        if ((buttons & HostGamepadButtons.Create) != 0) result |= OrbisPadButton.Share;
         if ((buttons & HostGamepadButtons.Up) != 0) result |= OrbisPadButton.Up;
         if ((buttons & HostGamepadButtons.Down) != 0) result |= OrbisPadButton.Down;
         if ((buttons & HostGamepadButtons.Left) != 0) result |= OrbisPadButton.Left;
@@ -609,6 +787,34 @@ public static class PadExports
         if ((buttons & HostGamepadButtons.Options) != 0) result |= OrbisPadButton.Options;
         if ((buttons & HostGamepadButtons.TouchPad) != 0) result |= OrbisPadButton.TouchPad;
         return result;
+    }
+
+    private static void WriteTouchData(Span<byte> data, HostTouchState touch)
+    {
+        Span<HostTouchPoint> active = stackalloc HostTouchPoint[2];
+        var count = 0;
+        if (touch.First.Active)
+        {
+            active[count++] = touch.First;
+        }
+        if (touch.Second.Active)
+        {
+            active[count++] = touch.Second;
+        }
+
+        data[0x34] = (byte)count;
+        for (var index = 0; index < count; index++)
+        {
+            var offset = 0x3C + (index * 8);
+            var point = active[index];
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                data[offset..],
+                (ushort)Math.Round(Math.Clamp(point.X, 0, 1) * 1919));
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                data[(offset + 2)..],
+                (ushort)Math.Round(Math.Clamp(point.Y, 0, 1) * 942));
+            data[offset + 4] = point.Id;
+        }
     }
 
     private static uint ReadKeyboardButtons(IHostInput input)

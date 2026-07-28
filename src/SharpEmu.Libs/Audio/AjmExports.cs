@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using LibAtrac9;
 using SharpEmu.HLE;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -16,9 +18,24 @@ public static class AjmExports
     private const int OrbisAjmErrorOutOfResources = unchecked((int)0x80930007);
     private const int OrbisAjmErrorCodecAlreadyRegistered = unchecked((int)0x80930009);
     private const int OrbisAjmErrorCodecNotRegistered = unchecked((int)0x8093000A);
-    private const int OrbisAjmErrorWrongRevisionFlag = unchecked((int)0x8093000B);
+    private const int OrbisAjmErrorJobCreation = unchecked((int)0x80930012);
+    private const ulong MaxSilentPcmBytes = 1 << 20;
+    private const uint Atrac9CodecType = 1;
     private const uint MaxCodecType = 25;
     private const int MaxInstanceIndex = 0x2FFF;
+    private const int MaxDecodeBufferBytes = 64 * 1024 * 1024;
+
+    // AjmJobFlags: version:3, codec:8, run_flags:2, control_flags:3,
+    // reserved:29, sideband_flags:3.
+    private const ulong AjmJobRunFlagGetCodecInfo = 1UL << 11;
+    private const ulong AjmJobRunFlagMultipleFrames = 1UL << 12;
+    private const ulong AjmJobSidebandFlagGaplessDecode = 1UL << 45;
+    private const ulong AjmJobSidebandFlagFormat = 1UL << 46;
+    private const ulong AjmJobSidebandFlagStream = 1UL << 47;
+
+    // AjmBuffer { u8* p_address; u64 size; }
+    private const int AjmBufferDescriptorBytes = 16;
+    private const int MaxBufferDescriptors = 64;
     private static readonly ConcurrentDictionary<uint, AjmContextState> Contexts = new();
     private static int _nextContextId;
     private static int _nextBatchId;
@@ -27,8 +44,20 @@ public static class AjmExports
 
     private sealed class AjmInstanceState
     {
+        public required uint Id { get; init; }
+
         public required uint Codec { get; init; }
+
         public required ulong Flags { get; init; }
+
+        /// <summary>Channel ceiling from the instance flags; the decoded stream's
+        /// own config decides the actual PCM layout.</summary>
+        public required int MaxChannels { get; init; }
+
+        public required Atrac9PcmEncoding Encoding { get; init; }
+
+        public Atrac9DecodeState? Atrac9 { get; init; }
+
         public AjmMp3Decoder? Mp3 { get; init; }
 
         public bool PreferPcm16
@@ -49,6 +78,8 @@ public static class AjmExports
         public HashSet<uint> RegisteredCodecs { get; } = new();
 
         public Dictionary<uint, AjmInstanceState> InstancesBySlot { get; } = new();
+
+        public Dictionary<ulong, ulong> RegisteredMemoryPages { get; } = new();
 
         public int NextInstanceIndex { get; set; }
     }
@@ -91,6 +122,65 @@ public static class AjmExports
         Contexts.TryRemove(unchecked((uint)ctx[CpuRegister.Rdi]), out _);
         ctx[CpuRegister.Rax] = 0;
         return 0;
+    }
+
+    [SysAbiExport(
+        Nid = "bkRHEYG6lEM",
+        ExportName = "sceAjmMemoryRegister",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmMemoryRegister(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var address = ctx[CpuRegister.Rsi];
+        var pages = ctx[CpuRegister.Rdx];
+        if (!Contexts.TryGetValue(contextId, out var state))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        if (address == 0 || pages == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        // AJM hardware requires explicit registration. SharpEmu decodes from
+        // the shared guest address space, so retaining the range is enough.
+        lock (state.Gate)
+        {
+            state.RegisteredMemoryPages[address] = pages;
+        }
+
+        Trace($"memory_register context={contextId} address=0x{address:X16} pages={pages}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "pIpGiaYkHkM",
+        ExportName = "sceAjmMemoryUnregister",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmMemoryUnregister(CpuContext ctx)
+    {
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var address = ctx[CpuRegister.Rsi];
+        if (!Contexts.TryGetValue(contextId, out var state))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        if (address == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        lock (state.Gate)
+        {
+            state.RegisteredMemoryPages.Remove(address);
+        }
+
+        Trace($"memory_unregister context={contextId} address=0x{address:X16}");
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -144,30 +234,34 @@ public static class AjmExports
         var outputAddress = ctx[CpuRegister.Rcx];
         if (!Contexts.TryGetValue(contextId, out var state))
         {
-            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+            return TraceInstanceCreateFailure(ctx, contextId, codecType, flags, OrbisAjmErrorInvalidContext);
         }
 
         if (codecType >= MaxCodecType || outputAddress == 0)
         {
-            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+            return TraceInstanceCreateFailure(ctx, contextId, codecType, flags, OrbisAjmErrorInvalidParameter);
         }
 
-        if ((flags & 0x7) == 0)
-        {
-            return ctx.SetReturn(OrbisAjmErrorWrongRevisionFlag);
-        }
+        // AjmInstanceFlags carries a codec id in the high bits plus a low
+        // channel/revision word whose exact split is not settled: Demon's Souls
+        // creates ATRAC9 voices with low words 1, 2, 4 and 8. Rejecting any of
+        // them leaves the title holding SCE_AJM_INSTANCE_INVALID for that voice
+        // and it plays silence forever, so nothing here is fatal — the decoded
+        // stream's own config is what actually describes the PCM anyway.
+        var maxChannels = unchecked((int)(flags & 0xF));
+        var encoding = GetPcmEncoding(flags);
 
         uint instanceId;
         lock (state.Gate)
         {
             if (!state.RegisteredCodecs.Contains(codecType))
             {
-                return ctx.SetReturn(OrbisAjmErrorCodecNotRegistered);
+                return TraceInstanceCreateFailure(ctx, contextId, codecType, flags, OrbisAjmErrorCodecNotRegistered);
             }
 
             if (state.InstancesBySlot.Count >= MaxInstanceIndex)
             {
-                return ctx.SetReturn(OrbisAjmErrorOutOfResources);
+                return TraceInstanceCreateFailure(ctx, contextId, codecType, flags, OrbisAjmErrorOutOfResources);
             }
 
             var nextInstanceIndex = state.NextInstanceIndex;
@@ -192,8 +286,12 @@ public static class AjmExports
                 instanceSlot,
                 new AjmInstanceState
                 {
+                    Id = instanceId,
                     Codec = codecType,
                     Flags = flags,
+                    MaxChannels = maxChannels,
+                    Encoding = encoding,
+                    Atrac9 = codecType == Atrac9CodecType ? new Atrac9DecodeState() : null,
                     Mp3 = codecType == AjmCodecMp3 ? new AjmMp3Decoder() : null,
                 });
         }
@@ -247,11 +345,136 @@ public static class AjmExports
         LibraryName = "libSceAjm")]
     public static int AjmBatchInitialize(CpuContext ctx)
     {
-        // The caller owns and initializes the batch storage. This API resets
-        // its submission cursor on hardware; FMOD does not consume a return
-        // value or an additional output object here.
-        ctx[CpuRegister.Rax] = 0;
-        return 0;
+        var bufferAddress = ctx[CpuRegister.Rdi];
+        var bufferSize = ctx[CpuRegister.Rsi];
+        var infoAddress = ctx[CpuRegister.Rdx];
+        if (bufferAddress == 0 || infoAddress == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        Span<byte> info = stackalloc byte[AjmBatchInfoBytes];
+        info.Clear();
+        BinaryPrimitives.WriteUInt64LittleEndian(info, bufferAddress);
+        BinaryPrimitives.WriteUInt64LittleEndian(info[16..], bufferSize);
+        if (!ctx.Memory.TryWrite(infoAddress, info))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        Trace($"batch_initialize buffer=0x{bufferAddress:X16} size=0x{bufferSize:X} info=0x{infoAddress:X16}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "1t3ixYNXyuc",
+        ExportName = "sceAjmDecAt9ParseConfigData",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmDecAt9ParseConfigData(CpuContext ctx)
+    {
+        var configAddress = ctx[CpuRegister.Rdi];
+        var outputAddress = ctx[CpuRegister.Rsi];
+        if (configAddress == 0 || outputAddress == 0)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        Span<byte> configData = stackalloc byte[4];
+        if (!ctx.Memory.TryRead(configAddress, configData))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+
+        try
+        {
+            var config = new LibAtrac9.Atrac9Config(configData.ToArray());
+            Span<byte> info = stackalloc byte[20];
+            BinaryPrimitives.WriteUInt32LittleEndian(info[0..], unchecked((uint)config.ChannelCount));
+            BinaryPrimitives.WriteUInt32LittleEndian(info[4..], unchecked((uint)config.SampleRate));
+            BinaryPrimitives.WriteUInt32LittleEndian(info[8..], unchecked((uint)config.FrameSamples));
+            BinaryPrimitives.WriteUInt32LittleEndian(info[12..], unchecked((uint)config.SuperframeSamples));
+            BinaryPrimitives.WriteUInt32LittleEndian(info[16..], unchecked((uint)config.SuperframeBytes));
+            return ctx.SetReturn(
+                ctx.Memory.TryWrite(outputAddress, info)
+                    ? 0
+                    : OrbisAjmErrorInvalidParameter);
+        }
+        catch (InvalidDataException)
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "ezM2OhNxzck",
+        ExportName = "sceAjmBatchJobInitialize",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobInitialize(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var parametersAddress = ctx[CpuRegister.Rdx];
+        var parametersSize = ctx[CpuRegister.Rcx];
+        var resultAddress = ctx[CpuRegister.R8];
+
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobControlSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        var status = Atrac9DecodeState.ResultInvalidParameter;
+        if (TryGetInstance(instanceId, out var instance))
+        {
+            if (instance.Codec != Atrac9CodecType)
+            {
+                status = 0;
+            }
+            else if (instance.Atrac9 is not null &&
+                     parametersAddress != 0 &&
+                     parametersSize >= 4)
+            {
+                Span<byte> configData = stackalloc byte[4];
+                if (ctx.Memory.TryRead(parametersAddress, configData) &&
+                    instance.Atrac9.TryInitialize(configData))
+                {
+                    status = 0;
+                }
+            }
+        }
+
+        WriteBasicResult(ctx, resultAddress, status);
+        Trace(
+            $"batch_job_initialize instance=0x{instanceId:X8} params=0x{parametersAddress:X16}+0x{parametersSize:X} status=0x{status:X8}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "uJ3m8INuikg",
+        ExportName = "sceAjmBatchJobClearContext",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobClearContext(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var resultAddress = ctx[CpuRegister.Rdx];
+
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobControlSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        var status = Atrac9DecodeState.ResultInvalidParameter;
+        if (TryGetInstance(instanceId, out var instance))
+        {
+            instance.Atrac9?.Reset();
+            status = 0;
+        }
+
+        WriteBasicResult(ctx, resultAddress, status);
+        return ctx.SetReturn(0);
     }
 
     /// <summary>
@@ -264,103 +487,181 @@ public static class AjmExports
         ExportName = "sceAjmBatchJobDecode",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAjm")]
-    public static int AjmBatchJobDecode(CpuContext ctx)
+    public static int AjmBatchJobDecode(CpuContext ctx) =>
+        AjmBatchJobDecodeCore(ctx, multipleFrames: true);
+
+    [SysAbiExport(
+        Nid = "5LLWbpP5xi8",
+        ExportName = "sceAjmBatchJobDecodeSingle",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobDecodeSingle(CpuContext ctx) =>
+        AjmBatchJobDecodeCore(ctx, multipleFrames: false);
+
+    /// <summary>
+    /// The flag-driven decode entry point. Titles built on the modern AJM API
+    /// drive ATRAC9 playback exclusively through Run/RunSplit —
+    /// <see cref="AjmBatchJobDecode"/> is never called — so leaving these
+    /// unresolved silences every streamed voice.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "jVCWcthifr8",
+        ExportName = "sceAjmBatchJobRun",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobRun(CpuContext ctx) => AjmBatchJobRunCore(ctx, split: false);
+
+    [SysAbiExport(
+        Nid = "Z9NVCesiP0Q",
+        ExportName = "sceAjmBatchJobRunSplit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobRunSplit(CpuContext ctx) => AjmBatchJobRunCore(ctx, split: true);
+
+    // The BufferRa variants only append a guest return address after the nine
+    // shared arguments, so they decode identically.
+    [SysAbiExport(
+        Nid = "ElslOCpOIns",
+        ExportName = "sceAjmBatchJobRunBufferRa",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobRunBufferRa(CpuContext ctx) => AjmBatchJobRunCore(ctx, split: false);
+
+    [SysAbiExport(
+        Nid = "7jdAXK+2fMo",
+        ExportName = "sceAjmBatchJobRunSplitBufferRa",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobRunSplitBufferRa(CpuContext ctx) => AjmBatchJobRunCore(ctx, split: true);
+
+    /// <summary>
+    /// Records the gapless-decode window for a looping voice. SharpEmu decodes
+    /// whole superframes and does not trim lead-in/lead-out samples yet, so this
+    /// only has to acknowledge the job instead of failing the batch.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "SkEwpiu3tZg",
+        ExportName = "sceAjmBatchJobSetGaplessDecode",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobSetGaplessDecode(CpuContext ctx)
     {
         var infoAddress = ctx[CpuRegister.Rdi];
         var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
-        var inputAddress = ctx[CpuRegister.Rdx];
-        var inputSize = ctx[CpuRegister.Rcx];
-        var outputAddress = ctx[CpuRegister.R8];
-        var outputSize = ctx[CpuRegister.R9];
-        var resultAddress = ReadStackArg64(ctx, 0);
+        var gaplessAddress = ctx[CpuRegister.Rdx];
+        var resultAddress = ctx[CpuRegister.Rcx];
 
-        if (infoAddress == 0)
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobControlSize))
         {
-            return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
 
-        _ = TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize);
+        var status = TryGetInstance(instanceId, out _) ? 0 : Atrac9DecodeState.ResultInvalidParameter;
+        WriteBasicResult(ctx, resultAddress, status);
+        Trace($"batch_job_set_gapless_decode instance=0x{instanceId:X8} gapless=0x{gaplessAddress:X16} status=0x{status:X8}");
+        return ctx.SetReturn(0);
+    }
 
-        var inputConsumed = 0;
-        var outputWritten = 0;
-        ulong totalSamples = 0;
-        var frames = 0u;
-        var decoded = false;
+    [SysAbiExport(
+        Nid = "3cAg7xN995U",
+        ExportName = "sceAjmBatchJobGetStatistics",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobGetStatistics(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var resultAddress = ctx[CpuRegister.Rsi];
 
-        if (TryGetInstance(instanceId, out var instance) &&
-            instance.Mp3 is not null &&
-            inputAddress != 0 &&
-            inputSize is > 0 and <= MaxSilentPcmBytes &&
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobGetStatisticsSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        if (resultAddress != 0)
+        {
+            Span<byte> result = stackalloc byte[AjmStatisticsResultBytes];
+            result.Clear();
+            if (!ctx.Memory.TryWrite(resultAddress, result))
+            {
+                return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+            }
+        }
+
+        ctx.GetXmmRegister(0, out var intervalBits, out _);
+        var interval = BitConverter.Int32BitsToSingle(unchecked((int)(uint)intervalBits));
+        Trace($"batch_job_get_statistics interval={interval:R} result=0x{resultAddress:X16}");
+        return ctx.SetReturn(0);
+    }
+
+
+    /// <summary>
+    /// Decodes one MP3 job into the guest's output buffer. Reported through the
+    /// same result shape as ATRAC9 so the sideband writer stays codec-agnostic.
+    /// </summary>
+    private static Atrac9DecodeResult DecodeMp3(
+        CpuContext ctx,
+        AjmInstanceState instance,
+        ulong inputAddress,
+        ulong inputSize,
+        ulong outputAddress,
+        ulong outputSize)
+    {
+        var mp3 = instance.Mp3!;
+        if (inputAddress != 0 &&
+            inputSize is > 0 and <= MaxDecodeBufferBytes &&
             outputAddress != 0 &&
-            outputSize is > 0 and <= MaxSilentPcmBytes)
+            outputSize is > 0 and <= MaxDecodeBufferBytes)
         {
             var input = new byte[inputSize];
             var output = new byte[outputSize];
             if (ctx.Memory.TryRead(inputAddress, input))
             {
-                var result = instance.Mp3.Decode(input, output, pcm16: instance.PreferPcm16);
-                if (result.OutputWritten > 0)
+                var decoded = mp3.Decode(input, output, pcm16: instance.PreferPcm16);
+                if (decoded.OutputWritten > 0 &&
+                    ctx.Memory.TryWrite(outputAddress, output.AsSpan(0, decoded.OutputWritten)))
                 {
-                    if (!ctx.Memory.TryWrite(outputAddress, output.AsSpan(0, result.OutputWritten)))
-                    {
-                        return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
-                    }
-
                     // Zero any remainder so stale PCM does not leak into FMOD.
-                    if ((ulong)result.OutputWritten < outputSize)
+                    if ((ulong)decoded.OutputWritten < outputSize)
                     {
                         ClearGuestMemory(
                             ctx,
-                            outputAddress + (ulong)result.OutputWritten,
-                            outputSize - (ulong)result.OutputWritten);
+                            outputAddress + (ulong)decoded.OutputWritten,
+                            outputSize - (ulong)decoded.OutputWritten);
                     }
 
-                    decoded = true;
-                    inputConsumed = result.InputConsumed;
-                    outputWritten = result.OutputWritten;
-                    frames = result.Frames;
-                    totalSamples = instance.Mp3.TotalDecodedSamples;
+                    return new Atrac9DecodeResult(
+                        0,
+                        decoded.InputConsumed,
+                        decoded.OutputWritten,
+                        mp3.TotalDecodedSamples,
+                        decoded.Frames);
                 }
-                else
+
+                if (decoded.InputConsumed > 0)
                 {
-                    inputConsumed = result.InputConsumed;
-                    totalSamples = instance.Mp3.TotalDecodedSamples;
+                    ClearGuestMemory(ctx, outputAddress, outputSize);
+                    return new Atrac9DecodeResult(
+                        0,
+                        decoded.InputConsumed,
+                        0,
+                        mp3.TotalDecodedSamples,
+                        0);
                 }
             }
         }
 
-        if (!decoded)
+        // Fallback: silence and consume the input so the guest does not spin.
+        if (outputAddress != 0 && outputSize is > 0 and <= MaxDecodeBufferBytes)
         {
-            // Fallback: silence + consume input so the guest does not spin.
-            if (outputAddress != 0 && outputSize != 0 && outputSize <= MaxSilentPcmBytes)
-            {
-                ClearGuestMemory(ctx, outputAddress, outputSize);
-            }
-
-            if (inputConsumed == 0)
-            {
-                inputConsumed = inputSize > int.MaxValue ? int.MaxValue : (int)inputSize;
-            }
-
-            if (frames == 0 && (inputSize != 0 || outputSize != 0))
-            {
-                frames = 1;
-            }
+            ClearGuestMemory(ctx, outputAddress, outputSize);
         }
 
-        WriteDecodeStreamResult(
-            ctx,
-            resultAddress,
-            inputConsumed,
-            outputWritten,
-            totalSamples,
-            frames);
-
-        Trace(
-            $"batch_job_decode info=0x{infoAddress:X16} instance=0x{instanceId:X8} " +
-            $"in=0x{inputAddress:X16}+0x{inputSize:X} out=0x{outputAddress:X16}+0x{outputSize:X} " +
-            $"written={outputWritten} frames={frames} result=0x{resultAddress:X16}");
-        return ctx.SetReturn(0);
+        return new Atrac9DecodeResult(
+            0,
+            unchecked((int)Math.Min(inputSize, int.MaxValue)),
+            0,
+            mp3.TotalDecodedSamples,
+            inputSize != 0 || outputSize != 0 ? 1u : 0u);
     }
 
     private static bool TryGetInstance(uint instanceId, out AjmInstanceState instance)
@@ -458,6 +759,476 @@ public static class AjmExports
         return ctx.SetReturn(0);
     }
 
+    private static int AjmBatchJobDecodeCore(CpuContext ctx, bool multipleFrames)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var inputAddress = ctx[CpuRegister.Rdx];
+        var inputSize = ctx[CpuRegister.Rcx];
+        var outputAddress = ctx[CpuRegister.R8];
+        var outputSize = ctx[CpuRegister.R9];
+        var resultAddress = ReadStackArg64(ctx, 0);
+
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        Atrac9DecodeResult result;
+        if (!TryGetInstance(instanceId, out var instance))
+        {
+            result = new Atrac9DecodeResult(
+                Atrac9DecodeState.ResultInvalidParameter,
+                0,
+                0,
+                0,
+                0);
+        }
+        else if (instance.Mp3 is not null)
+        {
+            // GTA V Enhanced streams menu music through AJM MP3 (codec 0).
+            // Decoded eagerly here so BatchStart/Wait stay synchronous no-ops.
+            result = DecodeMp3(
+                ctx,
+                instance,
+                inputAddress,
+                inputSize,
+                outputAddress,
+                outputSize);
+        }
+        else if (instance.Codec != Atrac9CodecType || instance.Atrac9 is null)
+        {
+            if (outputAddress != 0 &&
+                outputSize is > 0 and <= MaxDecodeBufferBytes)
+            {
+                ClearGuestMemory(ctx, outputAddress, outputSize);
+            }
+
+            result = new Atrac9DecodeResult(
+                0,
+                unchecked((int)Math.Min(inputSize, int.MaxValue)),
+                0,
+                0,
+                inputSize != 0 || outputSize != 0 ? 1u : 0u);
+        }
+        else
+        {
+            result = DecodeAtrac9(
+                ctx,
+                instance,
+                inputAddress,
+                inputSize,
+                outputAddress,
+                outputSize,
+                multipleFrames);
+        }
+
+        WriteDecodeStreamResult(ctx, resultAddress, result, multipleFrames);
+        Trace(
+            $"batch_job_decode instance=0x{instanceId:X8} in=0x{inputAddress:X16}+0x{inputSize:X} " +
+            $"out=0x{outputAddress:X16}+0x{outputSize:X} consumed={result.InputConsumed} " +
+            $"produced={result.OutputWritten} frames={result.Frames} status=0x{result.Status:X8}");
+        return ctx.SetReturn(0);
+    }
+
+    private static int TraceInstanceCreateFailure(
+        CpuContext ctx,
+        uint contextId,
+        uint codecType,
+        ulong flags,
+        int error)
+    {
+        Trace($"instance_create_failed context={contextId} codec={codecType} flags=0x{flags:X} error=0x{unchecked((uint)error):X8}");
+        return ctx.SetReturn(error);
+    }
+
+    private readonly record struct AjmGuestBuffer(ulong Address, int Length);
+
+    /// <summary>
+    /// Shared body of sceAjmBatchJobRun / sceAjmBatchJobRunSplit. The split form
+    /// passes arrays of AjmBuffer descriptors instead of one pointer/size pair;
+    /// the descriptors are a single logical stream, so they are gathered on the
+    /// way in and scattered on the way out.
+    /// </summary>
+    private static int AjmBatchJobRunCore(CpuContext ctx, bool split)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var flags = ctx[CpuRegister.Rdx];
+        var inputAddress = ctx[CpuRegister.Rcx];
+        var inputCountOrSize = ctx[CpuRegister.R8];
+        var outputAddress = ctx[CpuRegister.R9];
+        var outputCountOrSize = ReadStackArg64(ctx, 0);
+        var sidebandAddress = ReadStackArg64(ctx, 1);
+        var sidebandSize = ReadStackArg64(ctx, 2);
+
+        var descriptors = split
+            ? Math.Min(inputCountOrSize, MaxBufferDescriptors) + Math.Min(outputCountOrSize, MaxBufferDescriptors)
+            : 0;
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize + (descriptors * AjmBufferDescriptorBytes)))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        var multipleFrames = (flags & AjmJobRunFlagMultipleFrames) != 0;
+        Atrac9Config? config = null;
+        Atrac9DecodeResult result;
+
+        if (!TryGetInstance(instanceId, out var instance))
+        {
+            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+        else if (!TryCollectBuffers(ctx, split, inputAddress, inputCountOrSize, out var inputs, out var inputLength) ||
+                 !TryCollectBuffers(ctx, split, outputAddress, outputCountOrSize, out var outputs, out var outputLength))
+        {
+            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+        else if (instance.Codec != Atrac9CodecType || instance.Atrac9 is null)
+        {
+            foreach (var buffer in outputs)
+            {
+                ClearGuestMemory(ctx, buffer.Address, (ulong)buffer.Length);
+            }
+
+            result = new Atrac9DecodeResult(
+                0,
+                inputLength,
+                0,
+                0,
+                inputLength != 0 || outputLength != 0 ? 1u : 0u);
+        }
+        else
+        {
+            config = instance.Atrac9.Config;
+            result = DecodeAtrac9Scattered(ctx, instance, inputs, inputLength, outputs, outputLength, multipleFrames);
+            config ??= instance.Atrac9.Config;
+        }
+
+        WriteRunSideband(ctx, sidebandAddress, sidebandSize, flags, result, instance, config);
+        Trace(
+            $"batch_job_run{(split ? "_split" : string.Empty)} instance=0x{instanceId:X8} flags=0x{flags:X} " +
+            $"in=0x{inputAddress:X16}#{inputCountOrSize} out=0x{outputAddress:X16}#{outputCountOrSize} " +
+            $"sideband=0x{sidebandAddress:X16}+0x{sidebandSize:X} consumed={result.InputConsumed} " +
+            $"produced={result.OutputWritten} frames={result.Frames} status=0x{result.Status:X8}");
+        TraceBufferDescriptors(ctx, split, "in", inputAddress, inputCountOrSize);
+        TraceBufferDescriptors(ctx, split, "out", outputAddress, outputCountOrSize);
+        return ctx.SetReturn(0);
+    }
+
+    private static void TraceBufferDescriptors(
+        CpuContext ctx,
+        bool split,
+        string label,
+        ulong address,
+        ulong countOrSize)
+    {
+        if (!split ||
+            address == 0 ||
+            countOrSize == 0 ||
+            countOrSize > MaxBufferDescriptors ||
+            !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Span<byte> descriptor = stackalloc byte[AjmBufferDescriptorBytes];
+        // Hoisted out of the loop: a stackalloc per iteration accumulates across
+        // up to MaxBufferDescriptors passes and never unwinds until the method
+        // returns.
+        Span<byte> head = stackalloc byte[16];
+        for (var index = 0UL; index < countOrSize; index++)
+        {
+            if (!ctx.Memory.TryRead(address + (index * AjmBufferDescriptorBytes), descriptor))
+            {
+                return;
+            }
+
+            var bufferAddress = BinaryPrimitives.ReadUInt64LittleEndian(descriptor);
+            var bufferSize = BinaryPrimitives.ReadUInt64LittleEndian(descriptor[8..]);
+            var readable = bufferAddress != 0 && bufferSize != 0 && ctx.Memory.TryRead(bufferAddress, head);
+            Trace(
+                $"buffer[{label}][{index}] address=0x{bufferAddress:X16} size=0x{bufferSize:X} " +
+                $"head={(readable ? Convert.ToHexString(head) : "<unreadable>")}");
+        }
+    }
+
+    private static bool TryCollectBuffers(
+        CpuContext ctx,
+        bool split,
+        ulong address,
+        ulong countOrSize,
+        out List<AjmGuestBuffer> buffers,
+        out int totalLength)
+    {
+        buffers = new List<AjmGuestBuffer>(split ? (int)Math.Min(countOrSize, MaxBufferDescriptors) : 1);
+        totalLength = 0;
+
+        if (!split)
+        {
+            if (countOrSize > MaxDecodeBufferBytes || (countOrSize != 0 && address == 0))
+            {
+                return false;
+            }
+
+            if (countOrSize != 0)
+            {
+                buffers.Add(new AjmGuestBuffer(address, unchecked((int)countOrSize)));
+                totalLength = unchecked((int)countOrSize);
+            }
+
+            return true;
+        }
+
+        if (countOrSize > MaxBufferDescriptors || (countOrSize != 0 && address == 0))
+        {
+            return false;
+        }
+
+        Span<byte> descriptor = stackalloc byte[AjmBufferDescriptorBytes];
+        for (var index = 0UL; index < countOrSize; index++)
+        {
+            if (!ctx.Memory.TryRead(address + (index * AjmBufferDescriptorBytes), descriptor))
+            {
+                return false;
+            }
+
+            var bufferAddress = BinaryPrimitives.ReadUInt64LittleEndian(descriptor);
+            var bufferSize = BinaryPrimitives.ReadUInt64LittleEndian(descriptor[8..]);
+            if (bufferSize == 0)
+            {
+                continue;
+            }
+
+            if (bufferAddress == 0 ||
+                bufferSize > MaxDecodeBufferBytes ||
+                (ulong)totalLength + bufferSize > MaxDecodeBufferBytes)
+            {
+                return false;
+            }
+
+            buffers.Add(new AjmGuestBuffer(bufferAddress, unchecked((int)bufferSize)));
+            totalLength += unchecked((int)bufferSize);
+        }
+
+        return true;
+    }
+
+    private static Atrac9DecodeResult DecodeAtrac9Scattered(
+        CpuContext ctx,
+        AjmInstanceState instance,
+        List<AjmGuestBuffer> inputs,
+        int inputLength,
+        List<AjmGuestBuffer> outputs,
+        int outputLength,
+        bool multipleFrames)
+    {
+        var input = ArrayPool<byte>.Shared.Rent(Math.Max(inputLength, 1));
+        var output = ArrayPool<byte>.Shared.Rent(Math.Max(outputLength, 1));
+        try
+        {
+            var gathered = 0;
+            foreach (var buffer in inputs)
+            {
+                if (!ctx.Memory.TryRead(buffer.Address, input.AsSpan(gathered, buffer.Length)))
+                {
+                    return new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+                }
+
+                gathered += buffer.Length;
+            }
+
+            var result = instance.Atrac9!.Decode(
+                input.AsSpan(0, inputLength),
+                output.AsSpan(0, outputLength),
+                instance.Encoding,
+                requestedChannels: 0,
+                multipleFrames);
+
+            var scattered = 0;
+            foreach (var buffer in outputs)
+            {
+                if (scattered >= result.OutputWritten)
+                {
+                    break;
+                }
+
+                var chunk = Math.Min(buffer.Length, result.OutputWritten - scattered);
+                if (!ctx.Memory.TryWrite(buffer.Address, output.AsSpan(scattered, chunk)))
+                {
+                    return result with
+                    {
+                        Status = result.Status | Atrac9DecodeState.ResultInvalidParameter,
+                        OutputWritten = scattered,
+                    };
+                }
+
+                scattered += chunk;
+            }
+
+            return result;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(input);
+            ArrayPool<byte>.Shared.Return(output);
+        }
+    }
+
+    private static void WriteRunSideband(
+        CpuContext ctx,
+        ulong address,
+        ulong size,
+        ulong flags,
+        Atrac9DecodeResult result,
+        AjmInstanceState? instance,
+        Atrac9Config? config)
+    {
+        if (address == 0 || size < AjmSidebandResultBytes)
+        {
+            return;
+        }
+
+        // Layout is positional and driven purely by the job flags:
+        // Result, then Stream, Format, GaplessDecode, MFrame, CodecInfo — each
+        // only present when its flag is set and there is still room.
+        Span<byte> sideband = stackalloc byte[
+            AjmSidebandResultBytes +
+            AjmSidebandStreamBytes +
+            AjmSidebandFormatBytes +
+            AjmSidebandGaplessDecodeBytes +
+            AjmSidebandMFrameBytes];
+        sideband.Clear();
+
+        BinaryPrimitives.WriteInt32LittleEndian(sideband, result.Status);
+        var offset = AjmSidebandResultBytes;
+
+        if ((flags & AjmJobSidebandFlagStream) != 0 && (ulong)(offset + AjmSidebandStreamBytes) <= size)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(sideband[offset..], result.InputConsumed);
+            BinaryPrimitives.WriteInt32LittleEndian(sideband[(offset + 4)..], result.OutputWritten);
+            BinaryPrimitives.WriteUInt64LittleEndian(sideband[(offset + 8)..], result.TotalDecodedSamples);
+            offset += AjmSidebandStreamBytes;
+        }
+
+        if ((flags & AjmJobSidebandFlagFormat) != 0 && (ulong)(offset + AjmSidebandFormatBytes) <= size)
+        {
+            var channels = config?.ChannelCount ?? instance?.MaxChannels ?? 0;
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], unchecked((uint)channels));
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[(offset + 4)..], ChannelMaskFor(channels));
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[(offset + 8)..], unchecked((uint)(config?.SampleRate ?? 0)));
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                sideband[(offset + 12)..],
+                unchecked((uint)(instance?.Encoding ?? Atrac9PcmEncoding.Signed16)));
+            offset += AjmSidebandFormatBytes;
+        }
+
+        if ((flags & AjmJobSidebandFlagGaplessDecode) != 0 && (ulong)(offset + AjmSidebandGaplessDecodeBytes) <= size)
+        {
+            offset += AjmSidebandGaplessDecodeBytes;
+        }
+
+        if ((flags & AjmJobRunFlagMultipleFrames) != 0 && (ulong)(offset + AjmSidebandMFrameBytes) <= size)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], result.Frames);
+            offset += AjmSidebandMFrameBytes;
+        }
+
+        _ = ctx.Memory.TryWrite(address, sideband[..offset]);
+
+        if ((flags & AjmJobRunFlagGetCodecInfo) != 0 && (ulong)offset < size)
+        {
+            // No codec-info block is produced yet; zero it so the caller reads
+            // defined values instead of whatever the buffer held before.
+            ClearGuestMemory(
+                ctx,
+                address + (ulong)offset,
+                Math.Min(size - (ulong)offset, AjmSidebandCodecInfoBytes));
+        }
+    }
+
+    private static uint ChannelMaskFor(int channels) =>
+        channels switch
+        {
+            1 => 0x4,
+            2 => 0x3,
+            6 => 0x3F,
+            8 => 0x63F,
+            _ => 0,
+        };
+
+    private static Atrac9DecodeResult DecodeAtrac9(
+        CpuContext ctx,
+        AjmInstanceState instance,
+        ulong inputAddress,
+        ulong inputSize,
+        ulong outputAddress,
+        ulong outputSize,
+        bool multipleFrames)
+    {
+        if ((inputSize != 0 && inputAddress == 0) ||
+            (outputSize != 0 && outputAddress == 0) ||
+            inputSize > MaxDecodeBufferBytes ||
+            outputSize > MaxDecodeBufferBytes)
+        {
+            return new Atrac9DecodeResult(
+                Atrac9DecodeState.ResultInvalidParameter,
+                0,
+                0,
+                0,
+                0);
+        }
+
+        var inputLength = unchecked((int)inputSize);
+        var outputLength = unchecked((int)outputSize);
+        var input = ArrayPool<byte>.Shared.Rent(Math.Max(inputLength, 1));
+        var output = ArrayPool<byte>.Shared.Rent(Math.Max(outputLength, 1));
+        try
+        {
+            if (inputLength != 0 &&
+                !ctx.Memory.TryRead(inputAddress, input.AsSpan(0, inputLength)))
+            {
+                return new Atrac9DecodeResult(
+                    Atrac9DecodeState.ResultInvalidParameter,
+                    0,
+                    0,
+                    0,
+                    0);
+            }
+
+            var result = instance.Atrac9!.Decode(
+                input.AsSpan(0, inputLength),
+                output.AsSpan(0, outputLength),
+                instance.Encoding,
+                requestedChannels: 0,
+                multipleFrames);
+
+            if (result.OutputWritten != 0 &&
+                !ctx.Memory.TryWrite(outputAddress, output.AsSpan(0, result.OutputWritten)))
+            {
+                return result with
+                {
+                    Status = result.Status | Atrac9DecodeState.ResultInvalidParameter,
+                    OutputWritten = 0,
+                };
+            }
+
+            return result;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(input);
+            ArrayPool<byte>.Shared.Return(output);
+        }
+    }
+
+    private static Atrac9PcmEncoding GetPcmEncoding(ulong flags) =>
+        ((flags >> 7) & 0x7) switch
+        {
+            1 => Atrac9PcmEncoding.Signed32,
+            2 => Atrac9PcmEncoding.Float,
+            _ => Atrac9PcmEncoding.Signed16,
+        };
+
     internal static void ResetForTests()
     {
         Contexts.Clear();
@@ -466,14 +1237,24 @@ public static class AjmExports
     }
 
     // AjmBatchInfo: buffer, offset, size, last_good_job, last_good_job_ra (5× u64).
+    private const int AjmBatchInfoBytes = 40;
     private const ulong AjmBatchInfoOffsetField = 8;
     private const ulong AjmBatchInfoSizeField = 16;
     private const ulong AjmBatchInfoLastGoodJobField = 24;
+    private const ulong AjmBatchInfoLastGoodJobRaField = 32;
+    private const ulong AjmJobControlSize = 48;
     private const ulong AjmJobRunSize = 64;
-    private const int OrbisAjmErrorJobCreation = unchecked((int)0x80930012);
-    private const ulong MaxSilentPcmBytes = 1 << 20;
+    private const ulong AjmJobGetStatisticsSize = 88;
+    private const int AjmStatisticsResultBytes = 48;
+    private const int AjmSidebandResultBytes = 8;
+    private const int AjmSidebandStreamBytes = 16;
+    private const int AjmSidebandFormatBytes = 24;
+    private const int AjmSidebandGaplessDecodeBytes = 8;
+    private const int AjmSidebandMFrameBytes = 8;
+    private const int AjmSidebandCodecInfoBytes = 64;
     // AjmSidebandResult (8) + AjmSidebandStream (16) + AjmSidebandMFrame (8).
-    private const int DecodeSidebandBytes = 32;
+    private const int DecodeSidebandBytes =
+        AjmSidebandResultBytes + AjmSidebandStreamBytes + AjmSidebandMFrameBytes;
 
     private static bool TryAppendBatchJob(CpuContext ctx, ulong infoAddress, ulong jobSize)
     {
@@ -492,6 +1273,7 @@ public static class AjmExports
         var jobAddress = buffer + offset;
         ClearGuestMemory(ctx, jobAddress, jobSize);
         return TryWriteUInt64(ctx, infoAddress + AjmBatchInfoLastGoodJobField, jobAddress) &&
+               TryWriteUInt64(ctx, infoAddress + AjmBatchInfoLastGoodJobRaField, 0) &&
                TryWriteUInt64(ctx, infoAddress + AjmBatchInfoOffsetField, offset + jobSize);
     }
 
@@ -513,10 +1295,8 @@ public static class AjmExports
     private static void WriteDecodeStreamResult(
         CpuContext ctx,
         ulong resultAddress,
-        int inputConsumed,
-        int outputWritten,
-        ulong totalDecodedSamples,
-        uint frames)
+        Atrac9DecodeResult result,
+        bool multipleFrames)
     {
         if (resultAddress == 0)
         {
@@ -525,12 +1305,31 @@ public static class AjmExports
 
         Span<byte> sideband = stackalloc byte[DecodeSidebandBytes];
         sideband.Clear();
-        // AjmSidebandResult.result / internal_result = 0 (OK)
-        BinaryPrimitives.WriteInt32LittleEndian(sideband.Slice(8, 4), inputConsumed);
-        BinaryPrimitives.WriteInt32LittleEndian(sideband.Slice(12, 4), outputWritten);
-        BinaryPrimitives.WriteUInt64LittleEndian(sideband.Slice(16, 8), totalDecodedSamples);
-        BinaryPrimitives.WriteUInt32LittleEndian(sideband.Slice(24, 4), frames);
-        _ = ctx.Memory.TryWrite(resultAddress, sideband);
+        BinaryPrimitives.WriteInt32LittleEndian(sideband, result.Status);
+        BinaryPrimitives.WriteInt32LittleEndian(sideband[8..], result.InputConsumed);
+        BinaryPrimitives.WriteInt32LittleEndian(sideband[12..], result.OutputWritten);
+        BinaryPrimitives.WriteUInt64LittleEndian(sideband[16..], result.TotalDecodedSamples);
+        if (multipleFrames)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[24..], result.Frames);
+        }
+
+        _ = ctx.Memory.TryWrite(
+            resultAddress,
+            multipleFrames ? sideband : sideband[..24]);
+    }
+
+    private static void WriteBasicResult(CpuContext ctx, ulong resultAddress, int status)
+    {
+        if (resultAddress == 0)
+        {
+            return;
+        }
+
+        Span<byte> result = stackalloc byte[8];
+        result.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(result, status);
+        _ = ctx.Memory.TryWrite(resultAddress, result);
     }
 
     private static void ClearGuestMemory(CpuContext ctx, ulong address, ulong byteCount)

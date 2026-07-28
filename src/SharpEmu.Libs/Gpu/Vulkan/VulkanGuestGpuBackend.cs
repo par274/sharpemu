@@ -378,8 +378,10 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public void SubmitGuestImageFill(ulong address, uint fillValue) =>
         VulkanVideoPresenter.SubmitGuestImageFill(address, fillValue);
 
-    public void SubmitGuestImageWrite(ulong address, byte[] pixels) =>
-        VulkanVideoPresenter.SubmitGuestImageWrite(address, pixels);
+    public void SubmitGuestImageWrite(ulong address, byte[] pixels, uint rowOffset = 0) =>
+        VulkanVideoPresenter.SubmitGuestImageWrite(address, pixels, rowOffset);
+
+    public bool SupportsPartialImageWrite => true;
 
     public void RequestCpuWrittenGuestImageSync(ulong scopeAddress = 0, ulong scopeByteCount = ulong.MaxValue) =>
         VulkanVideoPresenter.RequestCpuWrittenGuestImageSync(scopeAddress, scopeByteCount);

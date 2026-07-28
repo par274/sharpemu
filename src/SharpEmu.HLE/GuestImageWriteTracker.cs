@@ -87,17 +87,14 @@ public static unsafe class GuestImageWriteTracker
 
     private static RangeSnapshot _rangeSnapshot = RangeSnapshot.Empty;
 
-    // Windows defaults off: VirtualProtect fault sync still regresses titles
-    // like Dead Cells / Demon's Souls. Opt in with SHARPEMU_GUEST_IMAGE_CPU_SYNC=1
-    // when a title needs CPU-written guest planes (e.g. GTA intro). Linux/macOS
-    // keep the historical opt-out (=0 disables).
+    // CPU-written guest image synchronization is the compatible default. A few
+    // titles (currently GTA V) require the lower-overhead watch-only path and
+    // opt out explicitly with SHARPEMU_GUEST_IMAGE_CPU_SYNC=0.
     private static readonly bool _enabled =
-        OperatingSystem.IsWindows()
-            ? string.Equals(
-                Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC"),
-                "1",
-                StringComparison.Ordinal)
-            : Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC") != "0";
+        !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_GUEST_IMAGE_CPU_SYNC"),
+            "0",
+            StringComparison.Ordinal);
     private static readonly (bool Wildcard, ulong[] Addresses) _lifetimeTraceFilter =
         ParseAddressList(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_ADDRS"));
     private static readonly (bool Wildcard, string[] Sources) _lifetimeSourceTraceFilter =

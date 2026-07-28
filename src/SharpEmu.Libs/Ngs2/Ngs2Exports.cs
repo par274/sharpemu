@@ -30,7 +30,7 @@ public static class Ngs2Exports
     // The grain length defaults to 256 frames (matching the 8192-byte AudioOut
     // buffers games copy it into) until the title overrides it.
     private const int DefaultGrainSamples = 256;
-    private const double OutputSampleRate = 48000.0;
+    private const int DefaultSampleRate = 48000;
 
     private sealed class SystemState
     {
@@ -38,6 +38,7 @@ public static class Ngs2Exports
 
         public uint Uid { get; }
         public int GrainSamples { get; set; } = DefaultGrainSamples;
+        public int SampleRate { get; set; } = DefaultSampleRate;
     }
 
     private sealed record RackState(ulong SystemHandle, uint RackId);
@@ -496,6 +497,7 @@ public static class Ngs2Exports
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        Span<byte> renderBufferInfo = stackalloc byte[RenderBufferInfoSize];
         for (uint i = 0; i < bufferInfoCount; i++)
         {
             var entryAddress = bufferInfoAddress + (i * RenderBufferInfoSize);
@@ -527,10 +529,9 @@ public static class Ngs2Exports
 
                 if (ShouldTrace() && Interlocked.Increment(ref _renderInfoDumps) <= 4)
                 {
-                    Span<byte> rbi = stackalloc byte[RenderBufferInfoSize];
-                    ctx.Memory.TryRead(entryAddress, rbi);
+                    ctx.Memory.TryRead(entryAddress, renderBufferInfo);
                     Console.Error.WriteLine(
-                        $"[LOADER][TRACE] ngs2.renderbufinfo addr=0x{bufferAddress:X} size={bufferSize} ch={channels} raw={Convert.ToHexString(rbi)}");
+                        $"[LOADER][TRACE] ngs2.renderbufinfo addr=0x{bufferAddress:X} size={bufferSize} ch={channels} raw={Convert.ToHexString(renderBufferInfo)}");
                 }
             }
         }
@@ -552,6 +553,7 @@ public static class Ngs2Exports
         CpuContext ctx, ulong systemHandle, ulong bufferAddress, ulong bufferSize, int channels)
     {
         int grain;
+        int sampleRate;
         lock (StateGate)
         {
             if (!Systems.TryGetValue(systemHandle, out var system))
@@ -560,6 +562,7 @@ public static class Ngs2Exports
             }
 
             grain = system.GrainSamples;
+            sampleRate = system.SampleRate;
         }
 
         var capacityFrames = (int)Math.Min((ulong)grain, bufferSize / (ulong)(channels * sizeof(float)));
@@ -590,7 +593,7 @@ public static class Ngs2Exports
                         continue;
                     }
 
-                    MixOneVoice(accum, capacityFrames, channels, voice);
+                    MixOneVoice(accum, capacityFrames, channels, sampleRate, voice);
                     mixedAnything = true;
                 }
             }
@@ -606,15 +609,20 @@ public static class Ngs2Exports
         }
     }
 
-    // Resample one voice from its source rate to 48 kHz (nearest-sample) and add
+    // Resample one voice to the system rate and add
     // it to the front stereo pair. Advances the voice cursor and handles loop /
     // one-shot end. Must be called under StateGate.
-    private static void MixOneVoice(float[] accum, int frames, int channels, VoiceState voice)
+    private static void MixOneVoice(
+        float[] accum,
+        int frames,
+        int channels,
+        int outputSampleRate,
+        VoiceState voice)
     {
         var pcm = voice.Pcm!;
         var loopEnd = voice.LoopEnd > 0 && voice.LoopEnd <= pcm.Length ? voice.LoopEnd : pcm.Length;
         var loopStart = voice.LoopStart;
-        var step = voice.SourceRate / OutputSampleRate;
+        var step = voice.SourceRate / (double)outputSampleRate;
         var gain = voice.Gain / 32768f;
         var pos = voice.Position;
         for (var f = 0; f < frames; f++)
@@ -640,7 +648,14 @@ public static class Ngs2Exports
                 break;
             }
 
-            var sample = pcm[idx] * gain;
+            var next = idx + 1;
+            if (next >= loopEnd)
+            {
+                next = loopStart >= 0 && loopStart < loopEnd ? loopStart : idx;
+            }
+
+            var fraction = pos - idx;
+            var sample = (float)((pcm[idx] + ((pcm[next] - pcm[idx]) * fraction)) * gain);
             var baseIndex = f * channels;
             accum[baseIndex] += sample;
             if (channels > 1)
@@ -736,7 +751,27 @@ public static class Ngs2Exports
         ExportName = "sceNgs2SystemSetSampleRate",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2SystemSetSampleRate(CpuContext ctx) => ValidateSystem(ctx);
+    public static int Ngs2SystemSetSampleRate(CpuContext ctx)
+    {
+        var systemHandle = ctx[CpuRegister.Rdi];
+        var sampleRate = unchecked((int)ctx[CpuRegister.Rsi]);
+        lock (StateGate)
+        {
+            if (!Systems.TryGetValue(systemHandle, out var system))
+            {
+                return SetReturn(ctx, OrbisNgs2ErrorInvalidSystemHandle);
+            }
+
+            if (sampleRate is < 8000 or > 192000)
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            system.SampleRate = sampleRate;
+        }
+
+        return SetReturn(ctx, 0);
+    }
 
     [SysAbiExport(
         Nid = "gThZqM5PYlQ",

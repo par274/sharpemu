@@ -23,14 +23,71 @@ public sealed partial class DirectExecutionBackend
 	private static long _perfHleTotal;
 	private static long _perfHleDispatchTicks;
 
+	private sealed class PerfHleExportCost
+	{
+		public long Calls;
+		public long Ticks;
+	}
+
+	private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, PerfHleExportCost> _perfHleCosts = new();
+
+	/// <summary>
+	/// Name of the export currently being dispatched on this thread, so the
+	/// gateway can attribute its elapsed time once the call returns. Answering
+	/// "which export is worth optimising" needs cost per export, not just call
+	/// counts — a rare expensive call and a hot cheap one look identical in a
+	/// frequency histogram.
+	/// </summary>
+	[System.ThreadStatic]
+	private static string? _perfHleCurrentExport;
+
+	private static long _perfHleFirstTimestamp;
+
 	private static void RecordPerfHleDispatchTime(long ticks)
 	{
 		var total = System.Threading.Interlocked.Add(ref _perfHleDispatchTicks, ticks);
 		var calls = System.Threading.Interlocked.Read(ref _perfHleTotal);
+
+		var name = _perfHleCurrentExport;
+		if (name is not null)
+		{
+			var cost = _perfHleCosts.GetOrAdd(name, static _ => new PerfHleExportCost());
+			System.Threading.Interlocked.Increment(ref cost.Calls);
+			System.Threading.Interlocked.Add(ref cost.Ticks, ticks);
+		}
+
 		if (calls > 0 && calls % 500000 == 0)
 		{
-			var avgUs = (double)total / System.Diagnostics.Stopwatch.Frequency * 1_000_000.0 / calls;
-			System.Console.Error.WriteLine($"[PERF][HLE] managed_dispatch_avg={avgUs:F3}us total_managed_s={(double)total / System.Diagnostics.Stopwatch.Frequency:F2}");
+			var frequency = (double)System.Diagnostics.Stopwatch.Frequency;
+			var avgUs = (double)total / frequency * 1_000_000.0 / calls;
+			var first = System.Threading.Interlocked.CompareExchange(ref _perfHleFirstTimestamp, 0, 0);
+			var wallSeconds = first == 0
+				? 0
+				: (double)(System.Diagnostics.Stopwatch.GetTimestamp() - first) / frequency;
+			System.Console.Error.WriteLine(
+				$"[PERF][HLE] managed_dispatch_avg={avgUs:F3}us " +
+				$"total_managed_s={(double)total / frequency:F2} " +
+				$"wall_s={wallSeconds:F2} " +
+				$"cores={(wallSeconds > 0 ? total / frequency / wallSeconds : 0):F2}");
+
+			var snapshot = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string, PerfHleExportCost>>(_perfHleCosts.Count + 16);
+			foreach (var kvp in _perfHleCosts)
+			{
+				snapshot.Add(kvp);
+			}
+
+			var top = snapshot
+				.OrderByDescending(kvp => System.Threading.Interlocked.Read(ref kvp.Value.Ticks))
+				.Take(12)
+				.Select(kvp =>
+				{
+					var seconds = System.Threading.Interlocked.Read(ref kvp.Value.Ticks) / frequency;
+					var callCount = System.Threading.Interlocked.Read(ref kvp.Value.Calls);
+					var cores = wallSeconds > 0 ? seconds / wallSeconds : 0;
+					var perCallUs = callCount > 0 ? seconds * 1_000_000.0 / callCount : 0;
+					return $"{kvp.Key}: {cores:F2}cores {seconds:F1}s n={callCount} {perCallUs:F2}us/call";
+				});
+			System.Console.Error.WriteLine($"[PERF][HLE] cost: {string.Join(" | ", top)}");
 		}
 	}
 
@@ -39,7 +96,16 @@ public sealed partial class DirectExecutionBackend
 
 	private static void RecordPerfHleCall(string name)
 	{
+		_perfHleCurrentExport = name;
 		var total = System.Threading.Interlocked.Increment(ref _perfHleTotal);
+		if (total == 1)
+		{
+			System.Threading.Interlocked.CompareExchange(
+				ref _perfHleFirstTimestamp,
+				System.Diagnostics.Stopwatch.GetTimestamp(),
+				0);
+		}
+
 		if (!_perfHleNoDict)
 		{
 			_perfHleCounts.AddOrUpdate(name, 1, static (_, v) => v + 1);

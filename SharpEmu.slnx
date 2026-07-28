@@ -5,6 +5,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/SharpEmu.LibAtrac9/SharpEmu.LibAtrac9.csproj" />
     <Project Path="src/SharpEmu.CLI/SharpEmu.CLI.csproj" />
     <Project Path="src/SharpEmu.Core/SharpEmu.Core.csproj" />
     <Project Path="src/SharpEmu.DebugClient/SharpEmu.DebugClient.csproj" />

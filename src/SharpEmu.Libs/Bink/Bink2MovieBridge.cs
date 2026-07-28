@@ -133,10 +133,12 @@ internal static class Bink2MovieBridge
                     if (_playback.IsFinished)
                     {
                         var completedPath = _activePath;
+                        var progress = _playback.PlaybackProgress;
                         CloseActiveLocked();
                         Console.Error.WriteLine(
                             "[LOADER][INFO] Bink2 bridge completed: " +
-                            Path.GetFileName(completedPath));
+                            $"{Path.GetFileName(completedPath)} after " +
+                            $"{progress.Seconds:F2}s at frame {progress.FrameIndex}");
                         AttachNextQueuedMovieLocked();
                     }
                     return false;

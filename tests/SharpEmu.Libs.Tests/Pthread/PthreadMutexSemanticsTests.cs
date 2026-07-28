@@ -198,6 +198,89 @@ public sealed class PthreadMutexSemanticsTests
         Assert.Equal(workerCount * iterationsPerWorker, protectedCounter);
     }
 
+    /// <summary>
+    /// A ScePthreadMutex variable is storage the guest owns and reuses — stack
+    /// frames recycle the slot, and a slot can be reassigned to another mutex —
+    /// so the handle the slot currently holds outranks anything cached under the
+    /// slot's own address. Resolving to the stale entry silently released the
+    /// wrong mutex and left the real one owned forever.
+    /// </summary>
+    [Fact]
+    public void ReusedHandleSlot_UnlockReleasesTheMutexTheSlotNowNames()
+    {
+        const ulong memoryBase = 0x1_0010_0000;
+        const ulong slotAddress = memoryBase + 0x100;
+        const ulong realMutexAddress = memoryBase + 0x200;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        // First use of the slot happens while it still reads as zero, which
+        // implicitly registers a mutex keyed by the slot address itself.
+        Assert.True(context.TryWriteUInt64(slotAddress, 0));
+        context[CpuRegister.Rdi] = slotAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+
+        // The frame is reused: the slot now holds a different, real handle.
+        context[CpuRegister.Rdi] = realMutexAddress;
+        context[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexInit(context));
+        Assert.True(context.TryReadUInt64(realMutexAddress, out var realHandle));
+        Assert.NotEqual(0ul, realHandle);
+        Assert.True(context.TryWriteUInt64(slotAddress, realHandle));
+
+        // Locking by handle and releasing through the slot must hit one mutex.
+        context[CpuRegister.Rdi] = realHandle;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+
+        context[CpuRegister.Rdi] = slotAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+
+        // Released for real: an unrelated acquisition now succeeds.
+        context[CpuRegister.Rdi] = realHandle;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexTrylock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+    }
+
+    [Fact]
+    public void ReusedHandleSlot_RecursiveMutexUnwindsThroughEitherAlias()
+    {
+        const ulong memoryBase = 0x1_0011_0000;
+        const ulong attrAddress = memoryBase + 0x100;
+        const ulong slotAddress = memoryBase + 0x200;
+        const ulong realMutexAddress = memoryBase + 0x300;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        Assert.True(context.TryWriteUInt64(slotAddress, 0));
+        context[CpuRegister.Rdi] = slotAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+
+        context[CpuRegister.Rdi] = attrAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrInit(context));
+        context[CpuRegister.Rsi] = 2; // Recursive.
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrSettype(context));
+
+        context[CpuRegister.Rdi] = realMutexAddress;
+        context[CpuRegister.Rsi] = attrAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexInit(context));
+        Assert.True(context.TryReadUInt64(realMutexAddress, out var realHandle));
+        Assert.True(context.TryWriteUInt64(slotAddress, realHandle));
+
+        context[CpuRegister.Rdi] = realHandle;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+
+        context[CpuRegister.Rdi] = slotAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+
+        context[CpuRegister.Rdi] = realHandle;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexTrylock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+    }
+
     private sealed class AllocatingCpuMemory : ICpuMemory, IGuestMemoryAllocator
     {
         private readonly ulong _baseAddress;
