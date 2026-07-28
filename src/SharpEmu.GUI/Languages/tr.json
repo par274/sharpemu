@@ -189,5 +189,17 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Topluluğa katılın, destek alın ve geliştirmeyi takip edin.",
   "About.GithubButton": "GitHub'da katkıda bulun!",
-  "About.DiscordButton": "Discord'umuza katıl!"
+  "About.DiscordButton": "Discord'umuza katıl!",
+  "Options.Section.Rendering": "GÖRÜNTÜ İŞLEME",
+  "Options.RenderResolution.Label": "Dahili çözünürlük",
+  "Options.RenderResolution.Desc": "Ekran dışı hedefleri doğal çözünürlüğün altında işle ve sunum sırasında ölçeklendir. Daha düşük değerler GPU payı karşılığında görüntü kalitesini azaltır; bir sonraki başlatmada etkili olur.",
+  "Options.RenderResolution.Native": "%100 (doğal)",
+  "Options.WindowMode.Windowed": "Pencereli",
+  "Options.WindowMode.Borderless": "Kenarlıksız",
+  "Options.WindowMode.Exclusive": "Özel",
+  "Options.Scaling.Fit": "Sığdır",
+  "Options.Scaling.Cover": "Kapla",
+  "Options.Scaling.Stretch": "Uzat",
+  "Options.Scaling.Integer": "Tam sayı",
+  "Options.Hdr.Auto": "Otomatik"
 }

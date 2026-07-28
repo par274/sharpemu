@@ -42,6 +42,45 @@ public partial class MainWindow : Window
     private static readonly IBrush WarningLineBrush = new SolidColorBrush(Color.Parse("#E8B341"));
     private static readonly IBrush ErrorLineBrush = new SolidColorBrush(Color.Parse("#F2777C"));
     private static readonly IBrush SuccessLineBrush = new SolidColorBrush(Color.Parse("#63D489"));
+    private readonly LocalizedChoice[] _cpuEngineChoices =
+    [
+        LocalizedChoice.FromKey("Native", "Options.CpuEngine.Native"),
+    ];
+    private readonly LocalizedChoice[] _logLevelChoices =
+    [
+        LocalizedChoice.FromKey("Trace", "Options.LogLevel.Trace"),
+        LocalizedChoice.FromKey("Debug", "Options.LogLevel.Debug"),
+        LocalizedChoice.FromKey("Info", "Options.LogLevel.Info"),
+        LocalizedChoice.FromKey("Warning", "Options.LogLevel.Warning"),
+        LocalizedChoice.FromKey("Error", "Options.LogLevel.Error"),
+        LocalizedChoice.FromKey("Critical", "Options.LogLevel.Critical"),
+    ];
+    private readonly LocalizedChoice[] _renderResolutionChoices =
+    [
+        LocalizedChoice.FromKey("1.0", "Options.RenderResolution.Native"),
+        LocalizedChoice.Literal("0.75", "75%"),
+        LocalizedChoice.Literal("0.5", "50%"),
+        LocalizedChoice.Literal("0.25", "25%"),
+    ];
+    private readonly LocalizedChoice[] _windowModeChoices =
+    [
+        LocalizedChoice.FromKey("Windowed", "Options.WindowMode.Windowed"),
+        LocalizedChoice.FromKey("Borderless", "Options.WindowMode.Borderless"),
+        LocalizedChoice.FromKey("Exclusive", "Options.WindowMode.Exclusive"),
+    ];
+    private readonly LocalizedChoice[] _scalingModeChoices =
+    [
+        LocalizedChoice.FromKey("Fit", "Options.Scaling.Fit"),
+        LocalizedChoice.FromKey("Cover", "Options.Scaling.Cover"),
+        LocalizedChoice.FromKey("Stretch", "Options.Scaling.Stretch"),
+        LocalizedChoice.FromKey("Integer", "Options.Scaling.Integer"),
+    ];
+    private readonly LocalizedChoice[] _hdrModeChoices =
+    [
+        LocalizedChoice.FromKey("Auto", "Options.Hdr.Auto"),
+        LocalizedChoice.FromKey("On", "Common.On"),
+        LocalizedChoice.FromKey("Off", "Common.Off"),
+    ];
     private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<GameEntry> _visibleGames = new();
     private readonly GameLibraryWatcher _libraryWatcher = new();
@@ -116,6 +155,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        InitializeLocalizedChoiceBoxes();
 
         try
         {
@@ -203,9 +243,9 @@ public partial class MainWindow : Window
         TraceImportsBox.ValueChanged += (_, _) => _settings.ImportTraceLimit = (int)(TraceImportsBox.Value ?? 0);
         RenderResolutionBox.SelectionChanged += (_, _) =>
         {
-            if (RenderResolutionBox.SelectedItem is ComboBoxItem { Tag: string tag } &&
+            if (RenderResolutionBox.SelectedItem is LocalizedChoice { Value: var value } &&
                 double.TryParse(
-                    tag,
+                    value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture,
                     out var scale))
@@ -619,135 +659,15 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Re-applies every UI string from the current language, so switching
-    /// languages in Options takes effect immediately without reopening the
-    /// window.
+    /// Recomputes localized strings that also depend on runtime state.
+    /// Static labels update automatically through XAML bindings.
     /// </summary>
     private void ApplyLocalization()
     {
-        var loc = Localization.Instance;
-
-        LibraryTabButton.Content = loc.Get("Page.Library");
-        OptionsTabButton.Content = loc.Get("Page.Options");
-
-        SearchBox.PlaceholderText = loc.Get("Library.SearchWatermark");
-        AddFolderButton.Content = loc.Get("Library.AddFolder");
-        OpenFileButton.Content = loc.Get("Library.OpenFile");
-
-        CtxLaunch.Header = loc.Get("Library.Context.Launch");
-        CtxOpenFolder.Header = loc.Get("Library.Context.OpenFolder");
-        CtxCopyPath.Header = loc.Get("Library.Context.CopyPath");
-        CtxCopyTitleId.Header = loc.Get("Library.Context.CopyTitleId");
-        CtxGameSettings.Header = loc.Get("Library.Context.GameSettings");
-        CtxRemove.Header = loc.Get("Library.Context.Remove");
-
-        EmptyAddFolderButton.Content = loc.Get("Library.Empty.AddFolder");
-        LoadingStateText.Text = loc.Get("Library.Loading");
-
-        GeneralTabItem.Header = loc.Get("Options.General");
-        EnvTabItem.Header = loc.Get("Options.Env.Tab");
-        EnvSectionTitle.Text = loc.Get("Options.Section.Environment");
-        EnvDesc.Text = loc.Get("Options.Env.Desc");
-        EnvBthidRow.Description = loc.Get("Options.Env.Bthid.Desc");
-        EnvLoopGuardRow.Description = loc.Get("Options.Env.LoopGuard.Desc");
-        EnvWritableApp0Row.Description = loc.Get("Options.Env.WritableApp0.Desc");
-        EnvVkValidationRow.Description = loc.Get("Options.Env.VkValidation.Desc");
-        EnvDumpSpirvRow.Description = loc.Get("Options.Env.DumpSpirv.Desc");
-        EnvLogDirectMemoryRow.Description = loc.Get("Options.Env.LogDirectMemory.Desc");
-        EnvLogIoRow.Description = loc.Get("Options.Env.LogIo.Desc");
-        EnvLogNpRow.Description = loc.Get("Options.Env.LogNp.Desc");
-        EnvGuestImageCpuSyncRow.Description = loc.Get("Options.Env.GuestImageCpuSync.Desc");
-        EmulationSectionTitle.Text = loc.Get("Options.Section.Emulation");
-        LoggingSectionTitle.Text = loc.Get("Options.Section.Logging");
-        LauncherSectionTitle.Text = loc.Get("Options.Section.Launcher");
-
-        CpuEngineRow.Label = loc.Get("Options.CpuEngine.Label");
-        CpuEngineRow.Description = loc.Get("Options.CpuEngine.Desc");
-        CpuEngineNativeItem.Content = loc.Get("Options.CpuEngine.Native");
-
-        StrictRow.Label = loc.Get("Options.Strict.Label");
-        StrictRow.Description = loc.Get("Options.Strict.Desc");
-
-        LogLevelRow.Label = loc.Get("Options.LogLevel.Label");
-        LogLevelRow.Description = loc.Get("Options.LogLevel.Desc");
-        LogLevelTraceItem.Content = loc.Get("Options.LogLevel.Trace");
-        LogLevelDebugItem.Content = loc.Get("Options.LogLevel.Debug");
-        LogLevelInfoItem.Content = loc.Get("Options.LogLevel.Info");
-        LogLevelWarningItem.Content = loc.Get("Options.LogLevel.Warning");
-        LogLevelErrorItem.Content = loc.Get("Options.LogLevel.Error");
-        LogLevelCriticalItem.Content = loc.Get("Options.LogLevel.Critical");
-
-        TraceImportsRow.Label = loc.Get("Options.TraceImports.Label");
-        TraceImportsRow.Description = loc.Get("Options.TraceImports.Desc");
-
-        LogToFileRow.Label = loc.Get("Options.LogToFile.Label");
-        LogToFileRow.Description = loc.Get("Options.LogToFile.Desc");
-
-        LogFilePathRow.Label = loc.Get("Options.LogFilePath.Label");
-        SelectLogFilePathButton.Content = loc.Get("Options.LogFilePath.Select");
+        RefreshLocalizedChoices();
         UpdateLogFilePathText();
-
-        OverrideLogFileRow.Label = loc.Get("Options.OverrideLogFile.Label");
-        OverrideLogFileRow.Description = loc.Get("Options.OverrideLogFile.Desc");
-
-        LanguageRow.Label = loc.Get("Options.Language.Label");
-        LanguageRow.Description = loc.Get("Options.Language.Desc");
-
-        TitleMusicRow.Label = loc.Get("Options.TitleMusic.Label");
-        TitleMusicRow.Description = loc.Get("Options.TitleMusic.Desc");
-
-        DiscordRow.Label = loc.Get("Options.Discord.Label");
-        DiscordRow.Description = loc.Get("Options.Discord.Desc");
-        AutoUpdateRow.Label = loc.Get("Updater.Auto.Label");
-        AutoUpdateRow.Description = loc.Get("Updater.Auto.Desc");
-
-        GraphicsTabItem.Header = loc.Get("Options.Graphics");
-        DisplaySectionTitle.Text = loc.Get("Options.Section.Display");
-        WindowModeRow.Label = loc.Get("Options.WindowMode.Label");
-        WindowModeRow.Description = loc.Get("Options.WindowMode.Desc");
-        ResolutionRow.Label = loc.Get("Options.Resolution.Label");
-        ResolutionRow.Description = loc.Get("Options.Resolution.Desc");
-        DisplayRow.Label = loc.Get("Options.Display.Label");
-        DisplayRow.Description = loc.Get("Options.Display.Desc");
-        RefreshRateRow.Label = loc.Get("Options.RefreshRate.Label");
-        RefreshRateRow.Description = loc.Get("Options.RefreshRate.Desc");
-        ScalingRow.Label = loc.Get("Options.Scaling.Label");
-        ScalingRow.Description = loc.Get("Options.Scaling.Desc");
-        VSyncRow.Label = loc.Get("Options.VSync.Label");
-        VSyncRow.Description = loc.Get("Options.VSync.Desc");
-        HdrRow.Label = loc.Get("Options.Hdr.Label");
-        HdrRow.Description = loc.Get("Options.Hdr.Desc");
         RefreshHostRefreshRates(_settings.RefreshRate);
-
-        foreach (var toggle in new[] { StrictToggle, LogToFileToggle, OverrideLogFileToggle, TitleMusicToggle, DiscordToggle, AutoUpdateToggle, VSyncToggle })
-        {
-            toggle.OnContent = loc.Get("Common.On");
-            toggle.OffContent = loc.Get("Common.Off");
-        }
-
-        ConsoleSectionTitle.Text = loc.Get("Console.Title");
-        ConsoleSearchBox.PlaceholderText = loc.Get("Console.SearchWatermark");
-        AutoScrollCheck.Content = loc.Get("Console.AutoScroll");
-        DetachConsoleButton.Content = loc.Get("Console.Split");
-        CopyLogButton.Content = loc.Get("Console.Copy");
-        ClearLogButton.Content = loc.Get("Console.Clear");
-
-        ConsoleToggle.Content = loc.Get("Launch.Console");
-        LaunchButton.Content = loc.Get("Launch.Launch");
-        StopButton.Content = loc.Get("Launch.Stop");
-
-        AboutSectionTitle.Text = loc.Get("Options.About");
-        GithubLabel.Text = loc.Get("About.Github.Label");
-        GithubDesc.Text = loc.Get("About.Github.Desc");
-        DiscordServerLabel.Text = loc.Get("About.Discord.Label");
-        DiscordServerDesc.Text = loc.Get("About.Discord.Desc");
-        GithubButton.Content = loc.Get("About.GithubButton");
-        DiscordButton.Content = loc.Get("About.DiscordButton");
-        UpdateLabel.Text = loc.Get("Updater.Label");
-        LatestCommitLabel.Text = loc.Get("About.Github.LatestCommitLabel");
-        LatestCommitDescription.Text = loc.Get("About.Github.LatestCommitDescription");
         RefreshUpdateText();
-
         UpdateEmptyStateTexts();
         UpdateSelectedGameTexts();
     }
@@ -907,8 +827,37 @@ public partial class MainWindow : Window
 
     // ---- Settings ----
 
+    private void InitializeLocalizedChoiceBoxes()
+    {
+        CpuEngineBox.ItemsSource = _cpuEngineChoices;
+        LogLevelBox.ItemsSource = _logLevelChoices;
+        RenderResolutionBox.ItemsSource = _renderResolutionChoices;
+        WindowModeBox.ItemsSource = _windowModeChoices;
+        ScalingModeBox.ItemsSource = _scalingModeChoices;
+        HdrModeBox.ItemsSource = _hdrModeChoices;
+    }
+
+    private void RefreshLocalizedChoices()
+    {
+        RefreshChoices(_cpuEngineChoices);
+        RefreshChoices(_logLevelChoices);
+        RefreshChoices(_renderResolutionChoices);
+        RefreshChoices(_windowModeChoices);
+        RefreshChoices(_scalingModeChoices);
+        RefreshChoices(_hdrModeChoices);
+    }
+
+    private static void RefreshChoices(IEnumerable<LocalizedChoice> choices)
+    {
+        foreach (var choice in choices)
+        {
+            choice.Refresh(Localization.Instance);
+        }
+    }
+
     private void ApplySettingsToControls()
     {
+        CpuEngineBox.SelectedIndex = 0;
         LogLevelBox.SelectedIndex = _settings.LogLevel.ToLowerInvariant() switch
         {
             "trace" => 0,
@@ -954,7 +903,7 @@ public partial class MainWindow : Window
     private static string SelectedComboText(ComboBox comboBox, string fallback) =>
         comboBox.SelectedItem switch
         {
-            ComboBoxItem item => item.Content?.ToString() ?? fallback,
+            LocalizedChoice { Value: var value } => value,
             string value => value,
             _ => fallback,
         };
