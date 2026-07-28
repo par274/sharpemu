@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Collections;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -164,6 +165,22 @@ public partial class MainWindow : Window
         };
 
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
+        TitleBar.DoubleTapped += OnTitleBarDoubleTapped;
+        MinimizeButton.Click += (_, _) => WindowState = WindowState.Minimized;
+        MaximizeButton.Click += (_, _) => ToggleMaximized();
+        CloseButton.Click += (_, _) => Close();
+        Opened += (_, _) =>
+        {
+            // Some compositors ignore the initial maximized state while a
+            // frameless native window is still being created.
+            if (WindowState == WindowState.Normal)
+            {
+                WindowState = WindowState.Maximized;
+            }
+
+            UpdateWindowChromeState();
+        };
+        UpdateWindowChromeState();
         GameList.SelectionChanged += (_, _) => UpdateSelectedGame();
         GameList.DoubleTapped += (_, _) => LaunchSelected();
         SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
@@ -813,10 +830,79 @@ public partial class MainWindow : Window
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        if (e.Source is Visual source &&
+            source.FindAncestorOfType<Button>(includeSelf: true) is null &&
+            e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
         {
             BeginMoveDrag(e);
         }
+    }
+
+    private void OnTitleBarDoubleTapped(object? sender, TappedEventArgs e)
+    {
+        if (e.Source is Visual source &&
+            source.FindAncestorOfType<Button>(includeSelf: true) is null)
+        {
+            ToggleMaximized();
+            e.Handled = true;
+        }
+    }
+
+    private void ToggleMaximized()
+    {
+        WindowState = WindowState == WindowState.Maximized
+            ? WindowState.Normal
+            : WindowState.Maximized;
+    }
+
+    private void UpdateMaximizeButton()
+    {
+        if (MaximizeGlyph is not { } glyph || MaximizeButton is not { } button)
+        {
+            return;
+        }
+
+        var isMaximized = WindowState == WindowState.Maximized;
+        glyph.Text = isMaximized ? "❐" : "□";
+        ToolTip.SetTip(button, isMaximized ? "Restore" : "Maximize");
+        AutomationProperties.SetName(
+            button,
+            isMaximized ? "Restore window" : "Maximize window");
+    }
+
+    private void UpdateWindowChromeState()
+    {
+        UpdateMaximizeButton();
+        var isFullscreen = WindowState == WindowState.FullScreen;
+
+        if (TitleBar is { } titleBar)
+        {
+            titleBar.IsVisible = !isFullscreen;
+        }
+
+        if (StatusBar is { } statusBar)
+        {
+            statusBar.IsVisible = !isFullscreen;
+        }
+
+        if (ResizeHandles is { } handles)
+        {
+            handles.IsVisible = CanResize && WindowState == WindowState.Normal;
+        }
+    }
+
+    private void OnResizeHandlePointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (WindowState != WindowState.Normal ||
+            !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed ||
+            sender is not Control { Tag: string edgeName } ||
+            !Enum.TryParse<WindowEdge>(edgeName, out var edge))
+        {
+            return;
+        }
+
+        BeginResizeDrag(edge, e);
+        e.Handled = true;
     }
 
     // ---- Settings ----
@@ -1831,6 +1917,8 @@ public partial class MainWindow : Window
         base.OnPropertyChanged(change);
         if (change.Property == WindowStateProperty)
         {
+            UpdateWindowChromeState();
+
             // The XAML WindowState="Maximized" assignment raises this change
             // during InitializeComponent, before named controls are wired up.
             if (WindowState == WindowState.Minimized)

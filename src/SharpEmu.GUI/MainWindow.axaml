@@ -14,9 +14,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         WindowState="Maximized"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource BgBrush}"
-        ExtendClientAreaToDecorationsHint="True"
-        WindowDecorations="Full"
-        ExtendClientAreaTitleBarHeightHint="44"
+        WindowDecorations="None"
         Icon="avares://SharpEmu.GUI/Assets/SharpEmu.ico"
         KeyDown="OnKeyDown">
 
@@ -46,7 +44,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     <!-- Title bar; hidden in fullscreen (F11) along with the status bar, so
          the game gets the whole screen. -->
-    <Grid x:Name="TitleBar" Grid.Row="0" Height="44" Background="{StaticResource ChromeBrush}">
+    <Grid x:Name="TitleBar"
+          Grid.Row="0"
+          Height="44"
+          ColumnDefinitions="*,Auto"
+          Background="{StaticResource ChromeBrush}">
       <StackPanel Orientation="Horizontal" Spacing="10" Margin="16,0" VerticalAlignment="Center">
         <Image Source="avares://SharpEmu.GUI/Assets/SharpEmu.ico" Width="20" Height="20"
                RenderOptions.BitmapInterpolationMode="HighQuality" />
@@ -54,6 +56,29 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <Border Classes="pill">
           <TextBlock x:Name="VersionText" Text="v0.0.1" FontSize="11" Foreground="{StaticResource MutedBrush}" />
         </Border>
+      </StackPanel>
+      <StackPanel x:Name="WindowChromeButtons"
+                  Grid.Column="1"
+                  Orientation="Horizontal"
+                  HorizontalAlignment="Right">
+        <Button x:Name="MinimizeButton"
+                Classes="windowChrome"
+                ToolTip.Tip="Minimize"
+                AutomationProperties.Name="Minimize window">
+          <TextBlock Text="—" FontSize="16" />
+        </Button>
+        <Button x:Name="MaximizeButton"
+                Classes="windowChrome"
+                ToolTip.Tip="Restore"
+                AutomationProperties.Name="Restore window">
+          <TextBlock x:Name="MaximizeGlyph" Text="❐" FontSize="13" />
+        </Button>
+        <Button x:Name="CloseButton"
+                Classes="windowChrome windowClose"
+                ToolTip.Tip="Close"
+                AutomationProperties.Name="Close window">
+          <TextBlock Text="×" FontSize="20" />
+        </Button>
       </StackPanel>
     </Grid>
 
@@ -662,5 +687,73 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <TextBlock x:Name="StatusBarRight" Grid.Column="1" Text="" FontSize="11"
                  Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0" />
     </Grid>
+
+    <!-- Portable resize hit targets for the frameless desktop window. They
+         are disabled while maximized or fullscreen in code-behind. -->
+    <Panel x:Name="ResizeHandles"
+           Grid.RowSpan="3"
+           ZIndex="1000"
+           IsVisible="False">
+      <Border Tag="North"
+              Height="6"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+      <Border Tag="South"
+              Height="6"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+      <Border Tag="West"
+              Width="6"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Stretch"
+              Background="#01000000"
+              Cursor="LeftSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+      <Border Tag="East"
+              Width="6"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Stretch"
+              Background="#01000000"
+              Cursor="RightSide"
+              PointerPressed="OnResizeHandlePointerPressed" />
+      <Border Tag="NorthWest"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopLeftCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+      <Border Tag="NorthEast"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Top"
+              Background="#01000000"
+              Cursor="TopRightCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+      <Border Tag="SouthWest"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomLeftCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+      <Border Tag="SouthEast"
+              Width="12"
+              Height="12"
+              HorizontalAlignment="Right"
+              VerticalAlignment="Bottom"
+              Background="#01000000"
+              Cursor="BottomRightCorner"
+              PointerPressed="OnResizeHandlePointerPressed" />
+    </Panel>
   </Grid>
 </Window>
