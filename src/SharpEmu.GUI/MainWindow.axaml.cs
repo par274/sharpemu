@@ -41,15 +41,9 @@ public partial class MainWindow : Window
     private static readonly IBrush WarningLineBrush = new SolidColorBrush(Color.Parse("#E8B341"));
     private static readonly IBrush ErrorLineBrush = new SolidColorBrush(Color.Parse("#F2777C"));
     private static readonly IBrush SuccessLineBrush = new SolidColorBrush(Color.Parse("#63D489"));
-    private static readonly StringComparer FilePathComparer = OperatingSystem.IsWindows()
-        ? StringComparer.OrdinalIgnoreCase
-        : StringComparer.Ordinal;
-    private static readonly StringComparison FilePathComparison = OperatingSystem.IsWindows()
-        ? StringComparison.OrdinalIgnoreCase
-        : StringComparison.Ordinal;
-
     private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<GameEntry> _visibleGames = new();
+    private readonly GameLibraryWatcher _libraryWatcher = new();
     private readonly AvaloniaList<LogLine> _consoleLines = new();
     private readonly List<LogLine> _allConsoleLines = new();
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
@@ -85,8 +79,10 @@ public partial class MainWindow : Window
     private string? _runningGameName;
     private string? _runningGameTitleId;
     private long _runningSinceUnixSeconds;
+    private int _libraryScanGeneration;
     private int _detailLoadGeneration;
     private int _backdropGeneration;
+    private bool _isClosing;
 
     // Bundled key art shown whenever no game-specific backdrop applies; the
     // plain window color remains the fallback when the asset fails to load.
@@ -133,6 +129,7 @@ public partial class MainWindow : Window
         }
 
         GameList.ItemsSource = _visibleGames;
+        _libraryWatcher.RefreshRequested += OnLibraryRefreshRequested;
         ConsoleList.ItemsSource = _consoleLines;
         _consoleMirror = GuiConsoleMirror.Install((line, isError) =>
             _pendingLines.Enqueue((line, isError)));
@@ -173,7 +170,6 @@ public partial class MainWindow : Window
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
         AddFolderButton.Click += async (_, _) => await AddFolderAsync();
         EmptyAddFolderButton.Click += async (_, _) => await AddFolderAsync();
-        RescanButton.Click += async (_, _) => await RescanLibraryAsync();
         OpenFileButton.Click += async (_, _) => await OpenFileAsync();
         LaunchButton.Click += (_, _) => LaunchSelected();
         ClearLogButton.Click += (_, _) => { _consoleLines.Clear(); _allConsoleLines.Clear(); };
@@ -617,7 +613,6 @@ public partial class MainWindow : Window
 
         SearchBox.PlaceholderText = loc.Get("Library.SearchWatermark");
         AddFolderButton.Content = loc.Get("Library.AddFolder");
-        RescanButton.Content = loc.Get("Library.Rescan");
         OpenFileButton.Content = loc.Get("Library.OpenFile");
 
         CtxLaunch.Header = loc.Get("Library.Context.Launch");
@@ -796,6 +791,10 @@ public partial class MainWindow : Window
 
     private void OnWindowClosing()
     {
+        _isClosing = true;
+        Interlocked.Increment(ref _libraryScanGeneration);
+        Interlocked.Increment(ref _detailLoadGeneration);
+        _libraryWatcher.Dispose();
         _settings.Save();
         _consoleFlushTimer.Stop();
         _libraryBlurTimer.Stop();
@@ -1210,7 +1209,7 @@ public partial class MainWindow : Window
         }
 
         var changed = false;
-        if (!_settings.GameFolders.Contains(path, FilePathComparer))
+        if (!_settings.GameFolders.Contains(path, GameLibraryPath.Comparer))
         {
             _settings.GameFolders.Add(path);
             changed = true;
@@ -1220,7 +1219,7 @@ public partial class MainWindow : Window
         // games beneath it that were removed from the library earlier.
         var prefix = Path.TrimEndingDirectorySeparator(path) + Path.DirectorySeparatorChar;
         changed |= _settings.ExcludedGames.RemoveAll(excluded =>
-            excluded.StartsWith(prefix, FilePathComparison)) > 0;
+            excluded.StartsWith(prefix, GameLibraryPath.Comparison)) > 0;
 
         if (changed)
         {
@@ -1230,25 +1229,72 @@ public partial class MainWindow : Window
         await RescanLibraryAsync();
     }
 
-    private async Task RescanLibraryAsync()
+    private void OnLibraryRefreshRequested(object? sender, EventArgs args)
     {
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                if (!_isClosing)
+                {
+                    _ = RescanLibraryFromWatcherAsync();
+                }
+            },
+            DispatcherPriority.Background);
+    }
+
+    private async Task RescanLibraryFromWatcherAsync()
+    {
+        try
+        {
+            await RescanLibraryAsync(showProgress: false);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(
+                $"[GUI][WARN] Automatic library refresh failed: {exception.Message}");
+        }
+    }
+
+    private async Task RescanLibraryAsync(bool showProgress = true)
+    {
+        Dispatcher.UIThread.VerifyAccess();
+
+        var scanGeneration = Interlocked.Increment(ref _libraryScanGeneration);
         var folders = _settings.GameFolders.ToArray();
-        var excluded = new HashSet<string>(_settings.ExcludedGames, FilePathComparer);
-        StatusBarRight.Text = Localization.Instance.Get("Status.ScanningLibrary");
-        EmptyState.IsVisible = false;
-        LoadingState.IsVisible = true;
+        var excluded = new HashSet<string>(_settings.ExcludedGames, GameLibraryPath.Comparer);
+        _libraryWatcher.Watch(folders);
+        var showLoadingState = showProgress && _allGames.Count == 0;
+        if (showProgress)
+        {
+            StatusBarRight.Text = Localization.Instance.Get("Status.ScanningLibrary");
+        }
+
+        if (showLoadingState)
+        {
+            EmptyState.IsVisible = false;
+            LoadingState.IsVisible = true;
+        }
 
         var games = await Task.Run(() => ScanFolders(folders, excluded));
+        if (_isClosing || scanGeneration != Volatile.Read(ref _libraryScanGeneration))
+        {
+            return;
+        }
 
+        Dispatcher.UIThread.VerifyAccess();
+        var reconciliation = GameLibraryReconciler.Reconcile(_allGames, games);
         _allGames.Clear();
-        _allGames.AddRange(games);
-        RefreshVisibleGames();
+        _allGames.AddRange(reconciliation.Games);
+        RefreshVisibleGames(reconciliation.BackgroundsChanged);
         LoadingState.IsVisible = false;
-        LoadGameDetailsInBackground(games);
+        LoadGameDetailsInBackground(reconciliation.CoversToLoad, reconciliation.Games);
         UpdateDiscordPresence();
-        StatusBarRight.Text = folders.Length == 0
-            ? Localization.Instance.Get("Status.AddFolderPrompt")
-            : Localization.Instance.Format("Status.LibraryScanned", games.Count, folders.Length);
+        if (showProgress)
+        {
+            StatusBarRight.Text = folders.Length == 0
+                ? Localization.Instance.Get("Status.AddFolderPrompt")
+                : Localization.Instance.Format("Status.LibraryScanned", games.Count, folders.Length);
+        }
     }
 
     /// <summary>
@@ -1256,44 +1302,57 @@ public partial class MainWindow : Window
     /// game's install folder size — posting results back as they become
     /// ready. A newer scan invalidates older loads.
     /// </summary>
-    private void LoadGameDetailsInBackground(IReadOnlyList<GameEntry> games)
+    private void LoadGameDetailsInBackground(
+        IReadOnlyList<GameEntry> coversToLoad,
+        IReadOnlyList<GameEntry> gamesToMeasure)
     {
         var generation = ++_detailLoadGeneration;
         _ = Task.Run(() =>
         {
             // Covers first: they are cheap and the most visible, so the grid
             // fills with art before the (potentially slow) size pass runs.
-            foreach (var game in games)
+            foreach (var game in coversToLoad)
             {
                 if (generation != _detailLoadGeneration)
                 {
                     return;
                 }
 
-                if (game.CoverPath is null)
+                var requestedCoverPath = game.CoverPath;
+                if (requestedCoverPath is null)
                 {
                     continue;
                 }
 
                 try
                 {
-                    using var stream = File.OpenRead(game.CoverPath);
+                    using var stream = File.OpenRead(requestedCoverPath);
                     var bitmap = Bitmap.DecodeToWidth(stream, 312);
                     Dispatcher.UIThread.Post(() =>
                     {
-                        if (generation == _detailLoadGeneration)
+                        if (generation == _detailLoadGeneration
+                            && _allGames.Contains(game)
+                            && string.Equals(
+                                game.CoverPath,
+                                requestedCoverPath,
+                                StringComparison.Ordinal))
                         {
                             game.Cover = bitmap;
                         }
+                        else
+                        {
+                            bitmap.Dispose();
+                        }
                     });
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
-                    // A missing or undecodable image keeps the placeholder.
+                    Console.Error.WriteLine(
+                        $"[GUI][WARN] Could not load cover '{requestedCoverPath}': {exception.Message}");
                 }
             }
 
-            foreach (var game in games)
+            foreach (var game in gamesToMeasure)
             {
                 if (generation != _detailLoadGeneration)
                 {
@@ -1305,7 +1364,7 @@ public partial class MainWindow : Window
                 {
                     Dispatcher.UIThread.Post(() =>
                     {
-                        if (generation == _detailLoadGeneration)
+                        if (generation == _detailLoadGeneration && _allGames.Contains(game))
                         {
                             game.SizeBytes = size;
                         }
@@ -1340,9 +1399,10 @@ public partial class MainWindow : Window
                 total += file.Length;
             }
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            // Fall back to whatever was accumulated so far.
+            Console.Error.WriteLine(
+                $"[GUI][WARN] Could not measure game folder '{directory}': {exception.Message}");
         }
 
         return total;
@@ -1351,7 +1411,7 @@ public partial class MainWindow : Window
     private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
     {
         var games = new List<GameEntry>();
-        var seen = new HashSet<string>(FilePathComparer);
+        var seen = new HashSet<string>(GameLibraryPath.Comparer);
         var enumeration = new EnumerationOptions
         {
             IgnoreInaccessible = true,
@@ -1381,8 +1441,10 @@ public partial class MainWindow : Window
                     {
                         size = new FileInfo(fullPath).Length;
                     }
-                    catch (IOException)
+                    catch (IOException exception)
                     {
+                        Console.Error.WriteLine(
+                            $"[GUI][WARN] Could not inspect executable '{fullPath}': {exception.Message}");
                     }
 
                     var (title, titleId, version) = TryReadParamJson(fullPath);
@@ -1391,9 +1453,10 @@ public partial class MainWindow : Window
                         FindCoverFor(fullPath), FindBackgroundFor(fullPath)));
                 }
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                // Skip folders that fail to enumerate.
+                Console.Error.WriteLine(
+                    $"[GUI][WARN] Could not scan game folder '{folder}': {exception.Message}");
             }
         }
 
@@ -1634,24 +1697,26 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!_settings.ExcludedGames.Contains(game.Path, FilePathComparer))
+        if (!_settings.ExcludedGames.Contains(game.Path, GameLibraryPath.Comparer))
         {
             _settings.ExcludedGames.Add(game.Path);
             _settings.Save();
         }
 
-        _allGames.RemoveAll(g => string.Equals(g.Path, game.Path, FilePathComparison));
+        _allGames.RemoveAll(g =>
+            string.Equals(g.Path, game.Path, GameLibraryPath.Comparison));
         GameList.SelectedItem = null;
         RefreshVisibleGames();
         StatusBarRight.Text = Localization.Instance.Format("Status.RemovedFromLibrary", game.Name);
     }
 
-    private void RefreshVisibleGames()
+    private void RefreshVisibleGames(IReadOnlySet<GameEntry>? backgroundsChanged = null)
     {
         var query = SearchBox.Text?.Trim() ?? string.Empty;
-        var selectedPath = (GameList.SelectedItem as GameEntry)?.Path;
+        var selectedBefore = GameList.SelectedItem as GameEntry;
+        var selectedPath = selectedBefore?.Path;
+        var desired = new List<GameEntry>(_allGames.Count);
 
-        _visibleGames.Clear();
         foreach (var game in _allGames)
         {
             if (query.Length == 0 ||
@@ -1659,21 +1724,37 @@ public partial class MainWindow : Window
                 game.Path.Contains(query, StringComparison.OrdinalIgnoreCase) ||
                 (game.TitleId?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false))
             {
-                _visibleGames.Add(game);
+                desired.Add(game);
             }
         }
 
-        if (selectedPath is not null &&
-            _visibleGames.FirstOrDefault(g => g.Path.Equals(selectedPath, FilePathComparison))
-                is { } reselected)
+        GameLibraryReconciler.ReconcileVisibleGames(_visibleGames, desired);
+
+        var selectedAfter = selectedPath is null
+            ? null
+            : _visibleGames.FirstOrDefault(game =>
+                game.Path.Equals(selectedPath, GameLibraryPath.Comparison));
+        if (!ReferenceEquals(GameList.SelectedItem, selectedAfter))
         {
-            GameList.SelectedItem = reselected;
+            GameList.SelectedItem = selectedAfter;
         }
 
         EmptyState.IsVisible = _visibleGames.Count == 0;
         UpdateEmptyStateTexts();
 
-        UpdateSelectedGame();
+        if (!ReferenceEquals(selectedBefore, selectedAfter))
+        {
+            UpdateSelectedGame();
+        }
+        else
+        {
+            UpdateSelectedGameTexts();
+            UpdateRunButtons();
+            if (selectedAfter is not null && backgroundsChanged?.Contains(selectedAfter) == true)
+            {
+                _ = UpdateBackdropAsync(selectedAfter);
+            }
+        }
     }
 
     /// <summary>
@@ -1895,7 +1976,8 @@ public partial class MainWindow : Window
         }
 
         var resolvedTitleId = string.IsNullOrWhiteSpace(titleId)
-            ? _allGames.FirstOrDefault(game => game.Path.Equals(ebootPath, FilePathComparison))?.TitleId
+            ? _allGames.FirstOrDefault(game =>
+                game.Path.Equals(ebootPath, GameLibraryPath.Comparison))?.TitleId
             : titleId;
         var effective = EffectiveLaunchSettings.Resolve(_settings, PerGameSettings.Load(resolvedTitleId));
 

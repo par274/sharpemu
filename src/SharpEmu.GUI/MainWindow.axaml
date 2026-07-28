@@ -80,7 +80,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     VerticalAlignment="Center">
           <TextBox x:Name="SearchBox" PlaceholderText="Search library…" Width="240" VerticalAlignment="Center" />
           <Button x:Name="AddFolderButton" Classes="ghost" Content="＋ Add folder" VerticalAlignment="Center" />
-          <Button x:Name="RescanButton" Classes="ghost" Content="⟳ Rescan" VerticalAlignment="Center" />
           <Button x:Name="OpenFileButton" Classes="ghost" Content="Open file…" VerticalAlignment="Center" />
         </StackPanel>
       </Grid>
