@@ -161,6 +161,7 @@
   "Updater.Status.Failed": "Güncellemeler denetlenemedi.",
   "Updater.Status.ChecksumFailed": "İndirilen güncelleme SHA-256 doğrulamasını geçemedi.",
   "Updater.Status.Unsupported": "Otomatik güncelleme Windows, Linux veya macOS x64 build'i gerektirir.",
+  "Updater.Status.RateLimited": "GitHub güncelleme denetimlerini geçici olarak sınırlıyor. Daha sonra tekrar deneyin.",
   "Updater.Dialog.Title": "SharpEmu güncellemesi",
   "Updater.Dialog.Heading": "SharpEmu {0} hazır",
   "Updater.Dialog.Description": "{0} build'i kullanılabilir. Şimdi indirip yeniden başlatmak ister misiniz?",
@@ -169,6 +170,7 @@
   "Updater.Dialog.Suppress": "Güncelleme bildirimlerini bir daha gösterme",
   "Updater.Dialog.Later": "Hayır, sonra",
   "Updater.Dialog.Download": "Evet, güncelle",
+  "Updater.Dialog.HistoryLimited": "Yalnızca en yeni sürüm geçmişi gösteriliyor.",
 
   "Library.Context.GameSettings": "Oyun ayarları…",
   "Options.Env.Tab": "Ortam",

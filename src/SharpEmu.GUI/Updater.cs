@@ -16,7 +16,7 @@ namespace SharpEmu.GUI;
 public static class Updater
 {
     private const string ApplyArgument = "--sharpemu-apply-update";
-    private const string ReleasesUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases?per_page={0}&page={1}";
+    private const string DefaultApiBaseUrl = "https://api.github.com";
     private const int ReleasePageSize = 100;
     private const int MaxReleasePages = 10;
     private const int MaxConcurrentComparisons = 3;
@@ -28,6 +28,14 @@ public static class Updater
     private static string? _releasesEtag;
     private static string? _releasesJson;
 
+    private static string ApiBaseUrl =>
+        (Environment.GetEnvironmentVariable("SHARPEMU_UPDATE_API_BASE_URL") ?? DefaultApiBaseUrl).TrimEnd('/');
+
+    public sealed class RateLimitException : HttpRequestException
+    {
+        public RateLimitException() : base("GitHub API rate limit reached.") { }
+    }
+
     public sealed record UpdateInfo(
         string Sha,
         string Name,
@@ -35,7 +43,11 @@ public static class Updater
         long Size,
         string Sha256,
         string TagName,
-        IReadOnlyList<UpdateReleaseNotes> Changelog);
+        IReadOnlyList<UpdateReleaseNotes> Changelog)
+    {
+        public string? ManifestUrl { get; init; }
+        public bool HistoryTruncated { get; init; }
+    }
 
     public sealed record UpdateReleaseNotes(string TagName, string Notes);
 
@@ -72,7 +84,8 @@ public static class Updater
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(CheckTimeout);
 
-        var releases = await GetReleasesAsync(platform.Rid, platform.Extension, timeout.Token);
+        var releaseResult = await GetReleasesAsync(platform.Rid, platform.Extension, timeout.Token);
+        var releases = releaseResult.Releases;
         if (currentSha is null)
         {
             return null;
@@ -83,6 +96,17 @@ public static class Updater
         {
             var comparisons = await Task.WhenAll(batch.Select(async release =>
             {
+                if (release.ManifestUrl is not null)
+                {
+                    var manifest = await ReadManifestAsync(release.ManifestUrl, timeout.Token);
+                    if (manifest is null ||
+                        !manifest.Commit.StartsWith(release.Sha, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(manifest.Version, release.TagName.TrimStart('v'), StringComparison.OrdinalIgnoreCase))
+                    {
+                        return (release.Sha, IsNewer: false);
+                    }
+                }
+
                 if (string.Equals(release.Sha, currentSha, StringComparison.OrdinalIgnoreCase))
                 {
                     return (release.Sha, IsNewer: false);
@@ -107,30 +131,44 @@ public static class Updater
         var latest = newerReleases[0];
         return latest with
         {
+            HistoryTruncated = releaseResult.Truncated,
             Changelog = newerReleases
                 .Select(release => new UpdateReleaseNotes(release.TagName, release.Changelog[0].Notes))
                 .ToArray(),
         };
     }
 
-    private static async Task<IReadOnlyList<UpdateInfo>> GetReleasesAsync(
+    private static async Task<(IReadOnlyList<UpdateInfo> Releases, bool Truncated)> GetReleasesAsync(
         string rid,
         string extension,
         CancellationToken cancellationToken)
     {
+        if (_releasesJson is null)
+        {
+            (_releasesEtag, _releasesJson) = UpdateCache.Load();
+        }
+
         var pages = new List<string>();
+        var reachedPageLimit = true;
         for (var page = 1; page <= MaxReleasePages; page++)
         {
-            var url = string.Format(ReleasesUrl, ReleasePageSize, page);
+            var url = $"{ApiBaseUrl}/repos/sharpemu/sharpemu/releases?per_page={ReleasePageSize}&page={page}";
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            if (_releasesEtag is not null)
+            // The persisted cache currently represents page 1 only; never send
+            // its validator for later pages, which would mix page bodies.
+            if (page == 1 && _releasesEtag is not null)
             {
                 request.Headers.IfNoneMatch.ParseAdd(_releasesEtag);
             }
 
             using var response = await Http.SendAsync(request, cancellationToken);
             string json;
-            if (response.StatusCode == System.Net.HttpStatusCode.NotModified && _releasesJson is not null)
+            if (response.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests)
+            {
+                throw new RateLimitException();
+            }
+
+            if (page == 1 && response.StatusCode == System.Net.HttpStatusCode.NotModified && _releasesJson is not null)
             {
                 json = _releasesJson;
             }
@@ -138,8 +176,12 @@ public static class Updater
             {
                 response.EnsureSuccessStatusCode();
                 json = await response.Content.ReadAsStringAsync(cancellationToken);
-                _releasesEtag = response.Headers.ETag?.ToString();
-                _releasesJson = json;
+                if (page == 1)
+                {
+                    _releasesEtag = response.Headers.ETag?.ToString();
+                    _releasesJson = json;
+                    UpdateCache.Save(_releasesEtag, json);
+                }
             }
             pages.Add(json);
 
@@ -147,11 +189,12 @@ public static class Updater
             if (document.RootElement.ValueKind != JsonValueKind.Array ||
                 document.RootElement.GetArrayLength() < ReleasePageSize)
             {
+                reachedPageLimit = false;
                 break;
             }
         }
 
-        return ParseReleasePages(pages, rid, extension);
+        return (ParseReleasePages(pages, rid, extension), reachedPageLimit);
     }
 
     public static async Task DownloadAndRestartAsync(
@@ -366,6 +409,15 @@ public static class Updater
         }
 
         var releaseSha = ExtractReleaseSha(release);
+        string? manifestUrl = null;
+        foreach (var asset in release.GetProperty("assets").EnumerateArray())
+        {
+            if (string.Equals(asset.GetProperty("name").GetString(), "sharpemu-update-manifest.json", StringComparison.OrdinalIgnoreCase))
+            {
+                manifestUrl = asset.GetProperty("browser_download_url").GetString();
+                break;
+            }
+        }
         var candidates = new List<(DateTimeOffset Created, UpdateInfo Update)>();
         foreach (var asset in release.GetProperty("assets").EnumerateArray())
         {
@@ -410,7 +462,7 @@ public static class Updater
                         tagName,
                         release.TryGetProperty("body", out var body) && body.ValueKind == JsonValueKind.String
                             ? body.GetString() ?? ""
-                            : "")])));
+                        : "")]) { ManifestUrl = manifestUrl }));
         }
 
         var latest = candidates.OrderByDescending(candidate => candidate.Created).FirstOrDefault().Update;
@@ -421,6 +473,22 @@ public static class Updater
         tagName,
         @"^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$",
         RegexOptions.CultureInvariant);
+
+    private static async Task<UpdateManifest?> ReadManifestAsync(string url, CancellationToken cancellationToken)
+    {
+        using var response = await Http.GetAsync(url, cancellationToken);
+        if (response.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests)
+        {
+            throw new RateLimitException();
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        return UpdateManifest.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+    }
 
     internal static IDisposable UseHttpClientForTests(
         HttpClient client,
@@ -440,7 +508,7 @@ public static class Updater
         string releaseSha,
         CancellationToken cancellationToken)
     {
-        var url = $"https://api.github.com/repos/sharpemu/sharpemu/compare/{currentSha}...{releaseSha}";
+        var url = $"{ApiBaseUrl}/repos/sharpemu/sharpemu/compare/{currentSha}...{releaseSha}";
         using var response = await Http.GetAsync(url, cancellationToken);
         response.EnsureSuccessStatusCode();
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));

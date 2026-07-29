@@ -1080,6 +1080,10 @@ public partial class MainWindow : Window
         {
             SetUpdateStatus("Updater.Status.Unsupported");
         }
+        catch (Updater.RateLimitException)
+        {
+            SetUpdateStatus("Updater.Status.RateLimited");
+        }
         catch
         {
             SetUpdateStatus("Updater.Status.Failed");
@@ -1127,8 +1131,10 @@ public partial class MainWindow : Window
     private void RefreshUpdateText()
     {
         UpdateStatusText.Text = Localization.Instance.Format(_updateStatusKey, _updateStatusArgs);
-        UpdateButton.Content = Localization.Instance.Get(
-            _availableUpdate is null ? "Updater.Check" : "Updater.DownloadRestart");
+        // Keep this action as an explicit check even when notifications are
+        // suppressed and an update is already cached; the update dialog owns
+        // the actual download/restart action.
+        UpdateButton.Content = Localization.Instance.Get("Updater.Check");
     }
 
     // Environment variables set on this process at the previous launch; children

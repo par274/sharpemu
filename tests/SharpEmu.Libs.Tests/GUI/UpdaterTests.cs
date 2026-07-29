@@ -132,6 +132,19 @@ public sealed class UpdaterTests
         Assert.Equal(["v0.0.3", "v0.0.2"], releases.Select(release => release.TagName));
     }
 
+    [Fact]
+    public void UpdateManifest_ParsesReleaseMetadata()
+    {
+        var manifest = UpdateManifest.Parse("""
+            {"schema":1,"version":"0.0.3","commit":"d5108e854d609808f17093a6f5dbbc711d09ad2e","sha256sums":"archive.zip  abc"}
+            """);
+
+        Assert.NotNull(manifest);
+        Assert.Equal("0.0.3", manifest!.Version);
+        Assert.StartsWith("d5108e8", manifest.Commit);
+        Assert.Equal("archive.zip  abc", manifest.Sha256Sums);
+    }
+
     private sealed class DelegateHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

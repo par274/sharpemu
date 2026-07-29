@@ -57,6 +57,10 @@ public sealed class UpdateDialog : Window
             Classes = { "sectionTitle" },
             Margin = new Thickness(20, 0, 20, 8),
         };
+        if (update.HistoryTruncated)
+        {
+            notesLabel.Text += "  " + loc.Get("Updater.Dialog.HistoryLimited");
+        }
         var notes = new StackPanel { Spacing = 14, Margin = new Thickness(0, 0, 12, 0) };
         if (update.Changelog.Count == 0)
         {
