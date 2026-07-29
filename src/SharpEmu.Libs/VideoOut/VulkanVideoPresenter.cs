@@ -14670,13 +14670,6 @@ internal static unsafe class VulkanVideoPresenter
                     return;
                 }
 
-                // As above (see the same call in ExecuteComputeDispatchCore):
-                // resolving textures can GPU-detile a texture into the
-                // shared batch command buffer. This frame's draw records
-                // into the separate per-frame _commandBuffer below, so the
-                // batch must be flushed to the queue first or the detile's
-                // layout transition is still unsubmitted when this frame's
-                // command buffer samples the image.
                 FlushBatchedGuestCommands();
             }
 
