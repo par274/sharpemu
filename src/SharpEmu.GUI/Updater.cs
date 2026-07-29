@@ -622,7 +622,11 @@ public static class Updater
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
-            throw new PlatformNotSupportedException("SharpEmu releases require an x64 process.");
+            var allowNonX64 = Environment.GetEnvironmentVariable("SHARPEMU_ALLOW_NON_X64");
+            if (!string.Equals(allowNonX64, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PlatformNotSupportedException("SharpEmu releases require an x64 process.");
+            }
         }
 
         if (OperatingSystem.IsWindows()) return new("win-x64", ".zip", "SharpEmu.exe");

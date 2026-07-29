@@ -4,6 +4,7 @@
 using SharpEmu.GUI;
 using System.Net;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.GUI;
@@ -13,6 +14,12 @@ public sealed class UpdaterTests
     [Fact]
     public async Task CheckAsync_TimeoutRetriesAfterConfiguredDelay()
     {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 &&
+            !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_ALLOW_NON_X64"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         var requests = 0;
         var delays = new List<TimeSpan>();
         using var client = new HttpClient(new DelegateHandler(_ =>

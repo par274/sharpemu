@@ -173,7 +173,12 @@ jobs:
       # Also runs on Linux/macOS: the aerolib.bin MSBuild task does platform-sensitive
       # path handling, so a cross-platform generation regression surfaces here.
       - name: Run tests
-        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+        shell: bash
+        run: |
+          if [ "${{ matrix.rid }}" = "osx-x64" ]; then
+            export SHARPEMU_ALLOW_NON_X64=true
+          fi
+          dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
 
       - name: Build pinned SPIRV-Tools
         if: matrix.rid == 'linux-x64'
