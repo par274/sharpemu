@@ -9219,6 +9219,35 @@ internal static unsafe class VulkanVideoPresenter
                 !_guestImages.ContainsKey(texture.Address))
             {
                 var guestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType);
+
+                // GuestImageResource.View is the canonical alias view every
+                // other consumer assumes is identity-swizzled: the fast path
+                // in GetOrCreateGuestImageView() returns it directly for
+                // identity requests, and any later VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+                // binding of this same guest address requires an identity
+                // mapping per the Vulkan spec. `view` above was built with
+                // this texture's own DstSelect for direct sampling, so it
+                // must not leak into that role unless it already is identity.
+                var canonicalView = view;
+                if (texture.DstSelect != 0xFAC)
+                {
+                    var identityViewInfo = new ImageViewCreateInfo
+                    {
+                        SType = StructureType.ImageViewCreateInfo,
+                        Image = image,
+                        ViewType = GetGuestTextureViewType(
+                            texture.Type,
+                            texture.ArrayedView),
+                        Format = vkFormat,
+                        Components = ToVkComponentMapping(0xFAC),
+                        SubresourceRange = ColorSubresourceRange(layerCount: layers),
+                    };
+                    Check(
+                        _vk.CreateImageView(_device, &identityViewInfo, null, out canonicalView),
+                        "vkCreateImageView(texture identity)");
+                    SetDebugName(ObjectType.ImageView, canonicalView.Handle, $"{debugName} identity view");
+                }
+
                 var guestImage = new GuestImageResource
                 {
                     Address = texture.Address,
@@ -9234,7 +9263,7 @@ internal static unsafe class VulkanVideoPresenter
                     Format = vkFormat,
                     Image = image,
                     Memory = imageMemory,
-                    View = view,
+                    View = canonicalView,
                     InitialUploadPending = true,
                     IsCpuBacked = true,
                     CpuContentFingerprint = contentFingerprint,
@@ -11133,6 +11162,16 @@ internal static unsafe class VulkanVideoPresenter
             {
                 EnsureGuestSubmissionCapacity();
                 resources = CreateComputeDispatchResources(work);
+
+                // Resolving textures above can GPU-detile a texture, which
+                // records its deswizzle + layout transition into the shared
+                // batch command buffer (BeginBatchedGuestCommands). That
+                // buffer is separate from the dispatch's own command buffer
+                // allocated below, and nothing else flushes it before this
+                // dispatch samples the result — without this, the detile
+                // work is still unsubmitted when the dispatch's buffer goes
+                // to the queue, so the sampled image is still UNDEFINED.
+                FlushBatchedGuestCommands();
 
                 var batchCount = Math.Max(
                     1u,
@@ -14658,6 +14697,15 @@ internal static unsafe class VulkanVideoPresenter
                         $"[LOADER][ERROR] Vulkan VideoOut translated draw setup failed: {exception.Message}");
                     return;
                 }
+
+                // As above (see the same call in ExecuteComputeDispatchCore):
+                // resolving textures can GPU-detile a texture into the
+                // shared batch command buffer. This frame's draw records
+                // into the separate per-frame _commandBuffer below, so the
+                // batch must be flushed to the queue first or the detile's
+                // layout transition is still unsubmitted when this frame's
+                // command buffer samples the image.
+                FlushBatchedGuestCommands();
             }
 
             uint imageIndex;
@@ -15269,6 +15317,11 @@ internal static unsafe class VulkanVideoPresenter
                     RecordGuestDepthForSampling(depth, shaderStage);
                 }
 
+                if (!texture.IsStorage && texture.GuestImage is { } sampledGuestImage)
+                {
+                    RecordGuestImageForSampling(sampledGuestImage, shaderStage);
+                }
+
                 if (!texture.NeedsUpload)
                 {
                     continue;
@@ -15474,6 +15527,88 @@ internal static unsafe class VulkanVideoPresenter
                 1,
                 &barrier);
             depth.Layout = ImageLayout.ShaderReadOnlyOptimal;
+        }
+
+        /// <summary>
+        /// A render-target-backed guest image sampled before it was ever
+        /// rendered into (or CPU-uploaded) is still VK_IMAGE_LAYOUT_UNDEFINED,
+        /// but the descriptor write for a sampled texture always declares
+        /// VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL (see the sampled-image
+        /// DescriptorImageInfo in CreateDescriptorSet). Left unhandled this
+        /// trips VUID-vkCmdDraw-None-09600 on first sample and leaves the
+        /// image's real layout out of sync with the Initialized-implies-
+        /// ShaderReadOnlyOptimal invariant every other guest-image barrier
+        /// path relies on. Clear to zero (matching the depth equivalent
+        /// below) so float formats never read back NaN/Inf garbage, then
+        /// transition to ShaderReadOnlyOptimal and mark it initialized.
+        /// </summary>
+        private void RecordGuestImageForSampling(
+            GuestImageResource guestImage,
+            PipelineStageFlags shaderStage)
+        {
+            if (guestImage.Initialized || guestImage.InitialUploadPending)
+            {
+                return;
+            }
+
+            var range = ColorSubresourceRange(0, Math.Max(guestImage.MipLevels, 1));
+            var toTransfer = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                DstAccessMask = AccessFlags.TransferWriteBit,
+                OldLayout = ImageLayout.Undefined,
+                NewLayout = ImageLayout.TransferDstOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = guestImage.Image,
+                SubresourceRange = range,
+            };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.TopOfPipeBit,
+                PipelineStageFlags.TransferBit,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                &toTransfer);
+
+            var clearValue = new ClearColorValue(0f, 0f, 0f, 0f);
+            _vk.CmdClearColorImage(
+                _commandBuffer,
+                guestImage.Image,
+                ImageLayout.TransferDstOptimal,
+                &clearValue,
+                1,
+                &range);
+
+            var toShaderRead = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = AccessFlags.TransferWriteBit,
+                DstAccessMask = AccessFlags.ShaderReadBit,
+                OldLayout = ImageLayout.TransferDstOptimal,
+                NewLayout = ImageLayout.ShaderReadOnlyOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = guestImage.Image,
+                SubresourceRange = range,
+            };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.TransferBit,
+                shaderStage,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                &toShaderRead);
+
+            guestImage.Initialized = true;
         }
 
         private void RecordStandaloneGuestDepthClear(GuestDepthResource depth)
