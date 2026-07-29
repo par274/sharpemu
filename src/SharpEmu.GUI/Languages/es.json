@@ -66,6 +66,8 @@
 
   "Options.Language.Label": "Idioma del emulador",
   "Options.Language.Desc": "Idioma utilizado en todo el launcher. Se aplica inmediatamente.",
+  "Options.DefaultProfile.Label": "Nombre de perfil predeterminado",
+  "Options.DefaultProfile.Desc": "Nombre utilizado cuando un juego solicita introducir texto. El valor predeterminado es Sharp.",
 
   "Common.On": "Encendido",
   "Common.Off": "Apagado",

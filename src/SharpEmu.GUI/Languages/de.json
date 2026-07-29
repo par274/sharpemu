@@ -66,6 +66,8 @@
 
   "Options.Language.Label": "Emulator-Sprache",
   "Options.Language.Desc": "Sprache der Benutzeroberfläche. Wird sofort angewendet.",
+  "Options.DefaultProfile.Label": "Standardprofilname",
+  "Options.DefaultProfile.Desc": "Name für Texteingaben in Spielen. Der Standardwert ist Sharp.",
 
   "Common.On": "An",
   "Common.Off": "Aus",

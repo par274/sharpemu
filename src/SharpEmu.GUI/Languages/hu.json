@@ -76,6 +76,8 @@
 
   "Options.Language.Label": "Emulátor nyelve",
   "Options.Language.Desc": "Az indítóban használt nyelv. Azonnal érvénybe lép.",
+  "Options.DefaultProfile.Label": "Alapértelmezett profilnév",
+  "Options.DefaultProfile.Desc": "A játékok szövegbeviteli kéréseinél használt név. Az alapértelmezett érték Sharp.",
 
   "Common.On": "Be",
   "Common.Off": "Ki",

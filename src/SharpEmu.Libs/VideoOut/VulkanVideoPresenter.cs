@@ -1046,14 +1046,50 @@ internal static unsafe class VulkanVideoPresenter
             targets.Count > 8 ||
             AnyRenderTargetInvalid(targets))
         {
+            var dropCount = Interlocked.Increment(ref _offscreenDropTraceCount);
+            if (dropCount <= 16 || dropCount % 500 == 0)
+            {
+                var detail = targets.Count == 0
+                    ? "<no targets>"
+                    : string.Join(
+                        " ",
+                        targets.Select(t => $"0x{t.Address:X}:{t.Width}x{t.Height}"));
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] vk.offscreen_drop#{dropCount} spirv={pixelSpirv.Length} " +
+                    $"mrt={targets.Count} vs=0x{shaderAddress:X16} {detail}");
+            }
+
             return;
         }
 
         var firstTarget = targets[0];
         if (RenderTargetsMismatchedOrAliased(targets, firstTarget))
         {
-            Console.Error.WriteLine(
-                "[LOADER][WARN] Vulkan skipped MRT draw with mismatched dimensions or aliased targets.");
+            var skipCount = Interlocked.Increment(ref _mrtSkipTraceCount);
+            if (skipCount <= 16 || skipCount % 200 == 0)
+            {
+                var aliased = false;
+                for (var i = 0; i < targets.Count && !aliased; i++)
+                {
+                    for (var j = i + 1; j < targets.Count; j++)
+                    {
+                        if (targets[i].Address == targets[j].Address)
+                        {
+                            aliased = true;
+                            break;
+                        }
+                    }
+                }
+
+                var detail = string.Join(
+                    " ",
+                    targets.Select(t =>
+                        $"0x{t.Address:X}:{t.Width}x{t.Height}:f{t.Format}/{t.NumberType}"));
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] vk.mrt_skip#{skipCount} mrt={targets.Count} " +
+                    $"aliased={aliased} vs=0x{shaderAddress:X16} {detail}");
+            }
+
             return;
         }
 
@@ -1298,6 +1334,8 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
+    private static long _mrtSkipTraceCount;
+    private static long _offscreenDropTraceCount;
     private static long _perfDrawCount;
     private static long _perfDrawTicks;
     private static long _perfPipelineCreations;
@@ -1834,8 +1872,22 @@ internal static unsafe class VulkanVideoPresenter
 
         lock (_gate)
         {
-            return _availableGuestImages.TryGetValue(address, out var availableFormat) &&
-                availableFormat == guestFormat;
+            if (!_availableGuestImages.TryGetValue(address, out var availableFormat))
+            {
+                return false;
+            }
+
+            if (availableFormat == guestFormat)
+            {
+                return true;
+            }
+
+            return TryDecodeRenderTargetFormat(
+                    (availableFormat >> 8) & 0x1FFu,
+                    availableFormat & 0xFFu,
+                    out var resident) &&
+                TryDecodeRenderTargetFormat(format, numberType, out var requested) &&
+                Presenter.IsCompatibleViewFormat(resident.Format, requested.Format);
         }
     }
 
@@ -12075,6 +12127,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] Vulkan skipped storage render-target feedback loop " +
+                    $"vs=0x{work.ShaderAddress:X16} " +
                     $"targets={string.Join(',', work.Targets.Where(target => target.Address != 0).Select(target => $"0x{target.Address:X16}"))}; " +
                     "sampled aliases use ordered snapshots");
                 ReturnPooledGuestData(work.Draw);

@@ -427,6 +427,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         </ComboBox>
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="DefaultProfileRow"
+                                        Label="{Binding [Options.DefaultProfile.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.DefaultProfile.Desc], Source={x:Static local:Localization.Instance}}">
+                        <TextBox x:Name="DefaultProfileBox"
+                                 Width="180"
+                                 MaxLength="16"
+                                 VerticalAlignment="Center" />
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="TitleMusicRow"
                                         Label="{Binding [Options.TitleMusic.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.TitleMusic.Desc], Source={x:Static local:Localization.Instance}}">
@@ -727,6 +736,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
                                       VerticalAlignment="Center" />
                       </local:SettingRow>
+
                     </StackPanel>
                   </Border>
 

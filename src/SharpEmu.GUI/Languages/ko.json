@@ -66,6 +66,8 @@
 
   "Options.Language.Label": "에뮬레이터 언어",
   "Options.Language.Desc": "런처 전체에 사용되는 언어입니다. 변경 사항은 즉시 적용됩니다.",
+  "Options.DefaultProfile.Label": "기본 프로필 이름",
+  "Options.DefaultProfile.Desc": "게임에서 텍스트 입력을 요청할 때 사용할 이름입니다. 기본값은 Sharp입니다.",
 
   "Common.On": "켬",
   "Common.Off": "끔",

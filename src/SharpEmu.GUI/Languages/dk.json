@@ -66,6 +66,8 @@
 
   "Options.Language.Label": "Emulatorsprog",
   "Options.Language.Desc": "Sprog der bruges i hele launcheren. Anvendes med det samme.",
+  "Options.DefaultProfile.Label": "Standardprofilnavn",
+  "Options.DefaultProfile.Desc": "Navn der bruges, når et spil beder om tekstinput. Standardværdien er Sharp.",
 
   "Common.On": "Til",
   "Common.Off": "Fra",

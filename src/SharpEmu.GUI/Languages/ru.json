@@ -109,6 +109,8 @@
 
   "Options.Language.Label": "Язык эмулятора",
   "Options.Language.Desc": "Язык интерфейса лаунчера. Изменение применяется сразу.",
+  "Options.DefaultProfile.Label": "Имя профиля по умолчанию",
+  "Options.DefaultProfile.Desc": "Имя, используемое, когда игра запрашивает ввод текста. Значение по умолчанию — Sharp.",
 
   "Common.On": "Включено",
   "Common.Off": "Выключено",

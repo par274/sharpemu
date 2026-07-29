@@ -66,6 +66,8 @@
 
   "Options.Language.Label": "エミュレータの言語",
   "Options.Language.Desc": "ランチャー全体で使用される言語。変更はすぐに適用されます。",
+  "Options.DefaultProfile.Label": "既定のプロフィール名",
+  "Options.DefaultProfile.Desc": "ゲームがテキスト入力を要求したときに使用する名前です。既定値は Sharp です。",
 
   "Common.On": "オン",
   "Common.Off": "オフ",

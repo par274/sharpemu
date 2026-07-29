@@ -66,6 +66,8 @@
 
   "Options.Language.Label": "لغة المحاكي",
   "Options.Language.Desc": "اللغة المستخدمة في جميع أنحاء المشغل. تُطبق فوراً.",
+  "Options.DefaultProfile.Label": "اسم الملف الشخصي الافتراضي",
+  "Options.DefaultProfile.Desc": "الاسم المستخدم عندما تطلب لعبة إدخال نص. القيمة الافتراضية هي Sharp.",
 
   "Common.On": "تشغيل",
   "Common.Off": "إيقاف",

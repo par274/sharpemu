@@ -46,6 +46,9 @@ public static partial class AgcExports
     private const uint ItNumInstances = 0x2F;
     private const uint ItDrawIndexMultiAuto = 0x30;
     private const uint ItDrawIndexOffset2 = 0x35;
+    private const uint ItDrawIndexIndirectMulti = 0x38;
+    private const uint DrawIndexedIndirectArgsSize = 20;
+    private const uint DrawIndexedIndirectMaxScan = 1024;
     private const uint ItWriteData = 0x37;
     private const uint ItDispatchDirect = 0x15;
     private const uint ItDispatchIndirect = 0x16;
@@ -319,6 +322,7 @@ public static partial class AgcExports
     private static int _tracedVertexRangeCount;
     private static long _dcbWaitRegMemTraceCount;
     private static long _createShaderTraceCount;
+    private static long _duplicateTargetTraceCount;
     private static long _cbMetadataSkipTraceCount;
     private static long _packetPayloadTraceCount;
     private static bool _tracedMissingPixelShaderBindings;
@@ -1995,6 +1999,65 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "1q1titRBL6o",
+        ExportName = "sceAgcDcbDrawIndirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndirect(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var dataOffset = (uint)ctx[CpuRegister.Rsi];
+        var emit = Interlocked.Increment(ref _indirectDrawEmitCount);
+
+        if (emit <= 12 || emit % 250 == 0)
+        {
+            var rcx = ctx[CpuRegister.Rcx];
+            var dump = string.Empty;
+            for (var word = 0; word < 8; word++)
+            {
+                dump += TryReadUInt32(ctx, rcx + dataOffset + ((ulong)word * 4), out var raw)
+                    ? $" {raw}"
+                    : " ?";
+            }
+
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] agc.emit_indirect#{emit} buf=0x{commandBufferAddress:X16} " +
+                $"off=0x{dataOffset:X} rdx=0x{ctx[CpuRegister.Rdx]:X} rcx=0x{rcx:X} " +
+                $"r8=0x{ctx[CpuRegister.R8]:X} rcx_words:{dump}");
+        }
+
+        if (commandBufferAddress == 0)
+        {
+            Interlocked.Increment(ref _indirectDrawEmitRejectCount);
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var drawCommand) ||
+            !TryWriteUInt32(ctx, drawCommand, Pm4(5, ItDrawIndirect, 0)) ||
+            !TryWriteUInt32(ctx, drawCommand + 4, dataOffset) ||
+            !TryWriteUInt32(ctx, drawCommand + 8, 0) ||
+            !TryWriteUInt32(ctx, drawCommand + 12, 0) ||
+            !TryWriteUInt32(ctx, drawCommand + 16, 0))
+        {
+            var rejects = Interlocked.Increment(ref _indirectDrawEmitRejectCount);
+            if (rejects <= 8 || rejects % 250 == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] agc.emit_indirect_reject#{rejects} " +
+                    $"buf=0x{commandBufferAddress:X16} reason=alloc_or_write");
+            }
+
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_draw_indirect buf=0x{commandBufferAddress:X16} " +
+            $"draw=0x{drawCommand:X16} offset=0x{dataOffset:X}");
+
+        return ReturnPointer(ctx, drawCommand);
+    }
+
+    [SysAbiExport(
         Nid = "Yw0jKSqop+E",
         ExportName = "sceAgcDcbDrawIndexAuto",
         Target = Generation.Gen5,
@@ -2049,6 +2112,39 @@ public static partial class AgcExports
         TraceAgc(
             $"agc.dcb_draw_index_indirect buf=0x{commandBufferAddress:X16} " +
             $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} modifier=0x{modifier:X8}");
+        return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "ypVBz4uPKcQ",
+        ExportName = "sceAgcDcbDrawIndexIndirectMulti",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndexIndirectMulti(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var dataOffset = (uint)ctx[CpuRegister.Rsi];
+        var drawCount = (uint)ctx[CpuRegister.Rdx];
+        var stride = DrawIndexedIndirectArgsSize;
+        var modifier = (uint)ctx[CpuRegister.R8];
+        if (commandBufferAddress == 0 ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItDrawIndexIndirectMulti, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, 0) ||
+            !TryWriteUInt32(ctx, commandAddress + 12, 0) ||
+            !TryWriteUInt32(ctx, commandAddress + 16, 0) ||
+            !TryWriteUInt32(ctx, commandAddress + 20, drawCount) ||
+            !TryWriteUInt32(ctx, commandAddress + 24, stride) ||
+            !TryWriteUInt32(ctx, commandAddress + 28, modifier))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_draw_index_indirect_multi buf=0x{commandBufferAddress:X16} " +
+            $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} draws={drawCount} " +
+            $"stride={stride} modifier=0x{modifier:X8}");
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -3812,6 +3908,7 @@ public static partial class AgcExports
 
             if (TryReadSubmittedDrawCount(
                     ctx,
+                    gpuState,
                     state,
                     currentAddress,
                     length,
@@ -3835,7 +3932,8 @@ public static partial class AgcExports
                 var indexed = op is
                     ItDrawIndex2 or
                     ItDrawIndexOffset2 or
-                    ItDrawIndexIndirect;
+                    ItDrawIndexIndirect or
+                    ItDrawIndexIndirectMulti;
                 state.SawIndexedDraw |= indexed;
                 TryTranslateGuestDraw(ctx, gpuState, state, indexCount, indexed);
             }
@@ -4195,6 +4293,7 @@ public static partial class AgcExports
         op is ItDispatchDirect or ItDispatchIndirect ||
         op is ItDrawIndirect or
             ItDrawIndexIndirect or
+            ItDrawIndexIndirectMulti or
             ItDrawIndex2 or
             ItDrawIndexAuto or
             ItDrawIndexMultiAuto or
@@ -6164,8 +6263,24 @@ public static partial class AgcExports
         }
     }
 
+    private const int IndirectArgsFlushTimeoutMilliseconds = 250;
+
+    private static void FlushGpuWorkForIndirectArgs(SubmittedGpuState gpuState)
+    {
+        var pending = gpuState.WorkSequence;
+        if (pending == 0 || pending > long.MaxValue)
+        {
+            return;
+        }
+
+        GuestGpu.Current.WaitForGuestWork(
+            (long)pending,
+            IndirectArgsFlushTimeoutMilliseconds);
+    }
+
     private static bool TryReadSubmittedDrawCount(
         CpuContext ctx,
+        SubmittedGpuState gpuState,
         SubmittedDcbState state,
         ulong packetAddress,
         uint packetLength,
@@ -6196,17 +6311,89 @@ public static partial class AgcExports
 
                 drawCount = (control >> 21) & 0x7FFu;
                 return true;
-            case ItDrawIndirect or ItDrawIndexIndirect
-                when packetLength >= 5 && state.IndirectArgsAddress != 0:
-                if (!TryReadUInt32(ctx, packetAddress + 4, out var dataOffset))
+            case ItDrawIndexIndirectMulti when packetLength >= 8 &&
+                state.IndirectArgsAddress != 0:
+                if (!TryReadUInt32(ctx, packetAddress + 4, out var multiOffset) ||
+                    !TryReadUInt32(ctx, packetAddress + 20, out var multiDraws) ||
+                    !TryReadUInt32(ctx, packetAddress + 24, out var multiStride))
                 {
                     return false;
                 }
 
-                return TryReadUInt32(
-                    ctx,
-                    state.IndirectArgsAddress + dataOffset,
-                    out drawCount);
+
+                if (multiStride < DrawIndexedIndirectArgsSize)
+                {
+                    multiStride = DrawIndexedIndirectArgsSize;
+                }
+
+                var multiTotal = 0UL;
+                var multiCapped = multiDraws == 0
+                    ? DrawIndexedIndirectMaxScan
+                    : Math.Min(multiDraws, 4096u);
+                for (var draw = 0u; draw < multiCapped; draw++)
+                {
+                    if (!TryReadUInt32(
+                            ctx,
+                            state.IndirectArgsAddress + multiOffset + ((ulong)draw * multiStride),
+                            out var subCount))
+                    {
+                        break;
+                    }
+
+                    if (subCount == 0 && multiDraws == 0)
+                    {
+                        break;
+                    }
+
+                    multiTotal += subCount;
+                }
+
+                var multiProbe = Interlocked.Increment(ref _indirectMultiProbeCount);
+                if (multiProbe <= 12 || multiProbe % 250 == 0)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] agc.draw_multi#{multiProbe} args=0x{state.IndirectArgsAddress:X} " +
+                        $"off=0x{multiOffset:X} draws={multiDraws} stride={multiStride} " +
+                        $"total={multiTotal}");
+                }
+
+                drawCount = (uint)Math.Min(multiTotal, uint.MaxValue);
+                return drawCount != 0;
+            case ItDrawIndirect or ItDrawIndexIndirect:
+                var probe = Interlocked.Increment(ref _indirectDrawProbeCount);
+                if (!TryReadUInt32(ctx, packetAddress + 4, out var dataOffset))
+                {
+                    dataOffset = 0xFFFFFFFFu;
+                }
+
+                var readable = packetLength >= 5 &&
+                    state.IndirectArgsAddress != 0 &&
+                    dataOffset != 0xFFFFFFFFu;
+                var resolved = readable &&
+                    TryReadUInt32(
+                        ctx,
+                        state.IndirectArgsAddress + dataOffset,
+                        out drawCount);
+                if (probe <= 12 || probe % 100 == 0)
+                {
+                    var dump = string.Empty;
+                    for (var word = 0; word < 8; word++)
+                    {
+                        dump += TryReadUInt32(
+                            ctx,
+                            state.IndirectArgsAddress + dataOffset + ((ulong)word * 4),
+                            out var raw)
+                            ? $" {raw}"
+                            : " ?";
+                    }
+
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] agc.draw_indirect#{probe} op=0x{op:X} len={packetLength} " +
+                        $"args=0x{state.IndirectArgsAddress:X} off=0x{dataOffset:X} " +
+                        $"resolved={resolved} count={drawCount} words:{dump}");
+                }
+
+                return resolved;
             default:
                 return false;
         }
@@ -8056,6 +8243,61 @@ public static partial class AgcExports
             source.Format == destination.Format;
     }
 
+    private static readonly HashSet<ulong> _renderTargetAddresses = new();
+    private static readonly HashSet<ulong> _sampledRenderTargets = new();
+    private static readonly object _renderTargetProbeGate = new();
+    private static long _renderTargetSampleTraceCount;
+    private static long _indirectDrawProbeCount;
+    private static long _indirectDrawEmitCount;
+    private static long _indirectDrawEmitRejectCount;
+    private static long _indirectMultiProbeCount;
+
+    private static void NoteRenderTargetAddress(ulong address)
+    {
+        if (address == 0)
+        {
+            return;
+        }
+
+        lock (_renderTargetProbeGate)
+        {
+            if (_renderTargetAddresses.Count < 512)
+            {
+                _renderTargetAddresses.Add(address);
+            }
+        }
+    }
+
+    private static void NoteSampledAddress(ulong address, uint format = 0, uint numberType = 0)
+    {
+        if (address == 0)
+        {
+            return;
+        }
+
+        bool firstTime;
+        int distinctTargets;
+        lock (_renderTargetProbeGate)
+        {
+            if (!_renderTargetAddresses.Contains(address))
+            {
+                return;
+            }
+
+            firstTime = _sampledRenderTargets.Add(address);
+            distinctTargets = _renderTargetAddresses.Count;
+        }
+
+        var count = Interlocked.Increment(ref _renderTargetSampleTraceCount);
+        if (firstTime || count % 2000 == 0)
+        {
+            var gpuResident = GuestGpu.Current.IsGpuGuestImageAvailable(address, format, numberType);
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] agc.rt_sampled#{count} addr=0x{address:X} first={firstTime} " +
+                $"gpu_resident={gpuResident} fmt={format}/{numberType} known_targets={distinctTargets}");
+        }
+    }
+
     private static IReadOnlyList<RenderTargetDescriptor> GetRenderTargets(
         IReadOnlyDictionary<uint, uint> registers,
         bool includeMaskedTargets = false)
@@ -8082,6 +8324,13 @@ public static partial class AgcExports
                 continue;
             }
 
+            if (targets.Exists(existing => existing.Address == address))
+            {
+                continue;
+            }
+
+            NoteRenderTargetAddress(address);
+
             targets.Add(new RenderTargetDescriptor(
                 slot,
                 address,
@@ -8090,6 +8339,21 @@ public static partial class AgcExports
                 (info >> 2) & 0x1Fu,
                 (info >> 8) & 0x7u,
                 (attrib3 >> 14) & 0x1Fu));
+        }
+
+        if (targets.Count > 1 &&
+            targets.Select(t => t.Address).Distinct().Count() != targets.Count)
+        {
+            var dupCount = Interlocked.Increment(ref _duplicateTargetTraceCount);
+            if (dupCount <= 12 || dupCount % 500 == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] agc.rt_duplicate#{dupCount} has_mask={hasTargetMask} " +
+                    $"mask=0x{targetMask:X8} slots=[" +
+                    string.Join(",", targets.Select(t =>
+                        $"{t.Slot}:0x{t.Address:X}:m{(targetMask >> ((int)t.Slot * 4)) & 0xFu}")) +
+                    "]");
+            }
         }
 
         return targets;
@@ -9331,6 +9595,7 @@ public static partial class AgcExports
                 descriptor.Format,
                 descriptor.NumberType))
         {
+            NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
@@ -9410,6 +9675,7 @@ public static partial class AgcExports
                     $"tile={descriptor.TileMode} mip={mipLevel}");
             }
 
+            NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
@@ -9470,6 +9736,7 @@ public static partial class AgcExports
                     descriptor.Type,
                     textureDepth)))
         {
+            NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
             texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
@@ -9532,7 +9799,8 @@ public static partial class AgcExports
 
                     if (readAllLayers)
                     {
-                        texture = new GuestDrawTexture(
+                        NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
+            texture = new GuestDrawTexture(
                             descriptor.Address,
                             descriptor.Width,
                             descriptor.Height,
@@ -9594,7 +9862,8 @@ public static partial class AgcExports
 
                 if (uploadedLayers == arrayLayers)
                 {
-                    texture = new GuestDrawTexture(
+                    NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
+            texture = new GuestDrawTexture(
                         descriptor.Address,
                         descriptor.Width,
                         descriptor.Height,
@@ -9697,7 +9966,8 @@ public static partial class AgcExports
             if (IsGpuDetileEquation(gpuDetileParams.Equation) &&
                 (long)elementsWide * elementsHigh * bytesPerElement <= source.Length)
             {
-                texture = new GuestDrawTexture(
+                NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
+            texture = new GuestDrawTexture(
                     descriptor.Address,
                     descriptor.Width,
                     descriptor.Height,

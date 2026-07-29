@@ -33,12 +33,17 @@ public static class SaveDataDialogExports
         LibraryName = "libSceSaveDataDialog")]
     public static int SaveDataDialogInitialize(CpuContext ctx)
     {
-        if (Interlocked.CompareExchange(ref _status, StatusInitialized, StatusNone) != StatusNone)
+        var previous = Interlocked.CompareExchange(
+            ref _status,
+            StatusInitialized,
+            StatusNone);
+        if (previous == StatusNone || previous == StatusFinished)
         {
-            return ctx.SetReturn(ErrorAlreadyInitialized);
+            Interlocked.Exchange(ref _status, StatusInitialized);
+            return ctx.SetReturn(ErrorOk);
         }
 
-        return ctx.SetReturn(ErrorOk);
+        return ctx.SetReturn(ErrorAlreadyInitialized);
     }
 
     [SysAbiExport(

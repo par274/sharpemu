@@ -66,6 +66,8 @@
 
   "Options.Language.Label": "Taal van de emulator",
   "Options.Language.Desc": "Taal die in de hele launcher wordt gebruikt. Wordt direct toegepast.",
+  "Options.DefaultProfile.Label": "Standaardprofielnaam",
+  "Options.DefaultProfile.Desc": "Naam die wordt gebruikt wanneer een game om tekstinvoer vraagt. De standaardwaarde is Sharp.",
 
   "Common.On": "Aan",
   "Common.Off": "Uit",
