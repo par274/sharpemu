@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
 # Repository workflow reminders
 
 - Never create a draft PR automatically; only create or update one when the user explicitly asks.
