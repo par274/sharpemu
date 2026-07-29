@@ -6,7 +6,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:SharpEmu.GUI"
-        xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
         x:Class="SharpEmu.GUI.MainWindow"
         Title="SharpEmu"
         Width="1280" Height="820"
@@ -91,7 +90,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </Grid>
 
     <!-- Main content -->
-    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto,Auto">
+    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto">
 
       <!-- Library / Options page switcher, with the library toolbar sharing
            the same row on the right. Plain buttons (not TabItem) so there is
@@ -246,8 +245,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </ListBox.DataTemplates>
           </ListBox>
 
-          <!-- Selected-game identity stays in the library content while the
-               bottom bar continues to own session status and actions. -->
+          <!-- Selected-game identity and actions share one detail surface so
+               the selected title and metadata are never rendered twice. -->
           <StackPanel x:Name="LibrarySelectedDetails"
                       Grid.Row="1"
                       x:DataType="local:GameEntry"
@@ -278,6 +277,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
                            Foreground="{StaticResource MutedBrush}" />
               </Border>
             </StackPanel>
+            <Grid Width="360"
+                  ColumnDefinitions="*,*"
+                  ColumnSpacing="8"
+                  HorizontalAlignment="Left">
+              <Button x:Name="LaunchButton"
+                      Grid.Column="0"
+                      Classes="accent"
+                      Content="Launch"
+                      HorizontalAlignment="Stretch"
+                      IsEnabled="False" />
+              <ToggleButton x:Name="ConsoleToggle"
+                            Grid.Column="1"
+                            Classes="ghost"
+                            Padding="22,10"
+                            HorizontalAlignment="Stretch"
+                            Content="{Binding [Launch.Console],
+                                              Source={x:Static local:Localization.Instance},
+                                              x:CompileBindings=False}" />
+            </Grid>
           </StackPanel>
 
           <!-- Empty state -->
@@ -307,7 +325,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
         <!-- Options page: sub-tabs so future categories (Graphics, …) slot
              in next to General. Card-grouped sections match the visual
-             language used by the console panel and launch bar below. -->
+             language used by the console panel below. -->
         <Grid x:Name="OptionsPage" IsVisible="False">
           <TabControl>
             <TabItem x:Name="GeneralTabItem"
@@ -723,7 +741,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Border Grid.Row="2" x:Name="ConsolePanel" Classes="card" Padding="0" Height="240"
               Margin="0,12,0,0" IsVisible="False">
         <Grid RowDefinitions="Auto,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
             <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle"
                        Text="{Binding [Console.Title], Source={x:Static local:Localization.Instance}}"
                        VerticalAlignment="Center" />
@@ -745,7 +763,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <Button Grid.Column="5" x:Name="ClearLogButton" Classes="ghost"
                     Content="{Binding [Console.Clear], Source={x:Static local:Localization.Instance}}"
                     FontSize="12"
-                    Padding="10,4" />
+                    Padding="10,4" Margin="0,0,8,0" />
+            <Button Grid.Column="6"
+                    x:Name="CloseConsoleButton"
+                    Classes="ghost"
+                    Content="×"
+                    AutomationProperties.Name="{Binding [Launch.Console],
+                                                        Source={x:Static local:Localization.Instance}}"
+                    FontSize="16"
+                    Padding="10,2" />
           </Grid>
           <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
                    BorderBrush="{StaticResource CardBorderBrush}" CornerRadius="0,0,12,12">
@@ -758,101 +784,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
       </Border>
 
-      <!-- Launch bar; capped so it does not sprawl on a maximized window. -->
-      <Border Grid.Row="3" x:Name="LaunchBar" Classes="card" Margin="0,12,0,0" Padding="14" MaxWidth="1280">
-        <StackPanel Spacing="14">
-          <Grid ColumnDefinitions="Auto,*,Auto">
-
-            <!-- Selected game cover thumbnail -->
-            <Border Grid.Column="0" Classes="coverClip" Width="56" Height="56" CornerRadius="8"
-                    VerticalAlignment="Center">
-              <Panel x:Name="SelectedCoverPanel"
-                     x:DataType="local:GameEntry"
-                     x:CompileBindings="True">
-                <Border Background="{Binding PlaceholderBrush, FallbackValue={x:Null}}"
-                        IsVisible="{Binding !HasCover, FallbackValue=False}">
-                  <TextBlock Text="{Binding Initials}" FontSize="20" FontWeight="Bold"
-                             Foreground="#E8ECF4" Opacity="0.85"
-                             HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </Border>
-                <Image Source="{Binding Cover}" Stretch="UniformToFill"
-                       IsVisible="{Binding HasCover, FallbackValue=False}" />
-              </Panel>
-            </Border>
-
-            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center" Margin="14,0,14,0">
-              <Grid ColumnDefinitions="Auto,Auto,*">
-                <TextBlock Grid.Column="0" x:Name="SelectedGameTitle" Text="No game selected" FontSize="16"
-                           FontWeight="Bold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
-                           MaxWidth="340" Margin="0,0,10,0" />
-
-                <!-- Title id / version / size badges, right next to the
-                     title. The title's own MaxWidth (not a "*" column) is
-                     what keeps them from drifting to the far right. -->
-                <StackPanel Grid.Column="1" x:Name="SelectedBadgesRow"
-                            x:DataType="local:GameEntry"
-                            x:CompileBindings="True"
-                            Orientation="Horizontal" Spacing="6"
-                            IsVisible="False" VerticalAlignment="Center">
-                  <Border Classes="pill" IsVisible="{Binding HasTitleId, FallbackValue=False}">
-                    <TextBlock Text="{Binding TitleId}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                  <Border Classes="pill" IsVisible="{Binding HasVersion, FallbackValue=False}">
-                    <TextBlock Text="{Binding VersionText}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                  <Border Classes="pill">
-                    <TextBlock Text="{Binding SizeText, FallbackValue=''}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                </StackPanel>
-              </Grid>
-
-              <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin directly."
-                         FontSize="11" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
-              <StackPanel Orientation="Horizontal" Spacing="7">
-                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{StaticResource FaintBrush}"
-                         VerticalAlignment="Center" />
-                <TextBlock x:Name="StatusText" Text="Idle" FontSize="11" Foreground="{StaticResource MutedBrush}"
-                           VerticalAlignment="Center" />
-              </StackPanel>
-            </StackPanel>
-
-            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-              <ToggleButton x:Name="ConsoleToggle" Classes="ghost"
-                            Content="{Binding [Launch.Console], Source={x:Static local:Localization.Instance}}" />
-              <Button x:Name="LaunchButton" Classes="accent"
-                      Content="{Binding [Launch.Launch], Source={x:Static local:Localization.Instance}}"
-                      IsEnabled="False" />
-              <Button x:Name="StopButton" Classes="danger"
-                      Content="{Binding [Launch.Stop], Source={x:Static local:Localization.Instance}}"
-                      IsEnabled="False" />
-            </StackPanel>
-          </Grid>
-        </StackPanel>
-      </Border>
     </Grid>
-
-    <!-- Keep launch progress above the blurred library while the SDL game
-         process owns its independent top-level window. -->
-    <primitives:Popup x:Name="SessionLoadingPopup"
-                      IsOpen="False"
-                      PlacementTarget="{Binding #MainContent}"
-                      Placement="Center"
-                      Topmost="True"
-                      ShouldUseOverlayLayer="False"
-                      TakesFocusFromNativeControl="False"
-                      IsLightDismissEnabled="False">
-      <Border Classes="card" Width="380" CornerRadius="18" Padding="22,18">
-        <StackPanel Spacing="12">
-          <TextBlock x:Name="SessionLoadingTitle" Text="Loading game" FontSize="16" FontWeight="SemiBold" />
-          <TextBlock x:Name="SessionLoadingDetail" Text="Preparing the emulation session..." FontSize="12"
-                     Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
-          <ProgressBar x:Name="SessionLoadingProgress" IsIndeterminate="True" Height="5" />
-        </StackPanel>
-      </Border>
-    </primitives:Popup>
 
     <!-- Status bar -->
     <Grid x:Name="StatusBar" Grid.Row="2" Height="32" Background="{StaticResource ChromeBrush}"

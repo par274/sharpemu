@@ -33,8 +33,6 @@ public partial class MainWindow : Window
 {
     private const int MaxConsoleLines = 4000;
     private const int MaxConsoleLinesPerFlush = 500;
-    private const double LaunchBlurRadius = 12;
-    private const double BlurTransitionSeconds = 0.24;
 
     private static readonly IBrush DefaultLineBrush = new SolidColorBrush(Color.Parse("#C7CFDE"));
     private static readonly IBrush DimLineBrush = new SolidColorBrush(Color.Parse("#6B7488"));
@@ -89,12 +87,6 @@ public partial class MainWindow : Window
     private readonly List<LogLine> _allConsoleLines = new();
     private readonly ConcurrentQueue<(string Line, bool IsError)> _pendingLines = new();
     private readonly DispatcherTimer _consoleFlushTimer;
-    private readonly DispatcherTimer _libraryBlurTimer;
-    private BlurEffect? _libraryBlur;
-    private double _libraryBlurStartRadius;
-    private double _libraryBlurTargetRadius;
-    private long _libraryBlurStartedAt;
-    private bool _clearLibraryBlurWhenComplete;
 
     private GuiSettings _settings = new();
     private IReadOnlyList<HostDisplayOption> _hostDisplays = [];
@@ -131,11 +123,6 @@ public partial class MainWindow : Window
     // Bundled key art shown whenever no game-specific backdrop applies; the
     // plain window color remains the fallback when the asset fails to load.
     private Bitmap? _defaultBackdrop;
-
-    // Whether the native loading/closing popup should be showing; it is a
-    // desktop-topmost popup, so it closes while the launcher is in the
-    // background or minimized and reopens from this flag on activation.
-    private bool _sessionLoadingActive;
 
     // Controller navigation state.
     private readonly DispatcherTimer _gamepadTimer;
@@ -190,23 +177,6 @@ public partial class MainWindow : Window
         };
         _consoleFlushTimer.Start();
 
-        _libraryBlurTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(16),
-        };
-        _libraryBlurTimer.Tick += (_, _) => AdvanceLibraryBlur();
-
-        // Native popups float above every window on the desktop; they must
-        // follow the launcher into the background or a minimized state.
-        Activated += (_, _) =>
-        {
-            SessionLoadingPopup.IsOpen = _sessionLoadingActive;
-        };
-        Deactivated += (_, _) =>
-        {
-            SessionLoadingPopup.IsOpen = false;
-        };
-
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
         TitleBar.DoubleTapped += OnTitleBarDoubleTapped;
         MinimizeButton.Click += (_, _) => WindowState = WindowState.Minimized;
@@ -229,11 +199,21 @@ public partial class MainWindow : Window
         SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
         OpenFileButton.Click += async (_, _) => await OpenFileAsync();
-        LaunchButton.Click += (_, _) => LaunchSelected();
+        LaunchButton.Click += (_, _) =>
+        {
+            if (_isRunning)
+            {
+                StopEmulator();
+            }
+            else
+            {
+                LaunchSelected();
+            }
+        };
         ClearLogButton.Click += (_, _) => { _consoleLines.Clear(); _allConsoleLines.Clear(); };
-        StopButton.Click += (_, _) => StopEmulator();
         CopyLogButton.Click += async (_, _) => await CopyConsoleAsync();
         DetachConsoleButton.Click += (_, _) => ShowConsoleWindow();
+        CloseConsoleButton.Click += (_, _) => ConsoleToggle.IsChecked = false;
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
         ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
@@ -636,7 +616,7 @@ public partial class MainWindow : Window
         RefreshHostRefreshRates(_settings.RefreshRate);
         RefreshUpdateText();
         UpdateEmptyStateTexts();
-        UpdateSelectedGameTexts();
+        UpdateRunButtons();
     }
 
     // ---- Discord Rich Presence ----
@@ -704,7 +684,6 @@ public partial class MainWindow : Window
         _libraryWatcher.Dispose();
         _settings.Save();
         _consoleFlushTimer.Stop();
-        _libraryBlurTimer.Stop();
         _gamepadTimer.Stop();
         SdlLauncherGamepad.Shutdown();
         _sndPreview.Stop();
@@ -1782,7 +1761,6 @@ public partial class MainWindow : Window
         }
         else
         {
-            UpdateSelectedGameTexts();
             UpdateRunButtons();
             if (selectedAfter is not null && backgroundsChanged?.Contains(selectedAfter) == true)
             {
@@ -1816,47 +1794,20 @@ public partial class MainWindow : Window
     {
         if (GameList.SelectedItem is GameEntry game)
         {
-            UpdateSelectedGameTexts();
             LibrarySelectedDetails.DataContext = game;
             LibrarySelectedDetails.IsVisible = true;
-            SelectedCoverPanel.DataContext = game;
-            SelectedBadgesRow.DataContext = game;
-            SelectedBadgesRow.IsVisible = true;
             _ = UpdateBackdropAsync(game);
             PlaySelectedGamePreview(game);
         }
         else
         {
-            UpdateSelectedGameTexts();
             LibrarySelectedDetails.DataContext = null;
             LibrarySelectedDetails.IsVisible = false;
-            SelectedCoverPanel.DataContext = null;
-            SelectedBadgesRow.DataContext = null;
-            SelectedBadgesRow.IsVisible = false;
             _ = UpdateBackdropAsync(null);
             _sndPreview.Stop();
         }
 
         UpdateRunButtons();
-    }
-
-    /// <summary>
-    /// Text-only refresh of the launch bar's title/path, split out of
-    /// <see cref="UpdateSelectedGame"/> so a language change can re-apply it
-    /// without restarting the backdrop fade or preview music.
-    /// </summary>
-    private void UpdateSelectedGameTexts()
-    {
-        if (GameList.SelectedItem is GameEntry game)
-        {
-            SelectedGameTitle.Text = game.Name;
-            SelectedGamePath.Text = game.Path;
-        }
-        else
-        {
-            SelectedGameTitle.Text = Localization.Instance.Get("Launch.NoGameSelected");
-            SelectedGamePath.Text = Localization.Instance.Get("Launch.NoGameHint");
-        }
     }
 
     /// <summary>
@@ -1908,18 +1859,10 @@ public partial class MainWindow : Window
             if (WindowState == WindowState.Minimized)
             {
                 _sndPreview.Pause();
-                if (SessionLoadingPopup is { } popup)
-                {
-                    popup.IsOpen = false;
-                }
             }
             else
             {
                 _sndPreview.Resume();
-                if (SessionLoadingPopup is { } popup)
-                {
-                    popup.IsOpen = _sessionLoadingActive;
-                }
             }
         }
     }
@@ -2073,16 +2016,14 @@ public partial class MainWindow : Window
         };
 
         _isRunning = true;
+        _isStopping = false;
         _runningGameName = displayName;
         _runningGameTitleId = resolvedTitleId;
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        StatusDot.Fill = SuccessLineBrush;
-        StatusText.Text = Localization.Instance.Format("Launch.Running", displayName);
         StatusBarRight.Text = Localization.Instance.Format("Status.Running", displayName);
         UpdateRunButtons();
         UpdateDiscordPresence();
 
-        BeginSessionUi();
         _pendingLaunch = new PendingLaunch(
             Path.GetFullPath(ebootPath),
             displayName,
@@ -2128,15 +2069,14 @@ public partial class MainWindow : Window
         }
 
         _isStopping = true;
-        StopButton.IsEnabled = false;
-        ShowSessionLoading("Closing game", "Waiting for the emulation session to exit...");
+        UpdateRunButtons();
         _emulator.Stop();
         _runningGameName = null;
         _runningGameTitleId = null;
-        StatusText.Text = Localization.Instance.Get("Launch.Stopping");
         StatusBarRight.Text = Localization.Instance.Get("Status.Stopping");
         UpdateDiscordPresence();
-        ReturnToLibraryWhileStopping();
+        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        Console.Error.WriteLine("[GUI][INFO] Waiting for the SDL game process to exit.");
     }
 
     /// <summary>
@@ -2178,7 +2118,7 @@ public partial class MainWindow : Window
         _emulator?.Dispose();
         _emulator = null;
         _pendingLaunch = null;
-        EndSessionUi();
+        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
 
         var meaningKey = exitCode switch
         {
@@ -2200,10 +2140,6 @@ public partial class MainWindow : Window
             brush);
         CloseFileLogSoon();
 
-        StatusDot.Fill = exitCode == 0 || stoppedByUser ? (IBrush)SuccessLineBrush : ErrorLineBrush;
-        StatusText.Text = stoppedByUser
-            ? "Game closed by the user."
-            : Localization.Instance.Format("Launch.Exited", exitCode, meaning);
         StatusBarRight.Text = Localization.Instance.Get("Status.Idle");
         _runningGameName = null;
         _runningGameTitleId = null;
@@ -2284,137 +2220,6 @@ public partial class MainWindow : Window
     private void OnEmulatorOutput(string line, bool isError)
     {
         _pendingLines.Enqueue((line, isError));
-        if (!line.Contains("Vulkan VideoOut presented first frame:", StringComparison.Ordinal) &&
-            !line.Contains("Vulkan VideoOut ready:", StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        Dispatcher.UIThread.Post(() =>
-        {
-            if (_isRunning && !_isStopping)
-            {
-                ShowSessionStatus("Game is running");
-            }
-        });
-    }
-
-    private void BeginSessionUi()
-    {
-        _isStopping = false;
-        AnimateLibraryBlur(LaunchBlurRadius);
-        ShowSessionLoading("Loading game", "Preparing the emulation session...");
-        LaunchBar.IsVisible = true;
-    }
-
-    private void EndSessionUi()
-    {
-        HideSessionLoading();
-        AnimateLibraryBlur(0, clearWhenComplete: true);
-        LaunchBar.IsVisible = true;
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
-    }
-
-    private void AnimateLibraryBlur(double targetRadius, bool clearWhenComplete = false)
-    {
-        _libraryBlur ??= new BlurEffect();
-        PagesHost.Effect = _libraryBlur;
-
-        _libraryBlurStartRadius = _libraryBlur.Radius;
-        _libraryBlurTargetRadius = Math.Max(0, targetRadius);
-        _libraryBlurStartedAt = Stopwatch.GetTimestamp();
-        _clearLibraryBlurWhenComplete = clearWhenComplete && _libraryBlurTargetRadius == 0;
-
-        if (Math.Abs(_libraryBlurStartRadius - _libraryBlurTargetRadius) < 0.01)
-        {
-            CompleteLibraryBlur();
-            return;
-        }
-
-        _libraryBlurTimer.Start();
-    }
-
-    private void AdvanceLibraryBlur()
-    {
-        if (_libraryBlur is null)
-        {
-            _libraryBlurTimer.Stop();
-            return;
-        }
-
-        var elapsed = (Stopwatch.GetTimestamp() - _libraryBlurStartedAt) /
-                      (double)Stopwatch.Frequency;
-        var progress = Math.Clamp(elapsed / BlurTransitionSeconds, 0, 1);
-        // Cubic ease-out gives the loading transition a quick response while
-        // keeping the final change of sharpness unobtrusive.
-        var easedProgress = 1 - Math.Pow(1 - progress, 3);
-        _libraryBlur.Radius = _libraryBlurStartRadius +
-                              ((_libraryBlurTargetRadius - _libraryBlurStartRadius) * easedProgress);
-
-        if (progress >= 1)
-        {
-            CompleteLibraryBlur();
-        }
-    }
-
-    private void CompleteLibraryBlur()
-    {
-        _libraryBlurTimer.Stop();
-        if (_libraryBlur is not null)
-        {
-            _libraryBlur.Radius = _libraryBlurTargetRadius;
-        }
-
-        if (_clearLibraryBlurWhenComplete)
-        {
-            PagesHost.Effect = null;
-            _libraryBlur = null;
-            _clearLibraryBlurWhenComplete = false;
-        }
-    }
-
-    private void ClearLibraryBlur()
-    {
-        _libraryBlurTimer.Stop();
-        _libraryBlur = null;
-        _clearLibraryBlurWhenComplete = false;
-        PagesHost.Effect = null;
-    }
-
-    private void ShowSessionLoading(string title, string detail)
-    {
-        SessionLoadingTitle.Text = title;
-        SessionLoadingTitle.IsVisible = true;
-        SessionLoadingDetail.Text = detail;
-        SessionLoadingDetail.IsVisible = true;
-        SessionLoadingProgress.IsVisible = true;
-        _sessionLoadingActive = true;
-        SessionLoadingPopup.IsOpen = IsActive && WindowState != WindowState.Minimized;
-    }
-
-    private void ShowSessionStatus(string message)
-    {
-        SessionLoadingTitle.Text = message;
-        SessionLoadingTitle.IsVisible = true;
-        SessionLoadingDetail.IsVisible = false;
-        SessionLoadingProgress.IsVisible = false;
-        _sessionLoadingActive = true;
-        SessionLoadingPopup.IsOpen = IsActive && WindowState != WindowState.Minimized;
-    }
-
-    private void HideSessionLoading()
-    {
-        _sessionLoadingActive = false;
-        SessionLoadingPopup.IsOpen = false;
-    }
-
-    private void ReturnToLibraryWhileStopping()
-    {
-        AnimateLibraryBlur(LaunchBlurRadius);
-        ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
-        LaunchBar.IsVisible = true;
-        UpdateRunButtons();
-        Console.Error.WriteLine("[GUI][INFO] Waiting for the SDL game process to exit.");
     }
 
     private void OpenFileLog(string? titleId)
@@ -2471,8 +2276,23 @@ public partial class MainWindow : Window
 
     private void UpdateRunButtons()
     {
-        LaunchButton.IsEnabled = !_isRunning && GameList.SelectedItem is GameEntry;
-        StopButton.IsEnabled = _isRunning && !_isStopping;
+        LaunchButton.Classes.Remove("accent");
+        LaunchButton.Classes.Remove("danger");
+
+        if (_isRunning)
+        {
+            LaunchButton.Classes.Add("danger");
+            LaunchButton.Content = Localization.Instance.Get(
+                _isStopping ? "Launch.Stopping" : "Launch.Stop");
+            LaunchButton.IsEnabled = !_isStopping;
+        }
+        else
+        {
+            LaunchButton.Classes.Add("accent");
+            LaunchButton.Content = Localization.Instance.Get("Launch.Launch");
+            LaunchButton.IsEnabled = GameList.SelectedItem is GameEntry;
+        }
+
         OpenFileButton.IsEnabled = !_isRunning;
     }
 
