@@ -16,7 +16,10 @@ namespace SharpEmu.GUI;
 public static class Updater
 {
     private const string ApplyArgument = "--sharpemu-apply-update";
-    private const string ReleasesUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases?per_page=20";
+    private const string ReleasesUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases?per_page={0}&page={1}";
+    private const int ReleasePageSize = 100;
+    private const int MaxReleasePages = 10;
+    private const int MaxConcurrentComparisons = 3;
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(10);
     private const int CheckAttempts = 3;
@@ -66,31 +69,32 @@ public static class Updater
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(CheckTimeout);
 
-        using var response = await Http.GetAsync(ReleasesUrl, timeout.Token);
-        response.EnsureSuccessStatusCode();
-        var releases = ParseReleases(
-            await response.Content.ReadAsStringAsync(timeout.Token),
-            platform.Rid,
-            platform.Extension);
+        var releases = await GetReleasesAsync(platform.Rid, platform.Extension, timeout.Token);
         if (currentSha is null)
         {
             return null;
         }
 
-        var newerReleases = new List<UpdateInfo>();
-        foreach (var release in releases)
+        var newerShas = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var batch in releases.Chunk(MaxConcurrentComparisons))
         {
-            if (string.Equals(release.Sha, currentSha, StringComparison.OrdinalIgnoreCase))
+            var comparisons = await Task.WhenAll(batch.Select(async release =>
             {
-                continue;
-            }
+                if (string.Equals(release.Sha, currentSha, StringComparison.OrdinalIgnoreCase))
+                {
+                    return (release.Sha, IsNewer: false);
+                }
 
-            var comparison = await CompareCommitsAsync(currentSha, release.Sha, timeout.Token);
-            if (comparison.Status == "ahead" && comparison.ReleaseDate > comparison.CurrentDate)
+                var comparison = await CompareCommitsAsync(currentSha, release.Sha, timeout.Token);
+                return (release.Sha, IsNewer: comparison.Status == "ahead" && comparison.ReleaseDate > comparison.CurrentDate);
+            }));
+            foreach (var comparison in comparisons.Where(comparison => comparison.IsNewer))
             {
-                newerReleases.Add(release);
+                newerShas.Add(comparison.Sha);
             }
         }
+
+        var newerReleases = releases.Where(release => newerShas.Contains(release.Sha)).ToList();
 
         if (newerReleases.Count == 0)
         {
@@ -104,6 +108,31 @@ public static class Updater
                 .Select(release => new UpdateReleaseNotes(release.TagName, release.Changelog[0].Notes))
                 .ToArray(),
         };
+    }
+
+    private static async Task<IReadOnlyList<UpdateInfo>> GetReleasesAsync(
+        string rid,
+        string extension,
+        CancellationToken cancellationToken)
+    {
+        var pages = new List<string>();
+        for (var page = 1; page <= MaxReleasePages; page++)
+        {
+            var url = string.Format(ReleasesUrl, ReleasePageSize, page);
+            using var response = await Http.GetAsync(url, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            pages.Add(json);
+
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Array ||
+                document.RootElement.GetArrayLength() < ReleasePageSize)
+            {
+                break;
+            }
+        }
+
+        return ParseReleasePages(pages, rid, extension);
     }
 
     public static async Task DownloadAndRestartAsync(
@@ -304,8 +333,19 @@ public static class Updater
         return releases;
     }
 
+    internal static IReadOnlyList<UpdateInfo> ParseReleasePages(
+        IEnumerable<string> pages,
+        string rid,
+        string extension) => pages.SelectMany(page => ParseReleases(page, rid, extension)).ToArray();
+
     private static UpdateInfo? ParseRelease(JsonElement release, string rid, string extension)
     {
+        var tagName = release.GetProperty("tag_name").GetString() ?? "";
+        if (!IsVersionedReleaseTag(tagName))
+        {
+            return null;
+        }
+
         var releaseSha = ExtractReleaseSha(release);
         var candidates = new List<(DateTimeOffset Created, UpdateInfo Update)>();
         foreach (var asset in release.GetProperty("assets").EnumerateArray())
@@ -346,9 +386,9 @@ public static class Updater
                     asset.GetProperty("browser_download_url").GetString()!,
                     asset.GetProperty("size").GetInt64(),
                     digest["sha256:".Length..],
-                    release.GetProperty("tag_name").GetString() ?? "",
+                    tagName,
                     [new UpdateReleaseNotes(
-                        release.GetProperty("tag_name").GetString() ?? "",
+                        tagName,
                         release.TryGetProperty("body", out var body) && body.ValueKind == JsonValueKind.String
                             ? body.GetString() ?? ""
                             : "")])));
@@ -357,6 +397,11 @@ public static class Updater
         var latest = candidates.OrderByDescending(candidate => candidate.Created).FirstOrDefault().Update;
         return latest;
     }
+
+    internal static bool IsVersionedReleaseTag(string tagName) => Regex.IsMatch(
+        tagName,
+        @"^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$",
+        RegexOptions.CultureInvariant);
 
     private static async Task<CommitComparison> CompareCommitsAsync(
         string currentSha,
