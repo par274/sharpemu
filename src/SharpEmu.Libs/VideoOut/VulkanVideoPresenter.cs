@@ -9220,14 +9220,6 @@ internal static unsafe class VulkanVideoPresenter
             {
                 var guestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType);
 
-                // GuestImageResource.View is the canonical alias view every
-                // other consumer assumes is identity-swizzled: the fast path
-                // in GetOrCreateGuestImageView() returns it directly for
-                // identity requests, and any later VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-                // binding of this same guest address requires an identity
-                // mapping per the Vulkan spec. `view` above was built with
-                // this texture's own DstSelect for direct sampling, so it
-                // must not leak into that role unless it already is identity.
                 var canonicalView = view;
                 if (texture.DstSelect != 0xFAC)
                 {
@@ -11163,14 +11155,6 @@ internal static unsafe class VulkanVideoPresenter
                 EnsureGuestSubmissionCapacity();
                 resources = CreateComputeDispatchResources(work);
 
-                // Resolving textures above can GPU-detile a texture, which
-                // records its deswizzle + layout transition into the shared
-                // batch command buffer (BeginBatchedGuestCommands). That
-                // buffer is separate from the dispatch's own command buffer
-                // allocated below, and nothing else flushes it before this
-                // dispatch samples the result — without this, the detile
-                // work is still unsubmitted when the dispatch's buffer goes
-                // to the queue, so the sampled image is still UNDEFINED.
                 FlushBatchedGuestCommands();
 
                 var batchCount = Math.Max(
@@ -14324,11 +14308,6 @@ internal static unsafe class VulkanVideoPresenter
                         pendingGuestWork.Queue.Name,
                         StringComparison.Ordinal))
                 {
-                    // A host command buffer must never contain commands from
-                    // two independent guest queues: an ordered action fences
-                    // only its own queue's predecessor submissions.
-                    // Keep the previous work label so a device-lost on this
-                    // flush still names the draws that filled the batch.
                     FlushBatchedGuestCommands();
                 }
 
@@ -14368,14 +14347,7 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 try
                 {
-                    // A host-decoded movie only overrides which image gets
-                    // presented (see the presentation selection below); the
-                    // guest's own command stream keeps draining normally.
-                    // Silently discarding these instead of executing them
-                    // leaves guest-visible completion state (labels, buffers,
-                    // job results) permanently unwritten, which desyncs the
-                    // engine's own job system and previously crashed it
-                    // shortly after the movie finished.
+
                     switch (work)
                     {
                         case VulkanOffscreenGuestDraw offscreenDraw:
@@ -15529,19 +15501,7 @@ internal static unsafe class VulkanVideoPresenter
             depth.Layout = ImageLayout.ShaderReadOnlyOptimal;
         }
 
-        /// <summary>
-        /// A render-target-backed guest image sampled before it was ever
-        /// rendered into (or CPU-uploaded) is still VK_IMAGE_LAYOUT_UNDEFINED,
-        /// but the descriptor write for a sampled texture always declares
-        /// VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL (see the sampled-image
-        /// DescriptorImageInfo in CreateDescriptorSet). Left unhandled this
-        /// trips VUID-vkCmdDraw-None-09600 on first sample and leaves the
-        /// image's real layout out of sync with the Initialized-implies-
-        /// ShaderReadOnlyOptimal invariant every other guest-image barrier
-        /// path relies on. Clear to zero (matching the depth equivalent
-        /// below) so float formats never read back NaN/Inf garbage, then
-        /// transition to ShaderReadOnlyOptimal and mark it initialized.
-        /// </summary>
+
         private void RecordGuestImageForSampling(
             GuestImageResource guestImage,
             PipelineStageFlags shaderStage)
