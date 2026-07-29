@@ -14,7 +14,7 @@ Cover-art library item states and motion.
   </Style>
   <Style Selector="ListBox.tileGrid ListBoxItem">
     <Setter Property="Width" Value="160" />
-    <Setter Property="Height" Value="222" />
+    <Setter Property="Height" Value="172" />
     <Setter Property="Padding" Value="4" />
     <Setter Property="Margin" Value="0,8,12,8" />
     <Setter Property="CornerRadius" Value="9" />

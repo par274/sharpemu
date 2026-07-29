@@ -129,7 +129,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
         <!-- Library page. Covers use a horizontal virtualized rail so the
              number of realized images stays bounded for large libraries. -->
-        <Grid x:Name="LibraryPage" Margin="0,46,0,0" RowDefinitions="238,*">
+        <Grid x:Name="LibraryPage" Margin="0,46,0,0" RowDefinitions="188,*">
           <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
                    Grid.Row="0"
                    SelectionMode="Single" Padding="4,0,28,0">
@@ -192,7 +192,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <DataTemplate x:DataType="local:GameEntry" x:CompileBindings="True">
                 <Border Classes="coverShadow libraryGameCard"
                         Width="148"
-                        Height="198"
+                        Height="148"
                         ToolTip.Tip="{Binding Name}"
                         AutomationProperties.Name="{Binding Name}">
                   <Border Classes="coverClip">
@@ -213,7 +213,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
               <DataTemplate x:DataType="local:AddFolderTile">
                 <Border Classes="addFolderTile"
                         Width="148"
-                        Height="198"
+                        Height="148"
                         ToolTip.Tip="{Binding [Library.AddFolder],
                                               Source={x:Static local:Localization.Instance},
                                               x:CompileBindings=False}"
