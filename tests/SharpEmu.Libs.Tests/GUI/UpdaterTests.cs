@@ -2,12 +2,42 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.GUI;
+using System.Net;
+using System.Net.Http;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.GUI;
 
 public sealed class UpdaterTests
 {
+    [Fact]
+    public async Task CheckAsync_TimeoutRetriesAfterConfiguredDelay()
+    {
+        var requests = 0;
+        var delays = new List<TimeSpan>();
+        using var client = new HttpClient(new DelegateHandler(_ =>
+        {
+            requests++;
+            if (requests == 1)
+            {
+                throw new OperationCanceledException();
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]") };
+        }));
+        using var scope = Updater.UseHttpClientForTests(client, (delay, _) =>
+        {
+            delays.Add(delay);
+            return Task.CompletedTask;
+        });
+
+        var update = await Updater.CheckAsync("abcdef0");
+
+        Assert.Null(update);
+        Assert.Equal(2, requests);
+        Assert.Equal([TimeSpan.FromSeconds(10)], delays);
+    }
+
     [Fact]
     public void ParseReleases_PreservesNewestToOldestVersionedChangelog()
     {
@@ -100,5 +130,11 @@ public sealed class UpdaterTests
         var releases = Updater.ParseReleasePages([newestPage, olderPage], "win-x64", ".zip");
 
         Assert.Equal(["v0.0.3", "v0.0.2"], releases.Select(release => release.TagName));
+    }
+
+    private sealed class DelegateHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(send(request));
     }
 }

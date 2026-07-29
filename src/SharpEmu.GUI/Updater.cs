@@ -23,7 +23,8 @@ public static class Updater
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(10);
     private const int CheckAttempts = 3;
-    private static readonly HttpClient Http = CreateHttpClient();
+    private static HttpClient Http = CreateHttpClient();
+    private static Func<TimeSpan, CancellationToken, Task> DelayAsync = Task.Delay;
     private static string? _releasesEtag;
     private static string? _releasesJson;
 
@@ -52,7 +53,7 @@ public static class Updater
                 lastTimeout = ex;
                 if (attempt < CheckAttempts)
                 {
-                    await Task.Delay(RetryDelay, cancellationToken);
+                    await DelayAsync(RetryDelay, cancellationToken);
                 }
             }
         }
@@ -421,6 +422,19 @@ public static class Updater
         @"^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$",
         RegexOptions.CultureInvariant);
 
+    internal static IDisposable UseHttpClientForTests(
+        HttpClient client,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    {
+        var previousClient = Http;
+        var previousDelay = DelayAsync;
+        Http = client;
+        DelayAsync = delayAsync ?? Task.Delay;
+        _releasesEtag = null;
+        _releasesJson = null;
+        return new TestHttpScope(previousClient, previousDelay);
+    }
+
     private static async Task<CommitComparison> CompareCommitsAsync(
         string currentSha,
         string releaseSha,
@@ -521,6 +535,19 @@ public static class Updater
         client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("SharpEmu", "0.0.1"));
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         return client;
+    }
+
+    private sealed class TestHttpScope(
+        HttpClient previousClient,
+        Func<TimeSpan, CancellationToken, Task> previousDelay) : IDisposable
+    {
+        public void Dispose()
+        {
+            Http = previousClient;
+            DelayAsync = previousDelay;
+            _releasesEtag = null;
+            _releasesJson = null;
+        }
     }
 
     private static PlatformInfo CurrentPlatform()
