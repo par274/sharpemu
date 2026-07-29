@@ -9,7 +9,6 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Reflection;
 
 namespace SharpEmu.GUI;
 
@@ -17,45 +16,94 @@ namespace SharpEmu.GUI;
 public static class Updater
 {
     private const string ApplyArgument = "--sharpemu-apply-update";
-    private const string LatestReleaseUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases/latest";
-    private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(10);
+    private const string ReleasesUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases?per_page=20";
+    private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(10);
+    private const int CheckAttempts = 3;
     private static readonly HttpClient Http = CreateHttpClient();
 
-    public sealed record UpdateInfo(string Sha, string Name, string DownloadUrl, long Size, string Sha256, string TagName);
+    public sealed record UpdateInfo(
+        string Sha,
+        string Name,
+        string DownloadUrl,
+        long Size,
+        string Sha256,
+        string TagName,
+        IReadOnlyList<UpdateReleaseNotes> Changelog);
+
+    public sealed record UpdateReleaseNotes(string TagName, string Notes);
 
     public static async Task<UpdateInfo?> CheckAsync(string? currentSha, CancellationToken cancellationToken = default)
+    {
+        OperationCanceledException? lastTimeout = null;
+        for (var attempt = 1; attempt <= CheckAttempts; attempt++)
+        {
+            try
+            {
+                return await CheckOnceAsync(currentSha, cancellationToken);
+            }
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                lastTimeout = ex;
+                if (attempt < CheckAttempts)
+                {
+                    await Task.Delay(RetryDelay, cancellationToken);
+                }
+            }
+        }
+
+        if (lastTimeout is not null)
+        {
+            throw lastTimeout;
+        }
+
+        throw new TimeoutException("The update check timed out.");
+    }
+
+    private static async Task<UpdateInfo?> CheckOnceAsync(string? currentSha, CancellationToken cancellationToken)
     {
         var platform = CurrentPlatform();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(CheckTimeout);
 
-        using var response = await Http.GetAsync(LatestReleaseUrl, timeout.Token);
+        using var response = await Http.GetAsync(ReleasesUrl, timeout.Token);
         response.EnsureSuccessStatusCode();
-        var update = ParseRelease(
+        var releases = ParseReleases(
             await response.Content.ReadAsStringAsync(timeout.Token),
-            null,
             platform.Rid,
             platform.Extension);
-        var currentVersion = Assembly.GetExecutingAssembly()
-            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
-        if (update is null || currentSha is null ||
-            string.Equals(update.Sha, currentSha, StringComparison.OrdinalIgnoreCase))
+        if (currentSha is null)
         {
             return null;
         }
 
-        if (currentVersion is not null &&
-            TryParseVersion(currentVersion, out var installed) &&
-            TryParseVersion(update.TagName, out var available) &&
-            available.CompareTo(installed) <= 0)
+        var newerReleases = new List<UpdateInfo>();
+        foreach (var release in releases)
+        {
+            if (string.Equals(release.Sha, currentSha, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var comparison = await CompareCommitsAsync(currentSha, release.Sha, timeout.Token);
+            if (comparison.Status == "ahead" && comparison.ReleaseDate > comparison.CurrentDate)
+            {
+                newerReleases.Add(release);
+            }
+        }
+
+        if (newerReleases.Count == 0)
         {
             return null;
         }
 
-        var comparison = await CompareCommitsAsync(currentSha, update.Sha, timeout.Token);
-        return comparison.Status == "ahead" && comparison.ReleaseDate > comparison.CurrentDate
-            ? update
-            : null;
+        var latest = newerReleases[0];
+        return latest with
+        {
+            Changelog = newerReleases
+                .Select(release => new UpdateReleaseNotes(release.TagName, release.Changelog[0].Notes))
+                .ToArray(),
+        };
     }
 
     public static async Task DownloadAndRestartAsync(
@@ -232,16 +280,35 @@ public static class Updater
         return true;
     }
 
-    private static UpdateInfo? ParseRelease(
+    internal static IReadOnlyList<UpdateInfo> ParseReleases(
         string json,
-        string? currentSha,
         string rid,
         string extension)
     {
         using var document = JsonDocument.Parse(json);
-        var releaseSha = ExtractReleaseSha(document.RootElement);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var releases = new List<UpdateInfo>();
+        foreach (var release in document.RootElement.EnumerateArray())
+        {
+            var update = ParseRelease(release, rid, extension);
+            if (update is not null)
+            {
+                releases.Add(update);
+            }
+        }
+
+        return releases;
+    }
+
+    private static UpdateInfo? ParseRelease(JsonElement release, string rid, string extension)
+    {
+        var releaseSha = ExtractReleaseSha(release);
         var candidates = new List<(DateTimeOffset Created, UpdateInfo Update)>();
-        foreach (var asset in document.RootElement.GetProperty("assets").EnumerateArray())
+        foreach (var asset in release.GetProperty("assets").EnumerateArray())
         {
             var name = asset.GetProperty("name").GetString() ?? "";
             var marker = $"-{rid}";
@@ -279,13 +346,16 @@ public static class Updater
                     asset.GetProperty("browser_download_url").GetString()!,
                     asset.GetProperty("size").GetInt64(),
                     digest["sha256:".Length..],
-                    document.RootElement.GetProperty("tag_name").GetString() ?? "")));
+                    release.GetProperty("tag_name").GetString() ?? "",
+                    [new UpdateReleaseNotes(
+                        release.GetProperty("tag_name").GetString() ?? "",
+                        release.TryGetProperty("body", out var body) && body.ValueKind == JsonValueKind.String
+                            ? body.GetString() ?? ""
+                            : "")])));
         }
 
         var latest = candidates.OrderByDescending(candidate => candidate.Created).FirstOrDefault().Update;
-        return latest is null || string.Equals(latest.Sha, currentSha, StringComparison.OrdinalIgnoreCase)
-            ? null
-            : latest;
+        return latest;
     }
 
     private static async Task<CommitComparison> CompareCommitsAsync(
@@ -320,7 +390,7 @@ public static class Updater
         var body = bodyProperty.GetString();
         var match = Regex.Match(
             body ?? "",
-            @"\bcommit\s+([0-9a-f]{7,40})\b",
+            @"\bcommit\s+(?:\[\s*`?)?([0-9a-f]{7,40})\b",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         if (!match.Success)
         {
@@ -329,21 +399,6 @@ public static class Updater
 
         var sha = match.Groups[1].Value;
         return sha.Length > 7 ? sha[..7] : sha;
-    }
-
-    private static bool TryParseVersion(string value, out ReleaseVersion version)
-    {
-        var match = Regex.Match(value.TrimStart('v'), @"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?");
-        if (!match.Success || !int.TryParse(match.Groups[1].Value, out var major) ||
-            !int.TryParse(match.Groups[2].Value, out var minor) ||
-            !int.TryParse(match.Groups[3].Value, out var patch))
-        {
-            version = default;
-            return false;
-        }
-
-        version = new ReleaseVersion(major, minor, patch, match.Groups[4].Value);
-        return true;
     }
 
     private static void TryDeleteDirectory(string path)
@@ -410,13 +465,4 @@ public static class Updater
 
     private sealed record PlatformInfo(string Rid, string Extension, string ExecutableName);
     private sealed record CommitComparison(string Status, DateTimeOffset CurrentDate, DateTimeOffset ReleaseDate);
-    private readonly record struct ReleaseVersion(int Major, int Minor, int Patch, string PreRelease) : IComparable<ReleaseVersion>
-    {
-        public int CompareTo(ReleaseVersion other) =>
-            (Major, Minor, Patch) != (other.Major, other.Minor, other.Patch)
-                ? (Major, Minor, Patch).CompareTo((other.Major, other.Minor, other.Patch))
-                : string.IsNullOrEmpty(PreRelease) == string.IsNullOrEmpty(other.PreRelease)
-                    ? string.CompareOrdinal(PreRelease, other.PreRelease)
-                    : string.IsNullOrEmpty(PreRelease) ? 1 : -1;
-    }
 }

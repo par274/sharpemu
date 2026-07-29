@@ -269,6 +269,8 @@ public partial class MainWindow : Window
         };
         AutoUpdateToggle.IsCheckedChanged += (_, _) =>
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
+        UpdateReminderToggle.IsCheckedChanged += (_, _) =>
+            _settings.ShowUpdateNotifications = UpdateReminderToggle.IsChecked == true;
         WindowModeBox.SelectionChanged += (_, _) => _settings.WindowMode = SelectedComboText(WindowModeBox, "Windowed");
         DisplayBox.SelectionChanged += (_, _) => OnHostDisplayChanged();
         ResolutionBox.SelectionChanged += (_, _) => OnHostResolutionChanged();
@@ -875,6 +877,7 @@ public partial class MainWindow : Window
         TitleMusicToggle.IsChecked = _settings.PlayTitleMusic;
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
+        UpdateReminderToggle.IsChecked = _settings.ShowUpdateNotifications;
         EnvBthidToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_BTHID_UNAVAILABLE");
         EnvLoopGuardToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
         EnvWritableApp0Toggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_WRITABLE_APP0");
@@ -1023,16 +1026,21 @@ public partial class MainWindow : Window
     {
         if (_availableUpdate is null)
         {
-            await CheckForUpdatesAsync();
+            await CheckForUpdatesAsync(forcePrompt: true);
             return;
         }
 
+        await ShowUpdateDialogAsync();
+    }
+
+    private async Task DownloadAvailableUpdateAsync(Updater.UpdateInfo update)
+    {
         UpdateButton.IsEnabled = false;
         try
         {
             var progress = new Progress<int>(value =>
                 SetUpdateStatus("Updater.Status.Downloading", value));
-            await Updater.DownloadAndRestartAsync(_availableUpdate, progress);
+            await Updater.DownloadAndRestartAsync(update, progress);
             SetUpdateStatus("Updater.Status.Installing");
             Close();
         }
@@ -1048,7 +1056,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task CheckForUpdatesAsync()
+    private async Task CheckForUpdatesAsync(bool forcePrompt = false)
     {
         _availableUpdate = null;
         UpdateButton.IsEnabled = false;
@@ -1059,6 +1067,10 @@ public partial class MainWindow : Window
             SetUpdateStatus(
                 _availableUpdate is null ? "Updater.Status.Current" : "Updater.Status.Available",
                 _availableUpdate?.Sha ?? BuildInfo.CommitSha ?? "dev");
+            if (_availableUpdate is not null && (forcePrompt || _settings.ShowUpdateNotifications))
+            {
+                await ShowUpdateDialogAsync();
+            }
         }
         catch (OperationCanceledException)
         {
@@ -1076,6 +1088,32 @@ public partial class MainWindow : Window
         {
             UpdateButton.IsEnabled = true;
             RefreshUpdateText();
+        }
+    }
+
+    private async Task ShowUpdateDialogAsync()
+    {
+        if (_availableUpdate is null)
+        {
+            return;
+        }
+
+        var result = await new UpdateDialog(_availableUpdate).ShowDialog<UpdateDialog.Result?>(this);
+        if (result is null)
+        {
+            return;
+        }
+
+        if (result.SuppressReminder)
+        {
+            _settings.ShowUpdateNotifications = false;
+            UpdateReminderToggle.IsChecked = false;
+            _settings.Save();
+        }
+
+        if (result.Download)
+        {
+            await DownloadAvailableUpdateAsync(_availableUpdate);
         }
     }
 
