@@ -83,6 +83,7 @@ public partial class MainWindow : Window
     ];
     private readonly List<GameEntry> _allGames = new();
     private readonly ObservableCollection<GameEntry> _visibleGames = new();
+    private readonly LibraryTileCollection _libraryTiles;
     private readonly GameLibraryWatcher _libraryWatcher = new();
     private readonly AvaloniaList<LogLine> _consoleLines = new();
     private readonly List<LogLine> _allConsoleLines = new();
@@ -123,6 +124,9 @@ public partial class MainWindow : Window
     private int _detailLoadGeneration;
     private int _backdropGeneration;
     private bool _isClosing;
+    private bool _restoringGameSelection;
+    private bool _addFolderInProgress;
+    private GameEntry? _lastSelectedGame;
 
     // Bundled key art shown whenever no game-specific backdrop applies; the
     // plain window color remains the fallback when the asset fails to load.
@@ -138,8 +142,6 @@ public partial class MainWindow : Window
     private HostGamepadButtons _previousPadButtons;
     private long _navLeftNextAt;
     private long _navRightNextAt;
-    private long _navUpNextAt;
-    private long _navDownNextAt;
 
     //Github http client for latest commit
     private static readonly HttpClient GithubHttpClient = CreateGithubHttpClient();
@@ -156,6 +158,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         InitializeLocalizedChoiceBoxes();
+        _libraryTiles = new LibraryTileCollection(_visibleGames);
 
         try
         {
@@ -169,7 +172,7 @@ public partial class MainWindow : Window
             _defaultBackdrop = null; // color background remains the fallback
         }
 
-        GameList.ItemsSource = _visibleGames;
+        GameList.ItemsSource = _libraryTiles;
         _libraryWatcher.RefreshRequested += OnLibraryRefreshRequested;
         ConsoleList.ItemsSource = _consoleLines;
         _consoleMirror = GuiConsoleMirror.Install((line, isError) =>
@@ -221,12 +224,10 @@ public partial class MainWindow : Window
             UpdateWindowChromeState();
         };
         UpdateWindowChromeState();
-        GameList.SelectionChanged += (_, _) => UpdateSelectedGame();
-        GameList.DoubleTapped += (_, _) => LaunchSelected();
+        GameList.SelectionChanged += (_, _) => OnGameListSelectionChanged();
+        GameList.DoubleTapped += OnGameListDoubleTapped;
         SearchBox.TextChanged += (_, _) => RefreshVisibleGames();
         ConsoleSearchBox.TextChanged += (_, _) => RefreshVisibleConsoleLines();
-        AddFolderButton.Click += async (_, _) => await AddFolderAsync();
-        EmptyAddFolderButton.Click += async (_, _) => await AddFolderAsync();
         OpenFileButton.Click += async (_, _) => await OpenFileAsync();
         LaunchButton.Click += (_, _) => LaunchSelected();
         ClearLogButton.Click += (_, _) => { _consoleLines.Clear(); _allConsoleLines.Clear(); };
@@ -518,8 +519,6 @@ public partial class MainWindow : Window
         var now = Environment.TickCount64;
         var left = (pad.Buttons & HostGamepadButtons.Left) != 0 || pad.LeftX < 64;
         var right = (pad.Buttons & HostGamepadButtons.Right) != 0 || pad.LeftX > 192;
-        var up = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
-        var down = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
 
         if (ShouldNavigate(left, ref _navLeftNextAt, now))
         {
@@ -529,16 +528,6 @@ public partial class MainWindow : Window
         if (ShouldNavigate(right, ref _navRightNextAt, now))
         {
             MoveSelection(1);
-        }
-
-        if (ShouldNavigate(up, ref _navUpNextAt, now))
-        {
-            MoveSelection(-TilesPerRow());
-        }
-
-        if (ShouldNavigate(down, ref _navDownNextAt, now))
-        {
-            MoveSelection(TilesPerRow());
         }
 
         var pressed = pad.Buttons & ~_previousPadButtons;
@@ -579,24 +568,11 @@ public partial class MainWindow : Window
 
     private void MoveSelection(int delta)
     {
-        if (_visibleGames.Count == 0)
-        {
-            return;
-        }
-
         var index = GameList.SelectedIndex < 0
             ? 0
-            : Math.Clamp(GameList.SelectedIndex + delta, 0, _visibleGames.Count - 1);
+            : Math.Clamp(GameList.SelectedIndex + delta, 0, _libraryTiles.Count - 1);
         GameList.SelectedIndex = index;
         GameList.ScrollIntoView(index);
-    }
-
-    private int TilesPerRow()
-    {
-        // Tile footprint: 128 content + 20 item padding + 10 item margin.
-        const double TileOuterWidth = 158;
-        var width = GameList.Bounds.Width;
-        return width > TileOuterWidth ? (int)(width / TileOuterWidth) : 1;
     }
 
     private async Task OnOpenedAsync()
@@ -1600,6 +1576,71 @@ public partial class MainWindow : Window
 
     // ---- Game context menu ----
 
+    private void OnGameListSelectionChanged()
+    {
+        if (_restoringGameSelection)
+        {
+            return;
+        }
+
+        if (GameList.SelectedItem is AddFolderTile)
+        {
+            _restoringGameSelection = true;
+            try
+            {
+                GameList.SelectedItem = _lastSelectedGame;
+            }
+            finally
+            {
+                _restoringGameSelection = false;
+            }
+
+            // A held direction must not reopen the picker after it closes.
+            _navLeftNextAt = long.MaxValue;
+            _navRightNextAt = long.MaxValue;
+            StartAddFolderFromTile();
+            return;
+        }
+
+        _lastSelectedGame = GameList.SelectedItem as GameEntry;
+        UpdateSelectedGame();
+    }
+
+    private void OnGameListDoubleTapped(object? sender, TappedEventArgs e)
+    {
+        var item = (e.Source as Visual)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
+        if (item?.DataContext is AddFolderTile)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        LaunchSelected();
+    }
+
+    private void StartAddFolderFromTile()
+    {
+        if (_addFolderInProgress)
+        {
+            return;
+        }
+
+        _addFolderInProgress = true;
+        _ = AddFolderFromTileAsync();
+    }
+
+    private async Task AddFolderFromTileAsync()
+    {
+        try
+        {
+            await AddFolderAsync();
+        }
+        finally
+        {
+            _addFolderInProgress = false;
+        }
+    }
+
     /// <summary>
     /// Selects the tile under the pointer before its context menu opens, and
     /// suppresses the menu on empty grid space.
@@ -1769,7 +1810,6 @@ public partial class MainWindow : Window
         EmptyStateHint.Text = hasFilter
             ? Localization.Instance.Format("Library.Empty.SearchHint", query)
             : Localization.Instance.Get("Library.Empty.Hint");
-        EmptyAddFolderButton.IsVisible = !hasFilter;
     }
 
     private void UpdateSelectedGame()
@@ -1777,6 +1817,8 @@ public partial class MainWindow : Window
         if (GameList.SelectedItem is GameEntry game)
         {
             UpdateSelectedGameTexts();
+            LibrarySelectedDetails.DataContext = game;
+            LibrarySelectedDetails.IsVisible = true;
             SelectedCoverPanel.DataContext = game;
             SelectedBadgesRow.DataContext = game;
             SelectedBadgesRow.IsVisible = true;
@@ -1786,6 +1828,8 @@ public partial class MainWindow : Window
         else
         {
             UpdateSelectedGameTexts();
+            LibrarySelectedDetails.DataContext = null;
+            LibrarySelectedDetails.IsVisible = false;
             SelectedCoverPanel.DataContext = null;
             SelectedBadgesRow.DataContext = null;
             SelectedBadgesRow.IsVisible = false;

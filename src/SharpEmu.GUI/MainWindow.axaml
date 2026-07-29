@@ -119,10 +119,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                    PlaceholderText="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}"
                    Width="240"
                    VerticalAlignment="Center" />
-          <Button x:Name="AddFolderButton"
-                  Classes="ghost"
-                  Content="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}"
-                  VerticalAlignment="Center" />
           <Button x:Name="OpenFileButton"
                   Classes="ghost"
                   Content="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}"
@@ -132,12 +128,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
       <Panel Grid.Row="1" x:Name="PagesHost">
 
-        <!-- Library page. The tile row gets extra top margin so it sits
-             closer to eye level (PS5 home-screen style) instead of hugging
-             the Library/Options switcher above it. -->
-        <Panel x:Name="LibraryPage" Margin="0,64,0,0">
+        <!-- Library page. Covers use a horizontal virtualized rail so the
+             number of realized images stays bounded for large libraries. -->
+        <Grid x:Name="LibraryPage" Margin="0,46,0,0" RowDefinitions="238,*">
           <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
-                   SelectionMode="Single" Padding="0">
+                   Grid.Row="0"
+                   SelectionMode="Single" Padding="4,0,28,0">
             <ListBox.ContextMenu>
               <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
                 <MenuItem x:Name="CtxLaunch"
@@ -190,49 +186,116 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </ListBox.ContextMenu>
             <ListBox.ItemsPanel>
               <ItemsPanelTemplate>
-                <WrapPanel />
+                <VirtualizingStackPanel Orientation="Horizontal" />
               </ItemsPanelTemplate>
             </ListBox.ItemsPanel>
-            <ListBox.ItemTemplate>
+            <ListBox.DataTemplates>
               <DataTemplate x:DataType="local:GameEntry" x:CompileBindings="True">
-                <StackPanel Width="128" Height="172" Spacing="7">
-                  <Border Classes="coverShadow" Width="128" Height="128">
-                    <Border Classes="coverClip">
-                      <Panel>
-                        <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
-                          <TextBlock Text="{Binding Initials}" FontSize="36" FontWeight="Bold"
-                                     Foreground="#E8ECF4" Opacity="0.85"
-                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                        <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
-                      </Panel>
-                    </Border>
+                <Border Classes="coverShadow libraryGameCard"
+                        Width="148"
+                        Height="198"
+                        ToolTip.Tip="{Binding Name}"
+                        AutomationProperties.Name="{Binding Name}">
+                  <Border Classes="coverClip">
+                    <Panel>
+                      <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
+                        <TextBlock Text="{Binding Initials}" FontSize="38" FontWeight="Light"
+                                   Foreground="#C4E8ECF4"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                      </Border>
+                      <Image Source="{Binding Cover}"
+                             Stretch="UniformToFill"
+                             RenderOptions.BitmapInterpolationMode="LowQuality"
+                             IsVisible="{Binding HasCover}" />
+                    </Panel>
                   </Border>
-                  <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold"
-                             TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"
-                             TextAlignment="Center" HorizontalAlignment="Center" />
-                </StackPanel>
+                </Border>
               </DataTemplate>
-            </ListBox.ItemTemplate>
+              <DataTemplate x:DataType="local:AddFolderTile">
+                <Border Classes="addFolderTile"
+                        Width="148"
+                        Height="198"
+                        ToolTip.Tip="{Binding [Library.AddFolder],
+                                              Source={x:Static local:Localization.Instance},
+                                              x:CompileBindings=False}"
+                        AutomationProperties.Name="{Binding [Library.AddFolder],
+                                                           Source={x:Static local:Localization.Instance},
+                                                           x:CompileBindings=False}">
+                  <StackPanel HorizontalAlignment="Center"
+                              VerticalAlignment="Center"
+                              Spacing="12">
+                    <Border Classes="addFolderTileIcon">
+                      <TextBlock Classes="addFolderGlyph addFolderIconGlyph"
+                                 Text="+"
+                                 FontSize="34"
+                                 FontWeight="Light"
+                                 LineHeight="34"
+                                 HorizontalAlignment="Center"
+                                 VerticalAlignment="Center" />
+                    </Border>
+                    <TextBlock Classes="addFolderGlyph"
+                               Text="{Binding [Library.AddFolder],
+                                              Source={x:Static local:Localization.Instance},
+                                              x:CompileBindings=False}"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               HorizontalAlignment="Center" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ListBox.DataTemplates>
           </ListBox>
 
+          <!-- Selected-game identity stays in the library content while the
+               bottom bar continues to own session status and actions. -->
+          <StackPanel x:Name="LibrarySelectedDetails"
+                      Grid.Row="1"
+                      x:DataType="local:GameEntry"
+                      x:CompileBindings="True"
+                      IsVisible="False"
+                      MaxWidth="980"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Margin="4,8,0,0"
+                      Spacing="18">
+            <TextBlock Text="{Binding Name}"
+                       FontSize="42"
+                       FontWeight="SemiBold"
+                       TextWrapping="Wrap"
+                       TextTrimming="CharacterEllipsis"
+                       MaxLines="2" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Border Classes="pill" IsVisible="{Binding HasTitleId}">
+                <TextBlock Text="{Binding TitleId}" FontSize="11" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+              <Border Classes="pill" IsVisible="{Binding HasVersion}">
+                <TextBlock Text="{Binding VersionText}" FontSize="11" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+              <Border Classes="pill">
+                <TextBlock Text="{Binding SizeText}" FontSize="11" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+            </StackPanel>
+          </StackPanel>
+
           <!-- Empty state -->
-          <StackPanel x:Name="EmptyState" Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+          <StackPanel x:Name="EmptyState" Grid.RowSpan="2"
+                      Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
                       IsVisible="False">
             <TextBlock Text="🎮" FontSize="44" HorizontalAlignment="Center" Opacity="0.7" />
             <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="18" FontWeight="SemiBold"
                        HorizontalAlignment="Center" />
             <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
                        FontSize="13" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
-            <Button x:Name="EmptyAddFolderButton" Classes="accent"
-                    Content="{Binding [Library.Empty.AddFolder], Source={x:Static local:Localization.Instance}}"
-                    HorizontalAlignment="Center" Margin="0,8,0,0" />
           </StackPanel>
 
           <!-- Loading state: covers the grid while a scan (initial load,
                rescan, or a just-added folder) is in flight, so the screen
                never looks blank mid-scan. -->
-          <StackPanel x:Name="LoadingState" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center"
+          <StackPanel x:Name="LoadingState" Grid.RowSpan="2"
+                      Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center"
                       IsVisible="False">
             <ProgressBar IsIndeterminate="True" Width="180" Height="3" />
             <TextBlock x:Name="LoadingStateText"
@@ -240,7 +303,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                        FontSize="13"
                        Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
           </StackPanel>
-        </Panel>
+        </Grid>
 
         <!-- Options page: sub-tabs so future categories (Graphics, …) slot
              in next to General. Card-grouped sections match the visual
