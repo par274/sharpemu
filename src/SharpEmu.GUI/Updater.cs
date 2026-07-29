@@ -24,6 +24,8 @@ public static class Updater
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(10);
     private const int CheckAttempts = 3;
     private static readonly HttpClient Http = CreateHttpClient();
+    private static string? _releasesEtag;
+    private static string? _releasesJson;
 
     public sealed record UpdateInfo(
         string Sha,
@@ -119,9 +121,25 @@ public static class Updater
         for (var page = 1; page <= MaxReleasePages; page++)
         {
             var url = string.Format(ReleasesUrl, ReleasePageSize, page);
-            using var response = await Http.GetAsync(url, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            if (_releasesEtag is not null)
+            {
+                request.Headers.IfNoneMatch.ParseAdd(_releasesEtag);
+            }
+
+            using var response = await Http.SendAsync(request, cancellationToken);
+            string json;
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified && _releasesJson is not null)
+            {
+                json = _releasesJson;
+            }
+            else
+            {
+                response.EnsureSuccessStatusCode();
+                json = await response.Content.ReadAsStringAsync(cancellationToken);
+                _releasesEtag = response.Headers.ETag?.ToString();
+                _releasesJson = json;
+            }
             pages.Add(json);
 
             using var document = JsonDocument.Parse(json);
@@ -426,6 +444,16 @@ public static class Updater
 
     private static string? ExtractReleaseSha(JsonElement release)
     {
+        if (release.TryGetProperty("target_commitish", out var targetProperty) &&
+            targetProperty.ValueKind == JsonValueKind.String)
+        {
+            var target = targetProperty.GetString();
+            if (target is { Length: >= 7 } && target.All(Uri.IsHexDigit))
+            {
+                return target.Length > 7 ? target[..7] : target;
+            }
+        }
+
         if (!release.TryGetProperty("body", out var bodyProperty) ||
             bodyProperty.ValueKind != JsonValueKind.String)
         {

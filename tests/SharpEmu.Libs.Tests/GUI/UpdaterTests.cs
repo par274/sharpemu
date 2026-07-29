@@ -15,6 +15,7 @@ public sealed class UpdaterTests
             [
               {
                 "tag_name": "v0.0.3-hotfix-2",
+                "target_commitish": "d5108e854d609808f17093a6f5dbbc711d09ad2e",
                 "body": "Build for commit [`d5108e8`](https://example.test/d5108e8).\n\nNewest changes.",
                 "assets": [{
                   "name": "sharpemu-0.0.3-hotfix-2-win-x64.zip",
