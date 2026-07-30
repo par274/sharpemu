@@ -92,6 +92,74 @@ public sealed class PerGameSettings
         return settings;
     }
 
+    /// <summary>
+    /// Removes values that already match the global configuration so the
+    /// remaining object contains only effective per-game overrides.
+    /// </summary>
+    internal void RemoveInheritedValues(GuiSettings global)
+    {
+        if (string.Equals(LogLevel, global.LogLevel, StringComparison.OrdinalIgnoreCase))
+        {
+            LogLevel = null;
+        }
+
+        if (ImportTraceLimit == global.ImportTraceLimit)
+        {
+            ImportTraceLimit = null;
+        }
+
+        if (StrictDynlibResolution == global.StrictDynlibResolution)
+        {
+            StrictDynlibResolution = null;
+        }
+
+        if (LogToFile == global.LogToFile)
+        {
+            LogToFile = null;
+        }
+
+        if (string.Equals(WindowMode, global.WindowMode, StringComparison.OrdinalIgnoreCase))
+        {
+            WindowMode = null;
+        }
+
+        if (string.Equals(Resolution, global.Resolution, StringComparison.OrdinalIgnoreCase))
+        {
+            Resolution = null;
+        }
+
+        if (DisplayIndex == global.DisplayIndex)
+        {
+            DisplayIndex = null;
+        }
+
+        if (RefreshRate == global.RefreshRate)
+        {
+            RefreshRate = null;
+        }
+
+        if (string.Equals(ScalingMode, global.ScalingMode, StringComparison.OrdinalIgnoreCase))
+        {
+            ScalingMode = null;
+        }
+
+        if (VSync == global.VSync)
+        {
+            VSync = null;
+        }
+
+        if (string.Equals(HdrMode, global.HdrMode, StringComparison.OrdinalIgnoreCase))
+        {
+            HdrMode = null;
+        }
+
+        if (EnvironmentToggles is { } environmentToggles &&
+            EnvironmentEntriesEqual(environmentToggles, global.EnvironmentToggles))
+        {
+            EnvironmentToggles = null;
+        }
+    }
+
     public void Save(string titleId)
     {
         if (string.IsNullOrWhiteSpace(titleId))
@@ -129,6 +197,35 @@ public sealed class PerGameSettings
         }
 
         return trimmed.Length == 0 ? "UNKNOWN" : trimmed;
+    }
+
+    private static bool EnvironmentEntriesEqual(
+        IEnumerable<string> left,
+        IEnumerable<string> right) =>
+        NormalizeEnvironmentEntries(left).SetEquals(NormalizeEnvironmentEntries(right));
+
+    private static HashSet<string> NormalizeEnvironmentEntries(IEnumerable<string> entries)
+    {
+        var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries)
+        {
+            var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
+            if (parts.Length == 0 || string.IsNullOrWhiteSpace(parts[0]))
+            {
+                continue;
+            }
+
+            if (parts.Length == 2 && parts[1] == "0")
+            {
+                continue;
+            }
+
+            normalized.Add(parts.Length == 2 && parts[1] != "1"
+                ? $"{parts[0]}={parts[1]}"
+                : parts[0]);
+        }
+
+        return normalized;
     }
 }
 

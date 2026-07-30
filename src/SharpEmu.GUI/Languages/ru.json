@@ -24,8 +24,13 @@
   "Library.Empty.AddFolder": "＋ Добавить папку с играми",
 
   "Library.Loading": "Загрузка библиотеки…",
+  "Library.Stat.Version": "Версия",
+  "Library.Stat.Installed": "Установлено",
+  "Library.Stat.TitleId": "ID игры",
+  "Common.Back": "Назад",
 
   "Options.General": "Основные",
+  "Options.Logging": "Логгирование",
   "Options.Env.Tab": "Окружение",
   "Options.Section.Environment": "ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ",
   "Options.Env.Desc": "Параметры, передаваемые эмулятору как переменные окружения при запуске.",
@@ -117,12 +122,6 @@
   "Common.Save": "Сохранить",
   "Common.Cancel": "Отмена",
 
-  "PerGame.Title": "Настройки игры — {0} ({1})",
-  "PerGame.InheritNote": "Неотмеченные строки наследуют глобальные настройки.",
-  "PerGame.Tab.General": "Основные",
-  "PerGame.Tab.Graphics": "Графика",
-  "PerGame.EnvToggles.Label": "Переключатели окружения",
-  "PerGame.EnvToggles.Desc": "Переопределить глобальный набор переключателей SHARPEMU_* для этой игры.",
 
   "Console.Title": "КОНСОЛЬ",
   "Console.SearchWatermark": "Поиск...",

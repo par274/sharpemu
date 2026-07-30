@@ -24,8 +24,13 @@
   "Library.Empty.AddFolder": "＋ Add game folder",
 
   "Library.Loading": "Loading library…",
+  "Library.Stat.Version": "Version",
+  "Library.Stat.Installed": "Installed",
+  "Library.Stat.TitleId": "Title ID",
+  "Common.Back": "Back",
 
   "Options.General": "General",
+  "Options.Logging": "Logging",
   "Options.Env.Tab": "Environment",
   "Options.Section.Environment": "ENVIRONMENT VARIABLES",
   "Options.Env.Desc": "Switches passed to the emulator as environment variables at launch.",
@@ -117,12 +122,6 @@
   "Common.Save": "Save",
   "Common.Cancel": "Cancel",
 
-  "PerGame.Title": "Per-game settings — {0} ({1})",
-  "PerGame.InheritNote": "Unchecked rows inherit the global defaults.",
-  "PerGame.Tab.General": "General",
-  "PerGame.Tab.Graphics": "Graphics",
-  "PerGame.EnvToggles.Label": "Environment toggles",
-  "PerGame.EnvToggles.Desc": "Override the global set of SHARPEMU_* switches for this game.",
 
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Search...",

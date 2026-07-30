@@ -147,7 +147,8 @@ Options page navigation, section transitions and content layout
     <Setter Property="BorderThickness" Value="1" />
   </Style>
 
-  <Style Selector="local|SettingRow.optionRow:focus-within /template/ Border#PART_RowSurface">
+  <Style Selector="local|SettingRow.optionRow:pointerover /template/ Border#PART_RowSurface,
+                   local|SettingRow.optionRow:focus-within /template/ Border#PART_RowSurface">
     <Setter Property="Background" Value="#0DFFFFFF" />
     <Setter Property="BorderBrush" Value="#22FFFFFF" />
   </Style>

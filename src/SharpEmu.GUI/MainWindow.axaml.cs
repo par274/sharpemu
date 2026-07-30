@@ -217,6 +217,7 @@ public partial class MainWindow : Window
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
         ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
         WireOptionsNavigation();
+        WireGameOptions();
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
@@ -340,6 +341,11 @@ public partial class MainWindow : Window
     {
         if (index == _activePageIndex)
         {
+            if (index == 0 && _isGameSettingsOpen)
+            {
+                CloseGameSettings();
+            }
+
             return;
         }
 
@@ -348,11 +354,17 @@ public partial class MainWindow : Window
             _settings.Save(); // leaving the Options page
         }
 
+        if (_isGameSettingsOpen)
+        {
+            CloseGameSettings(restoreLibrary: false);
+        }
+
         _activePageIndex = index;
         SetActiveClass(LibraryTabButton, index == 0);
         SetActiveClass(OptionsTabButton, index == 1);
         LibraryPage.IsVisible = index == 0;
         LibraryToolbar.IsVisible = index == 0;
+        OptionsPageSurface.IsVisible = index == 1;
         OptionsPage.IsVisible = index == 1;
     }
 
@@ -581,7 +593,7 @@ public partial class MainWindow : Window
             SetActivePage(1);
         }
 
-        if (_activePageIndex != 0)
+        if (_activePageIndex != 0 || _isGameSettingsOpen)
         {
             _previousPadButtons = pad.Buttons;
             return;
@@ -798,6 +810,13 @@ public partial class MainWindow : Window
 
     private void OnKeyDown(object sender, KeyEventArgs args)
     {
+        if (args.Key == Key.Escape && _isGameSettingsOpen)
+        {
+            CloseGameSettings();
+            args.Handled = true;
+            return;
+        }
+
         if (args.Key == Key.F11 && !_isRunning)
         {
             WindowState = WindowState == WindowState.FullScreen
@@ -1806,24 +1825,6 @@ public partial class MainWindow : Window
         CtxGameSettings.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
     }
 
-    private void OpenSelectedGameSettings()
-    {
-        if (GameList.SelectedItem is not GameEntry game)
-        {
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(game.TitleId))
-        {
-            AppendConsoleLine(
-                "[GUI][WARN] Per-game settings require a title ID, which this game does not have.",
-                WarningLineBrush);
-            return;
-        }
-
-        _ = new PerGameSettingsDialog(game.TitleId, game.Name, _settings).ShowDialog(this);
-    }
-
     private void OpenSelectedGameFolder()
     {
         if (GameList.SelectedItem is not GameEntry game)
@@ -2470,6 +2471,9 @@ public partial class MainWindow : Window
             LaunchButton.IsEnabled = GameList.SelectedItem is GameEntry;
         }
 
+        GameSettingsButton.IsEnabled =
+            GameList.SelectedItem is GameEntry game &&
+            !string.IsNullOrWhiteSpace(game.TitleId);
         OpenFileButton.IsEnabled = !_isRunning;
     }
 
