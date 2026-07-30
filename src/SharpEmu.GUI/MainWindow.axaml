@@ -73,19 +73,23 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 Classes="windowChrome"
                 ToolTip.Tip="Minimize"
                 AutomationProperties.Name="Minimize window">
-          <TextBlock Text="—" FontSize="16" />
+          <TextBlock Classes="materialSymbol compact windowChromeGlyph"
+                     Text="minimize" />
         </Button>
         <Button x:Name="MaximizeButton"
                 Classes="windowChrome"
                 ToolTip.Tip="Restore"
                 AutomationProperties.Name="Restore window">
-          <TextBlock x:Name="MaximizeGlyph" Text="❐" FontSize="13" />
+          <TextBlock x:Name="MaximizeGlyph"
+                     Classes="materialSymbol compact windowChromeGlyph"
+                     Text="filter_none" />
         </Button>
         <Button x:Name="CloseButton"
                 Classes="windowChrome windowClose"
                 ToolTip.Tip="Close"
                 AutomationProperties.Name="Close window">
-          <TextBlock Text="×" FontSize="20" />
+          <TextBlock Classes="materialSymbol windowChromeGlyph windowCloseGlyph"
+                     Text="close" />
         </Button>
       </StackPanel>
     </Grid>

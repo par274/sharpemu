@@ -165,8 +165,6 @@ public partial class MainWindow : Window
         ConsoleList.ItemsSource = _consoleLines;
         _consoleMirror = GuiConsoleMirror.Install((line, isError) =>
             _pendingLines.Enqueue((line, isError)));
-        Closed += (_, _) => _emulator?.Stop();
-
         _consoleFlushTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(80),
@@ -297,7 +295,8 @@ public partial class MainWindow : Window
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
 
         Opened += async (_, _) => await OnOpenedAsync();
-        Closing += (_, _) => OnWindowClosing();
+        Closing += (_, _) => BeginWindowClosing();
+        Closed += (_, _) => CompleteWindowClosing();
 
         SdlLauncherGamepad.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
@@ -816,22 +815,44 @@ public partial class MainWindow : Window
         // still needs a preview hook for its own shortcuts.
     }
 
-    private void OnWindowClosing()
+    private void BeginWindowClosing()
     {
+        if (_isClosing)
+        {
+            return;
+        }
+
         _isClosing = true;
         Interlocked.Increment(ref _libraryScanGeneration);
         Interlocked.Increment(ref _detailLoadGeneration);
-        _libraryWatcher.Dispose();
-        _settings.Save();
         _consoleFlushTimer.Stop();
         _gamepadTimer.Stop();
-        SdlLauncherGamepad.Shutdown();
-        _sndPreview.Stop();
-        _discord?.Dispose();
-        _consoleWindow?.Close();
-        _emulator?.Dispose();
-        _consoleMirror?.Dispose();
-        DropFileLog();
+    }
+
+    private void CompleteWindowClosing()
+    {
+        RunShutdownStep("library watcher", _libraryWatcher.Dispose);
+        RunShutdownStep("settings", _settings.Save);
+        RunShutdownStep("SDL gamepad", SdlLauncherGamepad.Shutdown);
+        RunShutdownStep("title music", _sndPreview.Stop);
+        RunShutdownStep("Discord Rich Presence", () => _discord?.Dispose());
+        RunShutdownStep("console window", () => _consoleWindow?.Close());
+        RunShutdownStep("emulator process", () => _emulator?.Dispose());
+        RunShutdownStep("console mirror", () => _consoleMirror?.Dispose());
+        RunShutdownStep("file log", DropFileLog);
+    }
+
+    private static void RunShutdownStep(string component, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(
+                $"[GUI][WARN] Failed to clean up {component}: {exception}");
+        }
     }
 
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -868,13 +889,16 @@ public partial class MainWindow : Window
             return;
         }
 
-        var isMaximized = WindowState == WindowState.Maximized;
-        glyph.Text = isMaximized ? "❐" : "□";
-        ToolTip.SetTip(button, isMaximized ? "Restore" : "Maximize");
-        AutomationProperties.SetName(
-            button,
-            isMaximized ? "Restore window" : "Maximize window");
+        var state = GetMaximizeButtonState(WindowState);
+        glyph.Text = state.Glyph;
+        ToolTip.SetTip(button, state.ToolTip);
+        AutomationProperties.SetName(button, state.AutomationName);
     }
+
+    internal static WindowMaximizeButtonState GetMaximizeButtonState(WindowState windowState) =>
+        windowState == WindowState.Maximized
+            ? new("filter_none", "Restore", "Restore window")
+            : new("crop_square", "Maximize", "Maximize window");
 
     private void UpdateWindowChromeState()
     {
