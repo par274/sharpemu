@@ -15764,6 +15764,10 @@ internal static unsafe class VulkanVideoPresenter
                 presentation.TranslatedDraw is null &&
                 presentation.GuestImageAddress == 0)
             {
+                // Consume the sequence: an empty presentation (no pixels, no
+                // draw, no guest address) has nothing that will ever change
+                // by re-fetching it, so leaving it unconsumed would spin.
+                _presentedSequence = presentation.Sequence;
                 return;
             }
 
@@ -15780,6 +15784,11 @@ internal static unsafe class VulkanVideoPresenter
                         _extent.Height);
                 if ((ulong)pixels.Length > _stagingSize)
                 {
+                    // Consume the sequence: an oversized buffer for this
+                    // presentation will still be oversized on the next tick,
+                    // so leaving it unconsumed would retry the same frame in
+                    // an unthrottled loop instead of waiting for a new flip.
+                    _presentedSequence = presentation.Sequence;
                     return;
                 }
 
@@ -15819,6 +15828,14 @@ internal static unsafe class VulkanVideoPresenter
                     DestroyGuestImage(presentedGuestImage);
                 }
 
+                // Consume the sequence even though nothing was shown: leaving
+                // _presentedSequence stale here makes TryTakePresentation
+                // hand back this exact same stale/lost flip on every future
+                // render tick forever (an unthrottled busy loop, observed as
+                // millions of present_dropped/present_taken lines per second
+                // after a guest image was invalidated — e.g. by a swapchain
+                // recreation — without ever being reflipped).
+                _presentedSequence = presentation.Sequence;
                 return;
             }
             if (ownsPresentedGuestImageVersion)
@@ -15906,6 +15923,13 @@ internal static unsafe class VulkanVideoPresenter
                     ownsPresentedGuestImageVersion,
                     presentedGuestImage);
 
+                // Consume the sequence even on a recreate-and-drop: a surface
+                // that stays out-of-date (e.g. a truly zero-sized window)
+                // would otherwise have every future render tick re-acquire
+                // against this same stale presentation, recreate the
+                // swapchain again, and drop it again forever — an
+                // unthrottled busy loop instead of waiting for the next flip.
+                _presentedSequence = presentation.Sequence;
                 return;
             }
 
@@ -16043,7 +16067,12 @@ internal static unsafe class VulkanVideoPresenter
             {
                 // The submitted frame still executes; RecreateSwapchainResources
                 // drains it (and every frame slot) before destroying anything.
+                // The frame's GPU work already ran, so consume the sequence
+                // here too — otherwise a persistently out-of-date swapchain
+                // (e.g. a zero-sized surface) retries this same already-
+                // submitted frame forever instead of waiting for the next flip.
                 RecreateSwapchainResources("vkQueuePresentKHR", presentResult);
+                _presentedSequence = presentation.Sequence;
                 return;
             }
 
