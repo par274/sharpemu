@@ -36,12 +36,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
+    <AvaloniaResource Include="Assets\Fonts\MaterialSymbolsRounded-400.ttf" />
     <AvaloniaResource Include="..\..\assets\images\SharpEmu.ico" Link="Assets/SharpEmu.ico" />
     <AvaloniaResource Include="..\..\assets\images\github.png" Link="Assets/github.png" />
     <AvaloniaResource Include="..\..\assets\images\discord.png" Link="Assets/discord.png" />
     <AvaloniaResource Include="..\..\assets\images\update-icon.png" Link="Assets/update-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\commit-icon.png" Link="Assets/commit-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\pic0.png" Link="Assets/pic0.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSES\Apache-2.0.txt"
+          Link="licenses\Apache-2.0.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          TargetPath="licenses\Apache-2.0.txt" />
   </ItemGroup>
 
   <ItemGroup>

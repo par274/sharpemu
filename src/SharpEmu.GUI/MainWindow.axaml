@@ -6,7 +6,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:SharpEmu.GUI"
-        xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
+        xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings"
         x:Class="SharpEmu.GUI.MainWindow"
         Title="SharpEmu"
         Width="1280" Height="820"
@@ -73,25 +73,29 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 Classes="windowChrome"
                 ToolTip.Tip="Minimize"
                 AutomationProperties.Name="Minimize window">
-          <TextBlock Text="—" FontSize="16" />
+          <TextBlock Classes="materialSymbol compact windowChromeGlyph"
+                     Text="minimize" />
         </Button>
         <Button x:Name="MaximizeButton"
                 Classes="windowChrome"
                 ToolTip.Tip="Restore"
                 AutomationProperties.Name="Restore window">
-          <TextBlock x:Name="MaximizeGlyph" Text="❐" FontSize="13" />
+          <TextBlock x:Name="MaximizeGlyph"
+                     Classes="materialSymbol compact windowChromeGlyph"
+                     Text="filter_none" />
         </Button>
         <Button x:Name="CloseButton"
                 Classes="windowChrome windowClose"
                 ToolTip.Tip="Close"
                 AutomationProperties.Name="Close window">
-          <TextBlock Text="×" FontSize="20" />
+          <TextBlock Classes="materialSymbol windowChromeGlyph windowCloseGlyph"
+                     Text="close" />
         </Button>
       </StackPanel>
     </Grid>
 
     <!-- Main content -->
-    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto,Auto">
+    <Grid x:Name="MainContent" Grid.Row="1" Margin="32,24,32,20" RowDefinitions="Auto,*,Auto">
 
       <!-- Library / Options page switcher, with the library toolbar sharing
            the same row on the right. Plain buttons (not TabItem) so there is
@@ -119,10 +123,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
                    PlaceholderText="{Binding [Library.SearchWatermark], Source={x:Static local:Localization.Instance}}"
                    Width="240"
                    VerticalAlignment="Center" />
-          <Button x:Name="AddFolderButton"
-                  Classes="ghost"
-                  Content="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}"
-                  VerticalAlignment="Center" />
           <Button x:Name="OpenFileButton"
                   Classes="ghost"
                   Content="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}"
@@ -132,12 +132,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
       <Panel Grid.Row="1" x:Name="PagesHost">
 
-        <!-- Library page. The tile row gets extra top margin so it sits
-             closer to eye level (PS5 home-screen style) instead of hugging
-             the Library/Options switcher above it. -->
-        <Panel x:Name="LibraryPage" Margin="0,64,0,0">
+        <!-- Library page. Covers use a horizontal virtualized rail so the
+             number of realized images stays bounded for large libraries. -->
+        <Grid x:Name="LibraryPage" Margin="0,46,0,0" RowDefinitions="188,*">
           <ListBox x:Name="GameList" Classes="tileGrid" Background="Transparent"
-                   SelectionMode="Single" Padding="0">
+                   Grid.Row="0"
+                   SelectionMode="Single" Padding="4,0,28,0">
             <ListBox.ContextMenu>
               <ContextMenu x:Name="GameContextMenu" Placement="Pointer">
                 <MenuItem x:Name="CtxLaunch"
@@ -190,49 +190,135 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </ListBox.ContextMenu>
             <ListBox.ItemsPanel>
               <ItemsPanelTemplate>
-                <WrapPanel />
+                <VirtualizingStackPanel Orientation="Horizontal" />
               </ItemsPanelTemplate>
             </ListBox.ItemsPanel>
-            <ListBox.ItemTemplate>
+            <ListBox.DataTemplates>
               <DataTemplate x:DataType="local:GameEntry" x:CompileBindings="True">
-                <StackPanel Width="128" Height="172" Spacing="7">
-                  <Border Classes="coverShadow" Width="128" Height="128">
-                    <Border Classes="coverClip">
-                      <Panel>
-                        <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
-                          <TextBlock Text="{Binding Initials}" FontSize="36" FontWeight="Bold"
-                                     Foreground="#E8ECF4" Opacity="0.85"
-                                     HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                        <Image Source="{Binding Cover}" Stretch="UniformToFill" IsVisible="{Binding HasCover}" />
-                      </Panel>
-                    </Border>
+                <Border Classes="coverShadow libraryGameCard"
+                        Width="148"
+                        Height="148"
+                        ToolTip.Tip="{Binding Name}"
+                        AutomationProperties.Name="{Binding Name}">
+                  <Border Classes="coverClip">
+                    <Panel>
+                      <Border Background="{Binding PlaceholderBrush}" IsVisible="{Binding !HasCover}">
+                        <TextBlock Text="{Binding Initials}" FontSize="38" FontWeight="Light"
+                                   Foreground="#C4E8ECF4"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                      </Border>
+                      <Image Source="{Binding Cover}"
+                             Stretch="UniformToFill"
+                             RenderOptions.BitmapInterpolationMode="LowQuality"
+                             IsVisible="{Binding HasCover}" />
+                    </Panel>
                   </Border>
-                  <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold"
-                             TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"
-                             TextAlignment="Center" HorizontalAlignment="Center" />
-                </StackPanel>
+                </Border>
               </DataTemplate>
-            </ListBox.ItemTemplate>
+              <DataTemplate x:DataType="local:AddFolderTile">
+                <Border Classes="addFolderTile"
+                        Width="148"
+                        Height="148"
+                        ToolTip.Tip="{Binding [Library.AddFolder],
+                                              Source={x:Static local:Localization.Instance},
+                                              x:CompileBindings=False}"
+                        AutomationProperties.Name="{Binding [Library.AddFolder],
+                                                           Source={x:Static local:Localization.Instance},
+                                                           x:CompileBindings=False}">
+                  <StackPanel HorizontalAlignment="Center"
+                              VerticalAlignment="Center"
+                              Spacing="12">
+                    <Border Classes="addFolderTileIcon">
+                      <TextBlock Classes="addFolderGlyph addFolderIconGlyph"
+                                 Text="+"
+                                 FontSize="34"
+                                 FontWeight="Light"
+                                 LineHeight="34"
+                                 HorizontalAlignment="Center"
+                                 VerticalAlignment="Center" />
+                    </Border>
+                    <TextBlock Classes="addFolderGlyph"
+                               Text="{Binding [Library.AddFolder],
+                                              Source={x:Static local:Localization.Instance},
+                                              x:CompileBindings=False}"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               HorizontalAlignment="Center" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ListBox.DataTemplates>
           </ListBox>
 
+          <!-- Selected-game identity and actions share one detail surface so
+               the selected title and metadata are never rendered twice. -->
+          <StackPanel x:Name="LibrarySelectedDetails"
+                      Grid.Row="1"
+                      x:DataType="local:GameEntry"
+                      x:CompileBindings="True"
+                      IsVisible="False"
+                      MaxWidth="980"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      Margin="4,8,0,0"
+                      Spacing="18">
+            <TextBlock Text="{Binding Name}"
+                       FontSize="42"
+                       FontWeight="SemiBold"
+                       TextWrapping="Wrap"
+                       TextTrimming="CharacterEllipsis"
+                       MaxLines="2" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Border Classes="pill" IsVisible="{Binding HasTitleId}">
+                <TextBlock Text="{Binding TitleId}" FontSize="11" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+              <Border Classes="pill" IsVisible="{Binding HasVersion}">
+                <TextBlock Text="{Binding VersionText}" FontSize="11" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+              <Border Classes="pill">
+                <TextBlock Text="{Binding SizeText}" FontSize="11" FontWeight="SemiBold"
+                           Foreground="{StaticResource MutedBrush}" />
+              </Border>
+            </StackPanel>
+            <Grid Width="360"
+                  ColumnDefinitions="*,*"
+                  ColumnSpacing="8"
+                  HorizontalAlignment="Left">
+              <Button x:Name="LaunchButton"
+                      Grid.Column="0"
+                      Classes="accent"
+                      Content="Launch"
+                      HorizontalAlignment="Stretch"
+                      IsEnabled="False" />
+              <ToggleButton x:Name="ConsoleToggle"
+                            Grid.Column="1"
+                            Classes="ghost"
+                            Padding="22,10"
+                            HorizontalAlignment="Stretch"
+                            Content="{Binding [Launch.Console],
+                                              Source={x:Static local:Localization.Instance},
+                                              x:CompileBindings=False}" />
+            </Grid>
+          </StackPanel>
+
           <!-- Empty state -->
-          <StackPanel x:Name="EmptyState" Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
+          <StackPanel x:Name="EmptyState" Grid.RowSpan="2"
+                      Spacing="10" HorizontalAlignment="Center" VerticalAlignment="Center"
                       IsVisible="False">
             <TextBlock Text="🎮" FontSize="44" HorizontalAlignment="Center" Opacity="0.7" />
             <TextBlock x:Name="EmptyStateTitle" Text="Your library is empty" FontSize="18" FontWeight="SemiBold"
                        HorizontalAlignment="Center" />
             <TextBlock x:Name="EmptyStateHint" Text="Add a folder containing your games to get started."
                        FontSize="13" Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
-            <Button x:Name="EmptyAddFolderButton" Classes="accent"
-                    Content="{Binding [Library.Empty.AddFolder], Source={x:Static local:Localization.Instance}}"
-                    HorizontalAlignment="Center" Margin="0,8,0,0" />
           </StackPanel>
 
           <!-- Loading state: covers the grid while a scan (initial load,
                rescan, or a just-added folder) is in flight, so the screen
                never looks blank mid-scan. -->
-          <StackPanel x:Name="LoadingState" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center"
+          <StackPanel x:Name="LoadingState" Grid.RowSpan="2"
+                      Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center"
                       IsVisible="False">
             <ProgressBar IsIndeterminate="True" Width="180" Height="3" />
             <TextBlock x:Name="LoadingStateText"
@@ -240,104 +326,211 @@ SPDX-License-Identifier: GPL-2.0-or-later
                        FontSize="13"
                        Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Center" />
           </StackPanel>
-        </Panel>
+        </Grid>
 
-        <!-- Options page: sub-tabs so future categories (Graphics, …) slot
-             in next to General. Card-grouped sections match the visual
-             language used by the console panel and launch bar below. -->
-        <Grid x:Name="OptionsPage" IsVisible="False">
-          <TabControl>
-            <TabItem x:Name="GeneralTabItem"
-                     Header="{Binding [Options.General], Source={x:Static local:Localization.Instance}}"
-                     FontSize="15">
-              <ScrollViewer>
-                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
+        <!-- Options page: stable local navigation keeps each settings group
+             focused while preserving every setting from the current launcher -->
+        <Grid x:Name="OptionsPage"
+              IsVisible="False"
+              ColumnDefinitions="244,*"
+              ColumnSpacing="42"
+              Margin="32,14,32,16">
+          <Border Grid.Column="0" Classes="optionsNavSurface">
+            <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                          VerticalScrollBarVisibility="Hidden">
+              <Grid x:Name="OptionsNavHost">
+                <Border x:Name="OptionsNavIndicator"
+                        Classes="optionsNavIndicator"
+                        Height="54"
+                        VerticalAlignment="Top"
+                        IsHitTestVisible="False">
+                  <Border.RenderTransform>
+                    <TranslateTransform>
+                      <TranslateTransform.Transitions>
+                        <Transitions>
+                          <DoubleTransition Property="Y"
+                                            Duration="0:0:0.16"
+                                            Easing="CubicEaseOut" />
+                        </Transitions>
+                      </TranslateTransform.Transitions>
+                    </TranslateTransform>
+                  </Border.RenderTransform>
+                </Border>
 
-                  <Border Classes="card">
-                    <StackPanel Spacing="14">
-                      <TextBlock x:Name="EmulationSectionTitle" Classes="sectionTitle"
-                                 Text="{Binding [Options.Section.Emulation], Source={x:Static local:Localization.Instance}}" />
+                <StackPanel>
+                  <Button x:Name="OptionsGeneralNav" Classes="optionsNav active">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0"
+                                 Classes="materialSymbol optionsNavIcon"
+                                 Text="tune" />
+                      <TextBlock x:Name="OptionsGeneralNavLabel"
+                                 Grid.Column="1"
+                                 Classes="optionsNavLabel"
+                                 Text="General" />
+                    </Grid>
+                  </Button>
+                  <Button x:Name="OptionsLoggingNav" Classes="optionsNav">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0"
+                                 Classes="materialSymbol optionsNavIcon"
+                                 Text="terminal" />
+                      <TextBlock x:Name="OptionsLoggingNavLabel"
+                                 Grid.Column="1"
+                                 Classes="optionsNavLabel"
+                                 Text="Logging" />
+                    </Grid>
+                  </Button>
+                  <Button x:Name="OptionsLauncherNav" Classes="optionsNav">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0"
+                                 Classes="materialSymbol optionsNavIcon"
+                                 Text="rocket_launch" />
+                      <TextBlock x:Name="OptionsLauncherNavLabel"
+                                 Grid.Column="1"
+                                 Classes="optionsNavLabel"
+                                 Text="Launcher" />
+                    </Grid>
+                  </Button>
+                  <Button x:Name="OptionsRenderingNav" Classes="optionsNav">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0"
+                                 Classes="materialSymbol optionsNavIcon"
+                                 Text="monitor" />
+                      <TextBlock x:Name="OptionsRenderingNavLabel"
+                                 Grid.Column="1"
+                                 Classes="optionsNavLabel"
+                                 Text="Rendering" />
+                    </Grid>
+                  </Button>
+                  <Button x:Name="OptionsEnvironmentNav" Classes="optionsNav">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0"
+                                 Classes="materialSymbol optionsNavIcon"
+                                 Text="deployed_code" />
+                      <TextBlock x:Name="OptionsEnvironmentNavLabel"
+                                 Grid.Column="1"
+                                 Classes="optionsNavLabel"
+                                 Text="Environment" />
+                    </Grid>
+                  </Button>
+                  <Button x:Name="OptionsAboutNav" Classes="optionsNav">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0"
+                                 Classes="materialSymbol optionsNavIcon"
+                                 Text="info" />
+                      <TextBlock x:Name="OptionsAboutNavLabel"
+                                 Grid.Column="1"
+                                 Classes="optionsNavLabel"
+                                 Text="About" />
+                    </Grid>
+                  </Button>
+                </StackPanel>
+              </Grid>
+            </ScrollViewer>
+          </Border>
 
+          <Border Grid.Column="1" Classes="optionsContentSurface">
+            <Panel>
+              <ScrollViewer x:Name="OptionsGeneralPanel"
+                            Classes="optionsSectionPanel active">
+                <StackPanel>
+                  <Border Classes="optionsGroup">
+                    <StackPanel Spacing="8">
                       <local:SettingRow x:Name="CpuEngineRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.CpuEngine.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.CpuEngine.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="CpuEngineBox" Width="160"
+                        <ComboBox x:Name="CpuEngineBox"
+                                  Classes="optionValue"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" CornerRadius="8" />
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="StrictRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.Strict.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Strict.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="StrictToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                                      Classes="optionToggle" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
+                </StackPanel>
+              </ScrollViewer>
 
-                  <Border Classes="card">
-                    <StackPanel Spacing="14">
-                      <TextBlock x:Name="LoggingSectionTitle" Classes="sectionTitle"
-                                 Text="{Binding [Options.Section.Logging], Source={x:Static local:Localization.Instance}}" />
-
+              <ScrollViewer x:Name="OptionsLoggingPanel"
+                            Classes="optionsSectionPanel">
+                <StackPanel>
+                  <Border Classes="optionsGroup">
+                    <StackPanel Spacing="8">
                       <local:SettingRow x:Name="LogLevelRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.LogLevel.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.LogLevel.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="LogLevelBox" Width="160"
+                        <ComboBox x:Name="LogLevelBox"
+                                  Classes="optionValue"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" CornerRadius="8" />
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="TraceImportsRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.TraceImports.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.TraceImports.Desc], Source={x:Static local:Localization.Instance}}">
-                        <NumericUpDown x:Name="TraceImportsBox" Width="160" Minimum="0"
-                                       Maximum="4096" Increment="16" Value="0" FormatString="0"
-                                       VerticalAlignment="Center" CornerRadius="8" />
+                        <settingsControls:SplitNumericUpDown x:Name="TraceImportsBox"
+                                                             Classes="optionValue"
+                                                             Minimum="0"
+                                                             Maximum="4096" Increment="16" Value="0" FormatString="0"
+                                                             VerticalAlignment="Center" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="LogToFileRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.LogToFile.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.LogToFile.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="LogToFileToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                                      Classes="optionToggle" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="LogFilePathRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.LogFilePath.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="No custom path">
-                        <Button x:Name="SelectLogFilePathButton" Classes="ghost"
-                                Content="{Binding [Options.LogFilePath.Select], Source={x:Static local:Localization.Instance}}"
-                                VerticalAlignment="Center" />
+                        <Button x:Name="SelectLogFilePathButton"
+                                Classes="optionAction">
+                          <TextBlock x:Name="SelectLogFilePathButtonLabel"
+                                     Text="{Binding [Options.LogFilePath.Select], Source={x:Static local:Localization.Instance}}"
+                                     VerticalAlignment="Center" />
+                        </Button>
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="OverrideLogFileRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.OverrideLogFile.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.OverrideLogFile.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="OverrideLogFileToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                                      Classes="optionToggle" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
+                </StackPanel>
+              </ScrollViewer>
 
-                  <Border Classes="card">
-                    <StackPanel Spacing="14">
-                      <TextBlock x:Name="LauncherSectionTitle" Classes="sectionTitle"
-                                 Text="{Binding [Options.Section.Launcher], Source={x:Static local:Localization.Instance}}" />
-
+              <ScrollViewer x:Name="OptionsLauncherPanel"
+                            Classes="optionsSectionPanel">
+                <StackPanel>
+                  <Border Classes="optionsGroup">
+                    <StackPanel Spacing="8">
                       <local:SettingRow x:Name="LanguageRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.Language.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Language.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="LanguageBox" Width="160"
-                                  VerticalAlignment="Center" CornerRadius="8">
+                        <ComboBox x:Name="LanguageBox"
+                                  Classes="optionValue"
+                                  Width="210"
+                                  VerticalAlignment="Center">
                           <ComboBox.ItemTemplate>
                             <DataTemplate x:DataType="local:LanguageInfo">
                               <TextBlock Text="{Binding NativeName}" />
@@ -347,322 +540,293 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="DefaultProfileRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.DefaultProfile.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.DefaultProfile.Desc], Source={x:Static local:Localization.Instance}}">
                         <TextBox x:Name="DefaultProfileBox"
-                                 Width="180"
+                                 Classes="optionValue"
                                  MaxLength="16"
                                  VerticalAlignment="Center" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="TitleMusicRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.TitleMusic.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.TitleMusic.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="TitleMusicToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      IsChecked="True" VerticalAlignment="Center" />
+                                      Classes="optionToggle"
+                                      IsChecked="True" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="DiscordRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.Discord.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Discord.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="DiscordToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                                      Classes="optionToggle" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="AutoUpdateRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Updater.Auto.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Updater.Auto.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="AutoUpdateToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      IsChecked="True" VerticalAlignment="Center" />
+                                      Classes="optionToggle"
+                                      IsChecked="True" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
-                  <Border Classes="card">
-                    <StackPanel Spacing="14">
-                      <TextBlock x:Name="AboutSectionTitle"
-                                Classes="sectionTitle"
-                                Text="{Binding [Options.About], Source={x:Static local:Localization.Instance}}" />
+                </StackPanel>
+              </ScrollViewer>
 
+              <ScrollViewer x:Name="OptionsAboutPanel"
+                            Classes="optionsSectionPanel">
+                <StackPanel>
+                  <Border Classes="optionsGroup">
+                    <StackPanel Spacing="8">
                       <!--Latest commit info-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/commit-icon.png"
-                                    Width="24" Height="24" VerticalAlignment="Center" />
-                          <StackPanel Spacing="2" VerticalAlignment="Center">
+                      <Border Classes="optionsInfoRow">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
+                          <StackPanel VerticalAlignment="Center">
                             <TextBlock x:Name="LatestCommitLabel"
                                        Text="{Binding [About.Github.LatestCommitLabel], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="13"/>
+                                       FontSize="14"
+                                       FontWeight="Medium" />
                             <TextBlock x:Name="LatestCommitDescription"
                                        Text="{Binding [About.Github.LatestCommitDescription], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                                       FontSize="11"
+                                       Foreground="{StaticResource MutedBrush}"
+                                       TextWrapping="Wrap" />
                           </StackPanel>
-                        </StackPanel>
-
-                        <Button Grid.Column="1" x:Name="LatestCommitHashText" Classes="ghost"
-                          Content="Loading…" FontSize="12" FontFamily="Consolas,monospace"
-                          VerticalAlignment="Center" IsEnabled="False" />
-
-                      </Grid>
+                          <Button Grid.Column="1"
+                                  x:Name="LatestCommitHashText"
+                                  Classes="optionAction"
+                                  Content="Loading…"
+                                  FontSize="12"
+                                  FontFamily="Consolas,monospace"
+                                  VerticalAlignment="Center"
+                                  IsEnabled="False" />
+                        </Grid>
+                      </Border>
 
                       <!--Update-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/update-icon.png"
-                                    Width="24"
-                                    Height="24"
-                                    VerticalAlignment="Center" />
-                          <StackPanel Spacing="2" VerticalAlignment="Center">
+                      <Border Classes="optionsInfoRow">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
+                          <StackPanel VerticalAlignment="Center">
                             <TextBlock x:Name="UpdateLabel"
                                        Text="{Binding [Updater.Label], Source={x:Static local:Localization.Instance}}"
-                                       FontSize="13" />
-                            <TextBlock x:Name="UpdateStatusText" Text="Current build: dev" FontSize="11"
-                                      Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                       FontSize="14"
+                                       FontWeight="Medium" />
+                            <TextBlock x:Name="UpdateStatusText"
+                                       Text="Current build: dev"
+                                       FontSize="11"
+                                       Foreground="{StaticResource MutedBrush}"
+                                       TextWrapping="Wrap" />
                           </StackPanel>
-                        </StackPanel>
-                        <Button Grid.Column="1" x:Name="UpdateButton" Classes="ghost"
-                                Content="Check for updates" VerticalAlignment="Center" />
-                      </Grid>
+                          <Button Grid.Column="1"
+                                  x:Name="UpdateButton"
+                                  Classes="optionAction"
+                                  Content="Check for updates"
+                                  VerticalAlignment="Center" />
+                        </Grid>
+                      </Border>
 
                       <local:SettingRow x:Name="UpdateReminderRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Updater.Reminder.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Updater.Reminder.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="UpdateReminderToggle"
+                                      Classes="optionToggle"
                                       OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
                                       OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      IsChecked="True" VerticalAlignment="Center" />
+                                      IsChecked="True" />
                       </local:SettingRow>
                       
                       <!--Github-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0"
-                                      Orientation="Horizontal"
-                                      Spacing="8"
-                                      VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/github.png"
-                                    Width="20"
-                                    Height="20"
-                                    VerticalAlignment="Center" />
-                          <StackPanel VerticalAlignment="Center"
-                                          Spacing="2">
+                      <Border Classes="optionsInfoRow">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
+                          <StackPanel VerticalAlignment="Center">
                             <TextBlock x:Name="GithubLabel"
-                                            Text="{Binding [About.Github.Label], Source={x:Static local:Localization.Instance}}"
-                                            FontSize="13" />
+                                       Text="{Binding [About.Github.Label], Source={x:Static local:Localization.Instance}}"
+                                       FontSize="14"
+                                       FontWeight="Medium" />
                             <TextBlock x:Name="GithubDesc"
-                                            Text="{Binding [About.Github.Desc], Source={x:Static local:Localization.Instance}}"
-                                            FontSize="11"
-                                            Foreground="{StaticResource MutedBrush}"
-                                            TextWrapping="Wrap" />
+                                       Text="{Binding [About.Github.Desc], Source={x:Static local:Localization.Instance}}"
+                                       FontSize="11"
+                                       Foreground="{StaticResource MutedBrush}"
+                                       TextWrapping="Wrap" />
                           </StackPanel>
-                        </StackPanel>
-
-                        <Button Grid.Column="1"
-                                x:Name="GithubButton"
-                                Classes="ghost"
-                                Content="{Binding [About.GithubButton], Source={x:Static local:Localization.Instance}}"
-                                VerticalAlignment="Center" />
-                      </Grid>
+                          <Button Grid.Column="1"
+                                  x:Name="GithubButton"
+                                  Classes="optionAction"
+                                  Content="{Binding [About.GithubButton], Source={x:Static local:Localization.Instance}}"
+                                  VerticalAlignment="Center" />
+                        </Grid>
+                      </Border>
 
                       <!--Discord-->
-                      <Grid ColumnDefinitions="*,Auto">
-                        <StackPanel Grid.Column="0"
-                                        Orientation="Horizontal"
-                                        Spacing="8"
-                                        VerticalAlignment="Center">
-                          <Image Source="avares://SharpEmu.GUI/Assets/discord.png"
-                                  Width="20"
-                                  Height="20"
-                                  VerticalAlignment="Center" />
-                          <StackPanel VerticalAlignment="Center"
-                                      Spacing="2">
+                      <Border Classes="optionsInfoRow">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="18">
+                          <StackPanel VerticalAlignment="Center">
                             <TextBlock x:Name="DiscordServerLabel"
                                       Text="{Binding [About.Discord.Label], Source={x:Static local:Localization.Instance}}"
-                                      FontSize="13" />
+                                      FontSize="14"
+                                      FontWeight="Medium" />
                             <TextBlock x:Name="DiscordServerDesc"
                                       Text="{Binding [About.Discord.Desc], Source={x:Static local:Localization.Instance}}"
                                       FontSize="11"
                                       Foreground="{StaticResource MutedBrush}"
                                       TextWrapping="Wrap" />
                           </StackPanel>
-                        </StackPanel>
-
-                        <TextBlock Grid.Column="1"
-                                   x:Name="DiscordComingSoonText"
-                                   Text="{Binding [About.DiscordComingSoon], Source={x:Static local:Localization.Instance}}"
-                                   FontSize="12"
-                                   Foreground="{StaticResource MutedBrush}"
-                                   VerticalAlignment="Center" />
-                      </Grid>
+                          <TextBlock Grid.Column="1"
+                                     x:Name="DiscordComingSoonText"
+                                     Text="{Binding [About.DiscordComingSoon], Source={x:Static local:Localization.Instance}}"
+                                     FontSize="12"
+                                     Foreground="{StaticResource MutedBrush}"
+                                     VerticalAlignment="Center" />
+                        </Grid>
+                      </Border>
                     </StackPanel>
                   </Border>
                 </StackPanel>
               </ScrollViewer>
-            </TabItem>
-            <TabItem x:Name="GraphicsTabItem"
-                     Header="{Binding [Options.Graphics], Source={x:Static local:Localization.Instance}}"
-                     FontSize="15">
-              <ScrollViewer>
-                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
-                  <Border Classes="card">
-                    <StackPanel Spacing="14">
-                      <TextBlock x:Name="RenderingSectionTitle" Classes="sectionTitle"
-                                 Text="{Binding [Options.Section.Rendering], Source={x:Static local:Localization.Instance}}" />
 
+              <ScrollViewer x:Name="OptionsRenderingPanel"
+                            Classes="optionsSectionPanel">
+                <StackPanel Spacing="16">
+                  <Border Classes="optionsGroup">
+                    <StackPanel Spacing="8">
                       <local:SettingRow x:Name="RenderResolutionRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.RenderResolution.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.RenderResolution.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="RenderResolutionBox" Width="160"
+                        <ComboBox x:Name="RenderResolutionBox"
+                                  Classes="optionValue"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"
-                                  VerticalAlignment="Center" CornerRadius="8" />
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
 
-                  <Border Classes="card">
-                    <StackPanel Spacing="14">
-                      <TextBlock x:Name="DisplaySectionTitle" Classes="sectionTitle"
-                                 Text="{Binding [Options.Section.Display], Source={x:Static local:Localization.Instance}}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel Spacing="8">
                       <local:SettingRow x:Name="WindowModeRow"
+                                        Classes="optionRow"
                         Label="{Binding [Options.WindowMode.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.WindowMode.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="WindowModeBox" Width="180"
+                        <ComboBox x:Name="WindowModeBox"
+                                  Classes="optionValue"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"
-                                  CornerRadius="8" />
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
                       <local:SettingRow x:Name="ResolutionRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.Resolution.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Resolution.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="ResolutionBox" Width="180" CornerRadius="8" />
+                        <ComboBox x:Name="ResolutionBox"
+                                  Classes="optionValue"
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
                       <local:SettingRow x:Name="DisplayRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.Display.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Display.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="DisplayBox" Width="260" CornerRadius="8" />
+                        <ComboBox x:Name="DisplayBox"
+                                  Classes="optionValue"
+                                  Width="260"
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
                       <local:SettingRow x:Name="RefreshRateRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.RefreshRate.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.RefreshRate.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="RefreshRateBox" Width="180" CornerRadius="8" />
+                        <ComboBox x:Name="RefreshRateBox"
+                                  Classes="optionValue"
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
                       <local:SettingRow x:Name="ScalingRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.Scaling.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Scaling.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="ScalingModeBox" Width="180"
+                        <ComboBox x:Name="ScalingModeBox"
+                                  Classes="optionValue"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"
-                                  CornerRadius="8" />
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
                       <local:SettingRow x:Name="VSyncRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.VSync.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.VSync.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="VSyncToggle" IsChecked="True"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}" />
+                        <ToggleSwitch x:Name="VSyncToggle"
+                                      Classes="optionToggle"
+                                      IsChecked="True" />
                       </local:SettingRow>
                       <local:SettingRow x:Name="HdrRow"
+                                        Classes="optionRow"
                                         Label="{Binding [Options.Hdr.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Hdr.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ComboBox x:Name="HdrModeBox" Width="180"
+                        <ComboBox x:Name="HdrModeBox"
+                                  Classes="optionValue"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"
-                                  CornerRadius="8" />
+                                  VerticalAlignment="Center" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
                 </StackPanel>
               </ScrollViewer>
-            </TabItem>
-            <TabItem x:Name="EnvTabItem"
-                     Header="{Binding [Options.Env.Tab], Source={x:Static local:Localization.Instance}}"
-                     FontSize="15">
-              <ScrollViewer>
-                <StackPanel Margin="0,14,0,16" Spacing="16" MaxWidth="1280" HorizontalAlignment="Left">
 
-                  <Border Classes="card">
-                    <StackPanel Spacing="14">
-                      <TextBlock x:Name="EnvSectionTitle" Classes="sectionTitle"
-                                 Text="{Binding [Options.Section.Environment], Source={x:Static local:Localization.Instance}}" />
-                      <TextBlock x:Name="EnvDesc"
-                                 Text="{Binding [Options.Env.Desc], Source={x:Static local:Localization.Instance}}"
-                                 FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
-
-                      <local:SettingRow x:Name="EnvBthidRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_BTHID_UNAVAILABLE"
+              <ScrollViewer x:Name="OptionsEnvironmentPanel"
+                            Classes="optionsSectionPanel">
+                <StackPanel>
+                  <Border Classes="optionsGroup">
+                    <StackPanel Spacing="8">
+                      <local:SettingRow x:Name="EnvBthidRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_BTHID_UNAVAILABLE"
                                         Description="{Binding [Options.Env.Bthid.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvBthidToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvBthidToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLoopGuardRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
+                      <local:SettingRow x:Name="EnvLoopGuardRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"
                                         Description="{Binding [Options.Env.LoopGuard.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvLoopGuardToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvLoopGuardToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvWritableApp0Row" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_WRITABLE_APP0"
+                      <local:SettingRow x:Name="EnvWritableApp0Row" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_WRITABLE_APP0"
                                         Description="{Binding [Options.Env.WritableApp0.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvWritableApp0Toggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvWritableApp0Toggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvVkValidationRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_VK_VALIDATION"
+                      <local:SettingRow x:Name="EnvVkValidationRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_VK_VALIDATION"
                                         Description="{Binding [Options.Env.VkValidation.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvVkValidationToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvVkValidationToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvDumpSpirvRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DUMP_SPIRV"
+                      <local:SettingRow x:Name="EnvDumpSpirvRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DUMP_SPIRV"
                                         Description="{Binding [Options.Env.DumpSpirv.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvDumpSpirvToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvDumpSpirvToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_DIRECT_MEMORY"
+                      <local:SettingRow x:Name="EnvLogDirectMemoryRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_DIRECT_MEMORY"
                                         Description="{Binding [Options.Env.LogDirectMemory.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvLogDirectMemoryToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvLogDirectMemoryToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogIoRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_IO"
+                      <local:SettingRow x:Name="EnvLogIoRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_IO"
                                         Description="{Binding [Options.Env.LogIo.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvLogIoToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvLogIoToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvLogNpRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_NP"
+                      <local:SettingRow x:Name="EnvLogNpRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_NP"
                                         Description="{Binding [Options.Env.LogNp.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvLogNpToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvLogNpToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
-                      <local:SettingRow x:Name="EnvGuestImageCpuSyncRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_GUEST_IMAGE_CPU_SYNC"
+                      <local:SettingRow x:Name="EnvGuestImageCpuSyncRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_GUEST_IMAGE_CPU_SYNC"
                                         Description="{Binding [Options.Env.GuestImageCpuSync.Desc], Source={x:Static local:Localization.Instance}}">
-                        <ToggleSwitch x:Name="EnvGuestImageCpuSyncToggle"
-                                      OnContent="{Binding [Common.On], Source={x:Static local:Localization.Instance}}"
-                                      OffContent="{Binding [Common.Off], Source={x:Static local:Localization.Instance}}"
-                                      VerticalAlignment="Center" />
+                        <ToggleSwitch x:Name="EnvGuestImageCpuSyncToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
                     </StackPanel>
@@ -670,8 +834,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
                 </StackPanel>
               </ScrollViewer>
-            </TabItem>
-          </TabControl>
+            </Panel>
+          </Border>
         </Grid>
       </Panel>
 
@@ -679,7 +843,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <Border Grid.Row="2" x:Name="ConsolePanel" Classes="card" Padding="0" Height="240"
               Margin="0,12,0,0" IsVisible="False">
         <Grid RowDefinitions="Auto,*">
-          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
+          <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,Auto" Margin="16,12,16,8">
             <TextBlock x:Name="ConsoleSectionTitle" Classes="sectionTitle"
                        Text="{Binding [Console.Title], Source={x:Static local:Localization.Instance}}"
                        VerticalAlignment="Center" />
@@ -701,7 +865,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <Button Grid.Column="5" x:Name="ClearLogButton" Classes="ghost"
                     Content="{Binding [Console.Clear], Source={x:Static local:Localization.Instance}}"
                     FontSize="12"
-                    Padding="10,4" />
+                    Padding="10,4" Margin="0,0,8,0" />
+            <Button Grid.Column="6"
+                    x:Name="CloseConsoleButton"
+                    Classes="ghost"
+                    Content="×"
+                    AutomationProperties.Name="{Binding [Launch.Console],
+                                                        Source={x:Static local:Localization.Instance}}"
+                    FontSize="16"
+                    Padding="10,2" />
           </Grid>
           <ListBox Grid.Row="1" x:Name="ConsoleList" Classes="console" BorderThickness="0,1,0,0"
                    BorderBrush="{StaticResource CardBorderBrush}" CornerRadius="0,0,12,12">
@@ -714,101 +886,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
       </Border>
 
-      <!-- Launch bar; capped so it does not sprawl on a maximized window. -->
-      <Border Grid.Row="3" x:Name="LaunchBar" Classes="card" Margin="0,12,0,0" Padding="14" MaxWidth="1280">
-        <StackPanel Spacing="14">
-          <Grid ColumnDefinitions="Auto,*,Auto">
-
-            <!-- Selected game cover thumbnail -->
-            <Border Grid.Column="0" Classes="coverClip" Width="56" Height="56" CornerRadius="8"
-                    VerticalAlignment="Center">
-              <Panel x:Name="SelectedCoverPanel"
-                     x:DataType="local:GameEntry"
-                     x:CompileBindings="True">
-                <Border Background="{Binding PlaceholderBrush, FallbackValue={x:Null}}"
-                        IsVisible="{Binding !HasCover, FallbackValue=False}">
-                  <TextBlock Text="{Binding Initials}" FontSize="20" FontWeight="Bold"
-                             Foreground="#E8ECF4" Opacity="0.85"
-                             HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </Border>
-                <Image Source="{Binding Cover}" Stretch="UniformToFill"
-                       IsVisible="{Binding HasCover, FallbackValue=False}" />
-              </Panel>
-            </Border>
-
-            <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center" Margin="14,0,14,0">
-              <Grid ColumnDefinitions="Auto,Auto,*">
-                <TextBlock Grid.Column="0" x:Name="SelectedGameTitle" Text="No game selected" FontSize="16"
-                           FontWeight="Bold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
-                           MaxWidth="340" Margin="0,0,10,0" />
-
-                <!-- Title id / version / size badges, right next to the
-                     title. The title's own MaxWidth (not a "*" column) is
-                     what keeps them from drifting to the far right. -->
-                <StackPanel Grid.Column="1" x:Name="SelectedBadgesRow"
-                            x:DataType="local:GameEntry"
-                            x:CompileBindings="True"
-                            Orientation="Horizontal" Spacing="6"
-                            IsVisible="False" VerticalAlignment="Center">
-                  <Border Classes="pill" IsVisible="{Binding HasTitleId, FallbackValue=False}">
-                    <TextBlock Text="{Binding TitleId}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                  <Border Classes="pill" IsVisible="{Binding HasVersion, FallbackValue=False}">
-                    <TextBlock Text="{Binding VersionText}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                  <Border Classes="pill">
-                    <TextBlock Text="{Binding SizeText, FallbackValue=''}" FontSize="10" FontWeight="SemiBold"
-                               Foreground="{StaticResource MutedBrush}" />
-                  </Border>
-                </StackPanel>
-              </Grid>
-
-              <TextBlock x:Name="SelectedGamePath" Text="Pick a game from the library, or open an eboot.bin directly."
-                         FontSize="11" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
-              <StackPanel Orientation="Horizontal" Spacing="7">
-                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{StaticResource FaintBrush}"
-                         VerticalAlignment="Center" />
-                <TextBlock x:Name="StatusText" Text="Idle" FontSize="11" Foreground="{StaticResource MutedBrush}"
-                           VerticalAlignment="Center" />
-              </StackPanel>
-            </StackPanel>
-
-            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-              <ToggleButton x:Name="ConsoleToggle" Classes="ghost"
-                            Content="{Binding [Launch.Console], Source={x:Static local:Localization.Instance}}" />
-              <Button x:Name="LaunchButton" Classes="accent"
-                      Content="{Binding [Launch.Launch], Source={x:Static local:Localization.Instance}}"
-                      IsEnabled="False" />
-              <Button x:Name="StopButton" Classes="danger"
-                      Content="{Binding [Launch.Stop], Source={x:Static local:Localization.Instance}}"
-                      IsEnabled="False" />
-            </StackPanel>
-          </Grid>
-        </StackPanel>
-      </Border>
     </Grid>
-
-    <!-- Keep launch progress above the blurred library while the SDL game
-         process owns its independent top-level window. -->
-    <primitives:Popup x:Name="SessionLoadingPopup"
-                      IsOpen="False"
-                      PlacementTarget="{Binding #MainContent}"
-                      Placement="Center"
-                      Topmost="True"
-                      ShouldUseOverlayLayer="False"
-                      TakesFocusFromNativeControl="False"
-                      IsLightDismissEnabled="False">
-      <Border Classes="card" Width="380" CornerRadius="18" Padding="22,18">
-        <StackPanel Spacing="12">
-          <TextBlock x:Name="SessionLoadingTitle" Text="Loading game" FontSize="16" FontWeight="SemiBold" />
-          <TextBlock x:Name="SessionLoadingDetail" Text="Preparing the emulation session..." FontSize="12"
-                     Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis" />
-          <ProgressBar x:Name="SessionLoadingProgress" IsIndeterminate="True" Height="5" />
-        </StackPanel>
-      </Border>
-    </primitives:Popup>
 
     <!-- Status bar -->
     <Grid x:Name="StatusBar" Grid.Row="2" Height="32" Background="{StaticResource ChromeBrush}"

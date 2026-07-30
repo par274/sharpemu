@@ -9271,6 +9271,27 @@ internal static unsafe class VulkanVideoPresenter
                 !_guestImages.ContainsKey(texture.Address))
             {
                 var guestFormat = GetGuestTextureFormat(texture.Format, texture.NumberType);
+
+                var canonicalView = view;
+                if (texture.DstSelect != 0xFAC)
+                {
+                    var identityViewInfo = new ImageViewCreateInfo
+                    {
+                        SType = StructureType.ImageViewCreateInfo,
+                        Image = image,
+                        ViewType = GetGuestTextureViewType(
+                            texture.Type,
+                            texture.ArrayedView),
+                        Format = vkFormat,
+                        Components = ToVkComponentMapping(0xFAC),
+                        SubresourceRange = ColorSubresourceRange(layerCount: layers),
+                    };
+                    Check(
+                        _vk.CreateImageView(_device, &identityViewInfo, null, out canonicalView),
+                        "vkCreateImageView(texture identity)");
+                    SetDebugName(ObjectType.ImageView, canonicalView.Handle, $"{debugName} identity view");
+                }
+
                 var guestImage = new GuestImageResource
                 {
                     Address = texture.Address,
@@ -9286,7 +9307,7 @@ internal static unsafe class VulkanVideoPresenter
                     Format = vkFormat,
                     Image = image,
                     Memory = imageMemory,
-                    View = view,
+                    View = canonicalView,
                     InitialUploadPending = true,
                     IsCpuBacked = true,
                     CpuContentFingerprint = contentFingerprint,
@@ -11185,6 +11206,8 @@ internal static unsafe class VulkanVideoPresenter
             {
                 EnsureGuestSubmissionCapacity();
                 resources = CreateComputeDispatchResources(work);
+
+                FlushBatchedGuestCommands();
 
                 var batchCount = Math.Max(
                     1u,
@@ -14338,11 +14361,6 @@ internal static unsafe class VulkanVideoPresenter
                         pendingGuestWork.Queue.Name,
                         StringComparison.Ordinal))
                 {
-                    // A host command buffer must never contain commands from
-                    // two independent guest queues: an ordered action fences
-                    // only its own queue's predecessor submissions.
-                    // Keep the previous work label so a device-lost on this
-                    // flush still names the draws that filled the batch.
                     FlushBatchedGuestCommands();
                 }
 
@@ -14382,14 +14400,7 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 try
                 {
-                    // A host-decoded movie only overrides which image gets
-                    // presented (see the presentation selection below); the
-                    // guest's own command stream keeps draining normally.
-                    // Silently discarding these instead of executing them
-                    // leaves guest-visible completion state (labels, buffers,
-                    // job results) permanently unwritten, which desyncs the
-                    // engine's own job system and previously crashed it
-                    // shortly after the movie finished.
+
                     switch (work)
                     {
                         case VulkanOffscreenGuestDraw offscreenDraw:
@@ -14711,6 +14722,8 @@ internal static unsafe class VulkanVideoPresenter
                         $"[LOADER][ERROR] Vulkan VideoOut translated draw setup failed: {exception.Message}");
                     return;
                 }
+
+                FlushBatchedGuestCommands();
             }
 
             uint imageIndex;
@@ -15322,6 +15335,11 @@ internal static unsafe class VulkanVideoPresenter
                     RecordGuestDepthForSampling(depth, shaderStage);
                 }
 
+                if (!texture.IsStorage && texture.GuestImage is { } sampledGuestImage)
+                {
+                    RecordGuestImageForSampling(sampledGuestImage, shaderStage);
+                }
+
                 if (!texture.NeedsUpload)
                 {
                     continue;
@@ -15527,6 +15545,76 @@ internal static unsafe class VulkanVideoPresenter
                 1,
                 &barrier);
             depth.Layout = ImageLayout.ShaderReadOnlyOptimal;
+        }
+
+
+        private void RecordGuestImageForSampling(
+            GuestImageResource guestImage,
+            PipelineStageFlags shaderStage)
+        {
+            if (guestImage.Initialized || guestImage.InitialUploadPending)
+            {
+                return;
+            }
+
+            var range = ColorSubresourceRange(0, Math.Max(guestImage.MipLevels, 1));
+            var toTransfer = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                DstAccessMask = AccessFlags.TransferWriteBit,
+                OldLayout = ImageLayout.Undefined,
+                NewLayout = ImageLayout.TransferDstOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = guestImage.Image,
+                SubresourceRange = range,
+            };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.TopOfPipeBit,
+                PipelineStageFlags.TransferBit,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                &toTransfer);
+
+            var clearValue = new ClearColorValue(0f, 0f, 0f, 0f);
+            _vk.CmdClearColorImage(
+                _commandBuffer,
+                guestImage.Image,
+                ImageLayout.TransferDstOptimal,
+                &clearValue,
+                1,
+                &range);
+
+            var toShaderRead = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                SrcAccessMask = AccessFlags.TransferWriteBit,
+                DstAccessMask = AccessFlags.ShaderReadBit,
+                OldLayout = ImageLayout.TransferDstOptimal,
+                NewLayout = ImageLayout.ShaderReadOnlyOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = guestImage.Image,
+                SubresourceRange = range,
+            };
+            _vk.CmdPipelineBarrier(
+                _commandBuffer,
+                PipelineStageFlags.TransferBit,
+                shaderStage,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                &toShaderRead);
+
+            guestImage.Initialized = true;
         }
 
         private void RecordStandaloneGuestDepthClear(GuestDepthResource depth)
