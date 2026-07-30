@@ -15,6 +15,8 @@ cascade order so individual launcher views do not redefine global visuals.
       <ResourceDictionary.MergedDictionaries>
         <ResourceInclude Source="avares://SharpEmu.GUI/Themes/Tokens.axaml" />
         <ResourceInclude Source="avares://SharpEmu.GUI/Themes/Templates/SettingRow.axaml" />
+        <ResourceInclude Source="avares://SharpEmu.GUI/Themes/Templates/OptionsControls.axaml" />
+        <ResourceInclude Source="avares://SharpEmu.GUI/Themes/Templates/SplitNumericUpDown.axaml" />
       </ResourceDictionary.MergedDictionaries>
     </ResourceDictionary>
   </Application.Resources>
@@ -29,5 +31,6 @@ cascade order so individual launcher views do not redefine global visuals.
     <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/Inputs.axaml" />
     <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/Console.axaml" />
     <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/Library.axaml" />
+    <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/Options.axaml" />
   </Application.Styles>
 </Application>

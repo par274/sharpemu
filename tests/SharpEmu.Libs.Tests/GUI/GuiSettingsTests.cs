@@ -95,6 +95,67 @@ public sealed class GuiSettingsTests
         Assert.Equal(["SHARPEMU_TRACE"], settings.EnvironmentToggles);
     }
 
+    [Fact]
+    public void NormalizeFromJson_AllLauncherOptions_ArePreserved()
+    {
+        const string json = """
+            {
+              "LogLevel": "Debug",
+              "ImportTraceLimit": 96,
+              "StrictDynlibResolution": true,
+              "LogToFile": true,
+              "LogFilePath": "C:\\Logs\\sharpemu.log",
+              "OverrideLogFile": true,
+              "PlayTitleMusic": false,
+              "EmulatorPath": "C:\\SharpEmu\\SharpEmu.exe",
+              "Language": "ru",
+              "DefaultProfile": "Player",
+              "DiscordRichPresence": false,
+              "CheckForUpdatesOnStartup": false,
+              "WindowMode": "Borderless",
+              "Resolution": "2560x1440",
+              "DisplayIndex": 2,
+              "RefreshRate": 144,
+              "ScalingMode": "Integer",
+              "VSync": false,
+              "HdrMode": "On",
+              "EnvironmentToggles": [
+                "SHARPEMU_VK_VALIDATION",
+                "SHARPEMU_GUEST_IMAGE_CPU_SYNC"
+              ],
+              "RenderResolutionScale": 0.5,
+              "DiscordClientId": "999"
+            }
+            """;
+
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.Equal("Debug", settings.LogLevel);
+        Assert.Equal(96, settings.ImportTraceLimit);
+        Assert.True(settings.StrictDynlibResolution);
+        Assert.True(settings.LogToFile);
+        Assert.Equal("C:\\Logs\\sharpemu.log", settings.LogFilePath);
+        Assert.True(settings.OverrideLogFile);
+        Assert.False(settings.PlayTitleMusic);
+        Assert.Equal("C:\\SharpEmu\\SharpEmu.exe", settings.EmulatorPath);
+        Assert.Equal("ru", settings.Language);
+        Assert.Equal("Player", settings.DefaultProfile);
+        Assert.False(settings.DiscordRichPresence);
+        Assert.False(settings.CheckForUpdatesOnStartup);
+        Assert.Equal("Borderless", settings.WindowMode);
+        Assert.Equal("2560x1440", settings.Resolution);
+        Assert.Equal(2, settings.DisplayIndex);
+        Assert.Equal(144, settings.RefreshRate);
+        Assert.Equal("Integer", settings.ScalingMode);
+        Assert.False(settings.VSync);
+        Assert.Equal("On", settings.HdrMode);
+        Assert.Equal(
+            ["SHARPEMU_VK_VALIDATION", "SHARPEMU_GUEST_IMAGE_CPU_SYNC"],
+            settings.EnvironmentToggles);
+        Assert.Equal(0.5, settings.RenderResolutionScale);
+        Assert.Equal("999", settings.DiscordClientId);
+    }
+
     // An empty Discord client ID intentionally disables Rich Presence.
     [Fact]
     public void NormalizeFromJson_EmptyDiscordClientId_IsPreservedNotNormalized()

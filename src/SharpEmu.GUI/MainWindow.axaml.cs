@@ -102,6 +102,7 @@ public partial class MainWindow : Window
     private bool _isStopping;
     private int _autoScrollTicks;
     private int _activePageIndex;
+    private int _optionsSectionIndex;
     private Updater.UpdateInfo? _availableUpdate;
     private string _updateStatusKey = "Updater.Status.Ready";
     private object?[] _updateStatusArgs = [BuildInfo.CommitSha ?? "dev"];
@@ -217,6 +218,7 @@ public partial class MainWindow : Window
         LibraryTabButton.Click += (_, _) => SetActivePage(0);
         OptionsTabButton.Click += (_, _) => SetActivePage(1);
         ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
+        WireOptionsNavigation();
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
@@ -368,6 +370,94 @@ public partial class MainWindow : Window
         {
             button.Classes.Remove("active");
         }
+    }
+
+    private void WireOptionsNavigation()
+    {
+        var buttons = OptionsNavigationButtons();
+        for (var index = 0; index < buttons.Length; index++)
+        {
+            var section = index;
+            buttons[index].Click += (_, _) => SetOptionsSection(section);
+            buttons[index].PointerEntered += (_, _) => SetOptionsNavigationIndicator(section);
+            buttons[index].GotFocus += (_, _) => SetOptionsNavigationIndicator(section);
+        }
+
+        OptionsNavHost.PointerExited += (_, _) =>
+            SetOptionsNavigationIndicator(_optionsSectionIndex);
+        SetOptionsSection(0);
+    }
+
+    private Button[] OptionsNavigationButtons() =>
+    [
+        OptionsGeneralNav,
+        OptionsLoggingNav,
+        OptionsLauncherNav,
+        OptionsRenderingNav,
+        OptionsEnvironmentNav,
+        OptionsAboutNav,
+    ];
+
+    private Control[] OptionsSectionPanels() =>
+    [
+        OptionsGeneralPanel,
+        OptionsLoggingPanel,
+        OptionsLauncherPanel,
+        OptionsRenderingPanel,
+        OptionsEnvironmentPanel,
+        OptionsAboutPanel,
+    ];
+
+    private void SetOptionsSection(int section)
+    {
+        var buttons = OptionsNavigationButtons();
+        var panels = OptionsSectionPanels();
+        section = Math.Clamp(section, 0, buttons.Length - 1);
+        _optionsSectionIndex = section;
+        SetOptionsNavigationIndicator(section);
+
+        for (var index = 0; index < buttons.Length; index++)
+        {
+            var active = index == section;
+            SetActiveClass(buttons[index], active);
+            SetOptionsPanelInteraction(panels[index], active);
+        }
+    }
+
+    private static void SetOptionsPanelInteraction(Control panel, bool active)
+    {
+        if (active)
+        {
+            if (!panel.Classes.Contains("active"))
+            {
+                panel.Classes.Add("active");
+            }
+        }
+        else
+        {
+            panel.Classes.Remove("active");
+        }
+
+        panel.IsHitTestVisible = active;
+        AutomationProperties.SetAccessibilityView(
+            panel,
+            active ? AccessibilityView.Content : AccessibilityView.Raw);
+        KeyboardNavigation.SetTabNavigation(
+            panel,
+            active ? KeyboardNavigationMode.Continue : KeyboardNavigationMode.None);
+    }
+
+    private void SetOptionsNavigationIndicator(int section)
+    {
+        if (OptionsNavIndicator.RenderTransform is not TranslateTransform transform)
+        {
+            return;
+        }
+
+        var buttons = OptionsNavigationButtons();
+        var button = buttons[Math.Clamp(section, 0, buttons.Length - 1)];
+        transform.Y = button.TranslatePoint(default, OptionsNavHost)?.Y
+            ?? section * button.Bounds.Height;
     }
 
     // ---- Github http client config ----
@@ -613,12 +703,60 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyLocalization()
     {
+        RefreshOptionsNavigationLabels();
         RefreshLocalizedChoices();
         UpdateLogFilePathText();
         RefreshHostRefreshRates(_settings.RefreshRate);
         RefreshUpdateText();
         UpdateEmptyStateTexts();
         UpdateRunButtons();
+    }
+
+    private void RefreshOptionsNavigationLabels()
+    {
+        var localization = Localization.Instance;
+        SetOptionsNavigationLabel(
+            OptionsGeneralNav,
+            OptionsGeneralNavLabel,
+            localization.Get("Options.General"));
+        SetOptionsNavigationLabel(
+            OptionsLoggingNav,
+            OptionsLoggingNavLabel,
+            localization.Get("Options.Section.Logging"));
+        SetOptionsNavigationLabel(
+            OptionsLauncherNav,
+            OptionsLauncherNavLabel,
+            localization.Get("Options.Section.Launcher"));
+        SetOptionsNavigationLabel(
+            OptionsRenderingNav,
+            OptionsRenderingNavLabel,
+            localization.Get("Options.Section.Rendering"));
+        SetOptionsNavigationLabel(
+            OptionsEnvironmentNav,
+            OptionsEnvironmentNavLabel,
+            localization.Get("Options.Env.Tab"));
+        SetOptionsNavigationLabel(
+            OptionsAboutNav,
+            OptionsAboutNavLabel,
+            localization.Get("Options.About"));
+    }
+
+    private static void SetOptionsNavigationLabel(Button button, TextBlock label, string value)
+    {
+        var navigationLabel = SectionNavigationLabel(value);
+        label.Text = navigationLabel;
+        AutomationProperties.SetName(button, navigationLabel);
+    }
+
+    private static string SectionNavigationLabel(string value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Any(char.IsLower))
+        {
+            return value;
+        }
+
+        var lower = value.ToLowerInvariant();
+        return char.ToUpperInvariant(lower[0]) + lower[1..];
     }
 
     // ---- Discord Rich Presence ----

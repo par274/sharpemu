@@ -6,6 +6,8 @@ Shared colors and brushes used throughout the launcher.
 
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
+
   <Color x:Key="SystemAccentColor">#7C5CFC</Color>
 
   <LinearGradientBrush x:Key="BgBrush" StartPoint="0%,0%" EndPoint="100%,100%">

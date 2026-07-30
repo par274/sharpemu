@@ -8,26 +8,51 @@ Control theme for the shared launcher settings row.
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:local="clr-namespace:SharpEmu.GUI">
   <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
+    <Setter Property="MinHeight" Value="70" />
     <Setter Property="Template">
       <ControlTemplate>
-        <Grid ColumnDefinitions="*,Auto">
-          <StackPanel VerticalAlignment="Center" Spacing="2" Margin="0,0,16,0">
-            <TextBlock x:Name="PART_Label" Text="{TemplateBinding Label}" FontSize="13" />
-            <TextBlock Text="{TemplateBinding Description}" FontSize="11"
-                       Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
-                       IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
-                                   Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
-          </StackPanel>
-          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-            <ToggleSwitch OnContent="Override" OffContent="Override" MinWidth="0"
-                          VerticalAlignment="Center"
-                          IsVisible="{TemplateBinding ShowOverride}"
-                          IsChecked="{Binding IsOverridden, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" />
-            <ContentPresenter x:Name="PART_Slot"
-                              Content="{TemplateBinding Content}"
-                              VerticalAlignment="Center" />
-          </StackPanel>
-        </Grid>
+        <Border x:Name="PART_RowSurface"
+                Background="#06FFFFFF"
+                BorderBrush="#0AFFFFFF"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="18,12">
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
+              <TextBlock x:Name="PART_Label"
+                         Text="{TemplateBinding Label}"
+                         FontSize="14"
+                         FontWeight="Medium"
+                         TextWrapping="Wrap"
+                         Foreground="{StaticResource TextBrush}" />
+              <TextBlock Text="{TemplateBinding Description}"
+                         FontSize="11"
+                         FontWeight="Normal"
+                         Foreground="{StaticResource MutedBrush}"
+                         LineHeight="16"
+                         MaxWidth="690"
+                         HorizontalAlignment="Left"
+                         TextAlignment="Left"
+                         TextWrapping="Wrap"
+                         IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
+                                     Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
+            <StackPanel Grid.Column="1"
+                        Orientation="Horizontal"
+                        Spacing="12"
+                        VerticalAlignment="Center">
+              <ToggleSwitch OnContent="Override"
+                            OffContent="Override"
+                            MinWidth="0"
+                            VerticalAlignment="Center"
+                            IsVisible="{TemplateBinding ShowOverride}"
+                            IsChecked="{Binding IsOverridden, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" />
+              <ContentPresenter x:Name="PART_Slot"
+                                Content="{TemplateBinding Content}"
+                                VerticalAlignment="Center" />
+            </StackPanel>
+          </Grid>
+        </Border>
       </ControlTemplate>
     </Setter>
   </ControlTheme>
