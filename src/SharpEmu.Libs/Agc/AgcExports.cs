@@ -609,6 +609,11 @@ public static partial class AgcExports
         public uint DrawIndexOffset { get; set; }
         public bool PredicateSkip { get; set; }
         public string QueueName { get; set; } = "graphics";
+        // Ident this queue's end-of-pipe completion interrupt is published under.
+        // The graphics queue keeps 0; a compute queue takes the owner handle it
+        // was submitted with, which is the same value the guest registers through
+        // sceAgcDriverAddEqEvent.
+        public ulong CompletionEventId { get; set; }
         public ulong ActiveSubmissionId { get; set; }
         public Queue<PendingSubmission> PendingSubmissions { get; } = new();
         public bool HasActiveSubmission { get; set; }
@@ -3338,6 +3343,7 @@ public static partial class AgcExports
             }
 
             queueState.QueueName = $"acb.compute[{ownerHandle}]";
+            queueState.CompletionEventId = ownerHandle;
             EnqueueSubmittedDcb(
                 ctx,
                 gpuState,
@@ -3528,33 +3534,47 @@ public static partial class AgcExports
         SubmittedDcbState state,
         ulong submissionId)
     {
-        if (!ReferenceEquals(state, gpuState.Graphics) ||
-            state.CompletionEventNotifiedSubmissionId == submissionId)
+        if (state.CompletionEventNotifiedSubmissionId == submissionId)
         {
             return;
         }
 
         state.CompletionEventNotifiedSubmissionId = submissionId;
+        // Hardware raises an end-of-pipe interrupt for every submission on every
+        // queue, so this is unconditional. It stays safe for titles that do not
+        // want it because delivery is registration-gated: TriggerRegisteredEvents
+        // only queues onto equeues that registered this exact ident through
+        // sceAgcDriverAddEqEvent. Graphics keeps ident 0; a compute queue uses the
+        // owner handle it was submitted under.
+        var completionEventId = state.CompletionEventId;
+        var isGraphics = ReferenceEquals(state, gpuState.Graphics);
+        var queueName = state.QueueName;
         void TriggerCompletionEvents()
         {
             var triggered = KernelEventQueueCompatExports.TriggerRegisteredEvents(
-                ident: 0,
+                completionEventId,
                 KernelEventQueueCompatExports.KernelEventFilterGraphics,
-                data: 0);
-            if (_compatibilitySubmitCompletionEvent)
+                completionEventId);
+            // The broad fan-out wakes graphics registrations whose ident never
+            // matches anything the driver publishes. That is a compatibility
+            // guess rather than hardware behavior, so it stays opt-in and stays
+            // on the graphics queue where it was measured.
+            if (isGraphics && _compatibilitySubmitCompletionEvent)
             {
                 triggered += KernelEventQueueCompatExports.TriggerRegisteredEventsDistinct(
                     KernelEventQueueCompatExports.KernelEventFilterGraphics);
             }
             TraceAgc(
-                $"agc.driver_submit_dcb completion submission={submissionId} " +
-                $"queues={triggered}");
+                $"agc.completion_event queue={queueName} submission={submissionId} " +
+                $"event=0x{completionEventId:X} queues={triggered}");
         }
 
-        // A DCB is complete only after its translated Vulkan work and ordered
-        // guest-memory writes have finished. Put the notification on that same
-        // logical graphics queue instead of approximating completion with a
-        // timer, which can wake Unity while its upload data is still stale.
+        // A submission is complete only after its translated Vulkan work and
+        // ordered guest-memory writes have finished. Put the notification on that
+        // same logical queue instead of approximating completion with a timer or a
+        // ThreadPool hop, either of which can only make the interrupt late and
+        // reorder it against registration changes (and can wake Unity while its
+        // upload data is still stale).
         if (GuestGpu.Current.SubmitOrderedGuestAction(
                 TriggerCompletionEvents,
                 $"agc submit completion {submissionId}") == 0)

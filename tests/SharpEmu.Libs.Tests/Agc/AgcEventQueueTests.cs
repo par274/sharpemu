@@ -8,10 +8,20 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
+// The kernel event-queue registry is process-wide static state, and these tests assert over
+// every graphics registration in it, so they cannot run beside another suite that registers
+// graphics events.
+[CollectionDefinition(GraphicsEventQueueStateCollection.Name, DisableParallelization = true)]
+public sealed class GraphicsEventQueueStateCollection
+{
+    public const string Name = "GraphicsEventQueueState";
+}
+
 // IT_EVENT_WRITE carries a 6-bit hardware EVENT_TYPE, but sceAgcDriverAddEqEvent registers the
 // listener with a guest-defined eventId. Those two values are not the same numbering scheme, so
 // exact ident matching never wakes anything (issue #173). TriggerRegisteredEventsByFilter wakes
 // every graphics registration instead.
+[Collection(GraphicsEventQueueStateCollection.Name)]
 public sealed class AgcEventQueueTests
 {
     private const ulong BaseAddress = 0x1_0000_0000;
@@ -70,6 +80,14 @@ public sealed class AgcEventQueueTests
         Assert.Equal(1u, ReadUInt32(memory, eventsAddress + 0x0C));
         Assert.Equal(eventType, ReadUInt64(memory, eventsAddress + 0x10));
         Assert.Equal(userData, ReadUInt64(memory, eventsAddress + 0x18));
+
+        // Registrations live in process-wide static state, and a sibling test asserts that
+        // no graphics registration exists at all. Drop this one instead of relying on
+        // execution order.
+        ctx[CpuRegister.Rdi] = handle;
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            KernelEventQueueCompatExports.KernelDeleteEqueue(ctx));
     }
 
     [Fact]
