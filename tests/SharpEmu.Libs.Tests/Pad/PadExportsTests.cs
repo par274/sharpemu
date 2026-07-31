@@ -30,4 +30,47 @@ public sealed class PadExportsTests
         _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
         Assert.Equal(expected, PadExports.PadSetTiltCorrectionState(_ctx));
     }
+
+    /// <summary>
+    /// Mirrors the calling frame observed in PPSA10112: the out-param points at
+    /// rbp-0x30 and the caller's stack cookie sits at rbp-0x28, so the state is
+    /// eight bytes. Writing more would smash the cookie and fail the guest's
+    /// stack check, which is the failure mode this size guards against.
+    /// </summary>
+    [Fact]
+    public void GetTriggerEffectState_WritesEightBytesAndLeavesTheCookieIntact()
+    {
+        const ulong stateAddress = Base + 0x100;
+        const ulong cookieAddress = stateAddress + 8;
+        const ulong cookie = 0xC0DEC0DECAFEBA00UL;
+
+        Assert.True(_memory.TryWrite(stateAddress, new byte[] { 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE }));
+        Assert.True(_memory.TryWrite(cookieAddress, BitConverter.GetBytes(cookie)));
+
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = stateAddress;
+
+        Assert.Equal(0, PadExports.PadGetTriggerEffectState(_ctx));
+
+        Span<byte> state = stackalloc byte[8];
+        Assert.True(_memory.TryRead(stateAddress, state));
+        foreach (var value in state)
+        {
+            Assert.Equal(0, value);
+        }
+
+        Span<byte> guard = stackalloc byte[8];
+        Assert.True(_memory.TryRead(cookieAddress, guard));
+        Assert.Equal(cookie, BitConverter.ToUInt64(guard));
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(-1)]
+    public void GetTriggerEffectState_RejectsForeignHandles(int handle)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = Base + 0x100;
+        Assert.Equal(InvalidHandle, PadExports.PadGetTriggerEffectState(_ctx));
+    }
 }
