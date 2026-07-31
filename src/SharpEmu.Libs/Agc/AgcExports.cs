@@ -330,6 +330,11 @@ public static partial class AgcExports
     private static long _labelProducerSequence;
     private static readonly object _labelProducerGate = new();
     private static readonly List<LabelProducerTrace> _labelProducers = [];
+    private const int LabelProducerSoftBound = 4096;
+    // Raised when a compaction pass frees nothing because every record is still
+    // active, so registration does not rescan the whole list on every add while
+    // a queue is suspended. Reset once compaction can make progress again.
+    private static int _labelProducerCompactionBound = LabelProducerSoftBound;
     private static readonly HashSet<(object Memory, ulong Address)>
         _tracedProducerlessWaits = new();
     private static long _shaderTranslationMissTraceCount;
@@ -4398,9 +4403,21 @@ public static partial class AgcExports
         };
         lock (_labelProducerGate)
         {
-            if (_labelProducers.Count >= 4096)
+            if (_labelProducers.Count >= _labelProducerCompactionBound)
             {
-                _labelProducers.RemoveRange(0, 1024);
+                // Active producer records are synchronization state, not a
+                // diagnostic cache. Removing one can hide an earlier
+                // same-submission label write and make a valid in-stream fence
+                // suspend forever. Compact only completed history; if all
+                // records are active, correctness takes precedence over the
+                // soft diagnostic bound.
+                var removed = CompactCompletedEntries(
+                    _labelProducers,
+                    static candidate => candidate.Completed,
+                    targetCount: LabelProducerSoftBound * 3 / 4);
+                _labelProducerCompactionBound = removed == 0
+                    ? _labelProducers.Count * 2
+                    : LabelProducerSoftBound;
             }
 
             _labelProducers.Add(producer);
@@ -4419,6 +4436,36 @@ public static partial class AgcExports
         }
 
         return producer;
+    }
+
+    internal static int CompactCompletedEntries<T>(
+        List<T> entries,
+        Func<T, bool> isCompleted,
+        int targetCount)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentNullException.ThrowIfNull(isCompleted);
+        targetCount = Math.Max(0, targetCount);
+
+        // Single order-preserving pass. Removing one-by-one would shift the
+        // tail on every eviction, which is quadratic on a list this size and
+        // runs while the label gate is held.
+        var removable = entries.Count - targetCount;
+        var removed = 0;
+        var write = 0;
+        for (var read = 0; read < entries.Count; read++)
+        {
+            if (removed < removable && isCompleted(entries[read]))
+            {
+                removed++;
+                continue;
+            }
+
+            entries[write++] = entries[read];
+        }
+
+        entries.RemoveRange(write, entries.Count - write);
+        return removed;
     }
 
     private static void CompleteLabelProducer(LabelProducerTrace? producer)
@@ -6081,6 +6128,13 @@ public static partial class AgcExports
                     GpuWaitRegistry.RecordProduced(
                         ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
                 }
+                else if (!wroteData && dataSelection is 1 or 2)
+                {
+                    // See ApplySubmittedReleaseMem: a dropped label write strands
+                    // every waiter on this label permanently.
+                    ReportLabelWriteFailure(
+                        "release_mem_standard", destinationAddress, data, dataSelection);
+                }
 
                 if (tracePacket)
                 {
@@ -6094,6 +6148,33 @@ public static partial class AgcExports
             packetAddress,
             writesGuestMemory ? destinationAddress : 0,
             writesGuestMemory ? writeLength : 0);
+    }
+
+    private static long _labelWriteFailureCount;
+
+    /// <summary>
+    /// Reports a GPU release-label write that could not reach guest memory.
+    /// Rate-limited (first 16, then powers of two) because a wedged queue can
+    /// retry, but never silenced: this is the difference between a diagnosable
+    /// fault and a permanently suspended graphics queue with no explanation.
+    /// </summary>
+    private static void ReportLabelWriteFailure(
+        string packet,
+        ulong destinationAddress,
+        ulong data,
+        uint dataSelection)
+    {
+        var count = Interlocked.Increment(ref _labelWriteFailureCount);
+        if (count > 16 && (count & (count - 1)) != 0)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][ERROR] agc.label_write_failed packet={packet} " +
+            $"dst=0x{destinationAddress:X16} data=0x{data:X16} " +
+            $"data_sel={dataSelection} count={count} — a suspended WAIT_REG_MEM " +
+            $"on this label can no longer be satisfied or deadlock-broken.");
     }
 
     private static (uint Destination, uint DataSelection)
@@ -6155,6 +6236,15 @@ public static partial class AgcExports
                 {
                     GpuWaitRegistry.RecordProduced(
                         ctx.Memory, destinationAddress, dataSelection == 1 ? dataLo : data);
+                }
+                else if (!wroteData && dataSelection is 1 or 2)
+                {
+                    // A label write that fails is not a benign miss: this packet
+                    // is the producer a suspended WAIT_REG_MEM is waiting for, and
+                    // RecordProduced above is skipped, so the deadlock breaker has
+                    // no value to replay either. The queue then never resumes.
+                    // Never let that happen quietly.
+                    ReportLabelWriteFailure("release_mem", destinationAddress, data, dataSelection);
                 }
 
                 if (tracePacket)

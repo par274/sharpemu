@@ -442,6 +442,50 @@ internal static class GpuWaitRegistry
         return collected;
     }
 
+    /// <summary>
+    /// Drops produced-label values that no registered waiter is watching. Called
+    /// under <see cref="_gate"/> when the table reaches its soft bound. A value
+    /// still watched by a waiter is the only thing that can release that waiter
+    /// once the guest recycles its label, so those are always retained even if
+    /// the table has to grow past the bound.
+    /// </summary>
+    private static void PruneUnwatchedProducedLocked()
+    {
+        List<(object Memory, ulong Address)>? unwatched = null;
+        foreach (var (key, _) in _lastProduced)
+        {
+            if (_waiters.TryGetValue(key.Item2, out var list))
+            {
+                var watched = false;
+                foreach (var waiter in list)
+                {
+                    if (ReferenceEquals(waiter.Memory, key.Item1))
+                    {
+                        watched = true;
+                        break;
+                    }
+                }
+
+                if (watched)
+                {
+                    continue;
+                }
+            }
+
+            (unwatched ??= []).Add(key);
+        }
+
+        if (unwatched is null)
+        {
+            return;
+        }
+
+        foreach (var key in unwatched)
+        {
+            _lastProduced.Remove(key);
+        }
+    }
+
     /// <summary>Records the value a label producer wrote, for the deadlock
     /// breaker. Also latches any already-waiting waiter it satisfies.</summary>
     public static bool RecordProduced(object memory, ulong address, ulong value)
@@ -450,7 +494,14 @@ internal static class GpuWaitRegistry
         {
             if (_lastProduced.Count >= 8192)
             {
-                _lastProduced.Clear();
+                // These entries are release state, not a cache. CollectDeadlockBroken
+                // can only free a waiter whose label the guest has since recycled by
+                // replaying the value a real producer wrote to it, so clearing the
+                // table wholesale strands every such waiter forever — the suspended
+                // queue then never resumes and the title wedges with its render
+                // thread parked. Drop only values no live waiter is watching, and
+                // let the table exceed the bound when they all are.
+                PruneUnwatchedProducedLocked();
             }
 
             _lastProduced[(memory, address)] = value;
