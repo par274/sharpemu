@@ -2706,20 +2706,31 @@ public static partial class Gen5SpirvTranslator
 
                 if (applySdwaIntegerModifiers)
                 {
+                    // SDWA ABS/NEG are floating-point sign-bit modifiers even on
+                    // a bit-move opcode: ABS clears the sign bit, NEG flips it.
+                    // Two's-complement negating the raw bits instead turns 1.0
+                    // into -4.0 and -3.0 into 1.5, which silently skews every
+                    // pass that y-flips its clip position with an SDWA-negated
+                    // V_MOV_B32 - the whole of UE's DrawRectangle.
+                    var signBit = selector switch
+                    {
+                        <= 3 => 0x80u,
+                        4 or 5 => 0x8000u,
+                        _ => 0x80000000u,
+                    };
+
                     if ((sdwa.AbsoluteMask & (1u << sourceIndex)) != 0)
                     {
-                        value = Bitcast(
-                            _uintType,
-                            Ext(5, _intType, Bitcast(_intType, value)));
+                        value = BitwiseAnd(value, UInt(~signBit));
                     }
 
                     if ((sdwa.NegateMask & (1u << sourceIndex)) != 0)
                     {
                         value = _module.AddInstruction(
-                            SpirvOp.ISub,
+                            SpirvOp.BitwiseXor,
                             _uintType,
-                            UInt(0),
-                            value);
+                            value,
+                            UInt(signBit));
                     }
                 }
             }
