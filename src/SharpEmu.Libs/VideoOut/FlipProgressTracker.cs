@@ -1,5 +1,5 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
 using System.Threading;
