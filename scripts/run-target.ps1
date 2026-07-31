@@ -249,7 +249,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
 
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not $process.HasExited) {
-            $processTree = Get-ProcessTree -RootProcessId $process.Id
+            $processTree = @(Get-ProcessTree -RootProcessId $process.Id)
             $workingSetBytes = [long](($processTree | Measure-Object -Property WorkingSet64 -Sum).Sum)
             $privateBytes = [long](($processTree | Measure-Object -Property PrivateMemorySize64 -Sum).Sum)
             $peakWorkingSetBytes = [Math]::Max($peakWorkingSetBytes, $workingSetBytes)
