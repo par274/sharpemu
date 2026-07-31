@@ -15,7 +15,7 @@ The Windows setup must record the title ID, region, executable hash, base and up
 
 As of upstream commit `7c9740fee8a633e17b145c6bc6d794e41d46c73f`, public testing in [sharpemu/sharpemu#2](https://github.com/sharpemu/sharpemu/issues/2) reports v1.004 reaching character creation at roughly 2–3 FPS. Reported problems include severe native memory growth, low performance, visual artifacts, choppy audio, and incomplete text input. These reports are orientation, not this fork’s baseline.
 
-The first Windows baseline must reproduce the route three times with the controlled runner before development claims rely on it.
+The first Windows baseline must reproduce the route three times with the controlled runner before development claims rely on it. Its status and accepted summary belong in `docs/BASELINE.md`.
 
 ## Milestones
 
@@ -30,7 +30,3 @@ Reaching a later screen or increasing frame rate does not complete a milestone w
 ## First investigation
 
 Reproduce and characterize native memory growth during the v1.004 startup route. Run at least three comparable trials, distinguish managed, native, driver, and Vulkan ownership, and produce evidence before changing behavior. The known upstream discussion is [sharpemu/sharpemu#639](https://github.com/sharpemu/sharpemu/issues/639).
-
-## Baseline status
-
-No baseline from this fork has been recorded. The Windows setup owns the first entry. Do not copy measurements from upstream reports into this section.
