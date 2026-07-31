@@ -401,6 +401,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         Environment.SetEnvironmentVariable(app0VariableName, app0Root);
+        // Overlap the cooked-id APR walk with module load so the first ReadFile
+        // miss mid-boot does not stall on a cold USB index.
+        SharpEmu.Libs.Ampr.AmprFileRegistry.BeginApp0IndexPreload(app0Root);
         return new App0BindingScope(app0VariableName);
     }
 
