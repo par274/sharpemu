@@ -613,6 +613,11 @@ public static partial class AgcExports
         public Queue<PendingSubmission> PendingSubmissions { get; } = new();
         public bool HasActiveSubmission { get; set; }
         public bool IsSuspended { get; set; }
+
+        // Set when parsing stops on an INDIRECT_BUFFER packet so the caller can
+        // continue into the buffer it links to.
+        public ulong PendingChainAddress { get; set; }
+        public uint PendingChainDwords { get; set; }
         public ulong CompletionEventNotifiedSubmissionId { get; set; }
         public Dictionary<(uint Op, uint Register), uint> FramePacketCounts { get; } = new();
         public uint FramePacketCount { get; set; }
@@ -3255,6 +3260,7 @@ public static partial class AgcExports
             !TryReadUInt64(ctx, packetAddress, out var commandAddress) ||
             !TryReadUInt32(ctx, packetAddress + 8, out var dwordCount))
         {
+            TraceAgc($"agc.driver_submit_dcb_rejected packet=0x{packetAddress:X16}");
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
@@ -3267,10 +3273,9 @@ public static partial class AgcExports
             }
         }
 
-        if (tracePackets)
-        {
-            TraceAgc($"agc.driver_submit_dcb packet=0x{packetAddress:X16} addr=0x{commandAddress:X16} dwords={dwordCount}");
-        }
+        TraceAgc(
+            $"agc.driver_submit_dcb packet=0x{packetAddress:X16} addr=0x{commandAddress:X16} " +
+            $"dwords={dwordCount} end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
@@ -3317,12 +3322,10 @@ public static partial class AgcExports
             }
         }
 
-        if (tracePackets)
-        {
-            TraceAgc(
-                $"agc.driver_submit_acb owner={ownerHandle} packet=0x{packetAddress:X16} " +
-                $"addr=0x{commandAddress:X16} dwords={dwordCount}");
-        }
+        TraceAgc(
+            $"agc.driver_submit_acb owner={ownerHandle} packet=0x{packetAddress:X16} " +
+            $"addr=0x{commandAddress:X16} dwords={dwordCount} " +
+            $"end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
         var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
@@ -3579,32 +3582,71 @@ public static partial class AgcExports
         using var guestQueueScope = GuestGpu.Current.EnterGuestQueue(
             state.QueueName,
             state.ActiveSubmissionId);
-        var windowByteCount = checked((int)(dwordCount * sizeof(uint)));
-        var rented = GuestDataPool.Shared.Rent(windowByteCount);
-        try
+        // A submission is one link of a chain, not necessarily the whole stream:
+        // when a title's command arena fills mid-frame it continues in a fresh
+        // buffer and links the two with an INDIRECT_BUFFER packet, then submits
+        // only the first link. Stopping at the end of the submitted window drops
+        // every packet past the switch -- including the flip and the end-of-frame
+        // completion labels the guest is waiting on.
+        for (var chainDepth = 0; ; chainDepth++)
         {
-            if (ctx.Memory.TryRead(commandAddress, rented.AsSpan(0, windowByteCount)))
+            if (chainDepth > MaxSubmittedChainDepth)
             {
-                _dcbWindowBuffer = rented;
-                _dcbWindowStart = commandAddress;
-                _dcbWindowByteLength = windowByteCount;
+                TraceAgc(
+                    $"agc.dcb_chain_depth_exceeded queue={state.QueueName} " +
+                    $"submission={state.ActiveSubmissionId} addr=0x{commandAddress:X16}");
+                return false;
             }
 
-            return ParseSubmittedDcbCore(
-                ctx,
-                gpuState,
-                state,
-                commandAddress,
-                dwordCount,
-                tracePackets);
-        }
-        finally
-        {
-            _dcbWindowBuffer = null;
-            _dcbWindowByteLength = 0;
-            GuestDataPool.Shared.Return(rented);
+            state.PendingChainAddress = 0;
+            state.PendingChainDwords = 0;
+            var windowByteCount = checked((int)(dwordCount * sizeof(uint)));
+            var rented = GuestDataPool.Shared.Rent(windowByteCount);
+            bool suspended;
+            try
+            {
+                if (ctx.Memory.TryRead(commandAddress, rented.AsSpan(0, windowByteCount)))
+                {
+                    _dcbWindowBuffer = rented;
+                    _dcbWindowStart = commandAddress;
+                    _dcbWindowByteLength = windowByteCount;
+                }
+
+                suspended = ParseSubmittedDcbCore(
+                    ctx,
+                    gpuState,
+                    state,
+                    commandAddress,
+                    dwordCount,
+                    tracePackets);
+            }
+            finally
+            {
+                _dcbWindowBuffer = null;
+                _dcbWindowByteLength = 0;
+                GuestDataPool.Shared.Return(rented);
+            }
+
+            if (suspended)
+            {
+                return true;
+            }
+
+            var chainAddress = state.PendingChainAddress;
+            var chainDwords = state.PendingChainDwords;
+            if (chainAddress == 0 || chainDwords == 0 || chainDwords > 1_000_000)
+            {
+                return false;
+            }
+
+            commandAddress = chainAddress;
+            dwordCount = chainDwords;
         }
     }
+
+    // Deep enough for a title that links one continuation buffer per frame,
+    // shallow enough that a self-referencing chain cannot spin forever.
+    private const int MaxSubmittedChainDepth = 64;
 
     private static bool ParseSubmittedDcbCore(
         CpuContext ctx,
@@ -3730,6 +3772,32 @@ public static partial class AgcExports
 
                 offset += length;
                 continue;
+            }
+
+            if (op == ItIndirectBuffer &&
+                length >= 4 &&
+                TryReadUInt32(ctx, currentAddress + 4, out var chainLow) &&
+                TryReadUInt32(ctx, currentAddress + 8, out var chainHigh) &&
+                TryReadUInt32(ctx, currentAddress + 12, out var chainDwords))
+            {
+                var chainAddress = ((ulong)(chainHigh & 0xFFFFu) << 32) | chainLow;
+                var chainLength = chainDwords & 0xFFFFFu;
+                // Titles emit a zeroed INDIRECT_BUFFER as padding for a branch they
+                // decided not to take. Only a populated one redirects the stream.
+                if (chainAddress != 0 && chainLength != 0)
+                {
+                    state.PendingChainAddress = chainAddress;
+                    state.PendingChainDwords = chainLength;
+                    TraceAgc(
+                        $"agc.dcb_chain queue={state.QueueName} " +
+                        $"submission={state.ActiveSubmissionId} " +
+                        $"packet=0x{currentAddress:X16} " +
+                        $"target=0x{chainAddress:X16} dwords={chainLength}");
+
+                    // The link is a jump, not a call: whatever follows it in this
+                    // buffer is unreachable padding.
+                    return false;
+                }
             }
 
             if (op == ItNop &&
@@ -13670,6 +13738,58 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, cmd);
+    }
+
+    // Matches the 4-dword INDIRECT_BUFFER packet CbBranch writes below.
+    [SysAbiExport(
+        Nid = "uZW-mqsxkrM",
+        ExportName = "sceAgcCbBranchGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbBranchGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 4u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // How a title continues a frame whose command arena filled: it branches from
+    // the tail of the exhausted buffer into a fresh one and submits only the first
+    // buffer, leaving the driver to follow the link. Dropping this packet strands
+    // everything written after the switch -- for UE 4.27 that is the rest of the
+    // frame, including its flip and the end-of-frame labels the guest's AGC
+    // interrupt thread needs before it will trigger the backbuffer event.
+    //
+    // The branch target and its length arrive on the stack, past six register
+    // arguments (verified against a live call: the values matched the continuation
+    // buffer the title had already written into).
+    [SysAbiExport(
+        Nid = "w1KFAHVqpaU",
+        ExportName = "sceAgcCbBranch",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbBranch(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        if (commandBufferAddress == 0 ||
+            !TryReadUInt64(ctx, ctx[CpuRegister.Rsp] + (2 * sizeof(ulong)), out var target) ||
+            !TryReadUInt64(ctx, ctx[CpuRegister.Rsp] + (3 * sizeof(ulong)), out var targetDwords))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 4, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(4, ItIndirectBuffer, RZero)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, (uint)(target & 0xFFFF_FFFFUL)) ||
+            !TryWriteUInt32(ctx, commandAddress + 8, (uint)((target >> 32) & 0xFFFFUL)) ||
+            !TryWriteUInt32(ctx, commandAddress + 12, (uint)targetDwords & 0xFFFFFu))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.cb_branch buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
+            $"target=0x{target:X16} dwords={targetDwords}");
+        return ReturnPointer(ctx, commandAddress);
     }
 
     [SysAbiExport(
