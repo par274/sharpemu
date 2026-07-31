@@ -239,7 +239,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
-    Write-Host "Starting trial $trial of $Runs: $runId"
+    Write-Host "Starting trial $trial of ${Runs}: $runId"
 
     try {
         if (-not $process.Start()) {
