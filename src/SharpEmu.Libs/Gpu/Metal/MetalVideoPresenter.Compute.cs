@@ -253,7 +253,7 @@ internal static partial class MetalVideoPresenter
         if (writeBackBuffers.Count > 0)
         {
             var committed = FlushBatchedGuestCommands();
-            MetalNative.SendVoid(committed, MetalNative.Selector("waitUntilCompleted"));
+            WaitForCommittedCommandBuffer(committed);
             WriteBuffersBackToGuest(writeBackBuffers);
         }
 
