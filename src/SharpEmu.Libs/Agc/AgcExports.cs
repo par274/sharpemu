@@ -83,6 +83,16 @@ public static partial class AgcExports
     private const uint RFlip = 0x17;
     private const uint RReleaseMem = 0x18;
     private const uint RDmaData = 0x19;
+
+    // Command rings advance through contiguous fixed-size chunks; the sentinel
+    // terminator (IT_INDIRECT_BUFFER target=1 size=0) continues at the next one.
+    private const uint RingChunkBytes = 0x10000;
+
+    // Parse window (in dwords) used when a ring resumes at appended commands:
+    // large enough to cover a full command-ring chunk, and safe because
+    // parsing re-suspends at the next terminator or unwritten ring word
+    // before walking into garbage.
+    private const uint RingResumeWindowDwords = 0x8000;
     private const uint RIndexBase = 0x1B;
     private const uint RIndexCount = 0x1C;
     private const uint SpiShaderPgmLoPs = 0x8;
@@ -624,6 +634,13 @@ public static partial class AgcExports
         // continue into the buffer it links to.
         public ulong PendingChainAddress { get; set; }
         public uint PendingChainDwords { get; set; }
+
+        // Base address of the ring chunk currently being parsed. Set when a
+        // submission starts and updated on every chunk advance; the sentinel
+        // terminator (IT_INDIRECT_BUFFER target=1) means "continue at the next
+        // contiguous chunk", i.e. RingChunkBase + RingChunkBytes.
+        public ulong RingChunkBase { get; set; }
+        public bool FollowedChunkAdvance { get; set; }
         public ulong CompletionEventNotifiedSubmissionId { get; set; }
         public Dictionary<(uint Op, uint Register), uint> FramePacketCounts { get; } = new();
         public uint FramePacketCount { get; set; }
@@ -3513,6 +3530,8 @@ public static partial class AgcExports
         {
             state.HasActiveSubmission = true;
             state.ActiveSubmissionId = submission.SubmissionId;
+            state.RingChunkBase = submission.CommandAddress;
+            state.FollowedChunkAdvance = false;
             state.IsSuspended = ParseSubmittedDcb(
                 ctx,
                 gpuState,
@@ -3701,6 +3720,16 @@ public static partial class AgcExports
                 continue;
             }
 
+            if (header == 0 &&
+                state.FollowedChunkAdvance &&
+                _gpuWaitSuspendEnabled)
+            {
+                // Ring memory the game has not appended to yet — the bound the
+                // CP's write pointer would impose. Park until it is written.
+                return SuspendOnUnwrittenRingWord(
+                    ctx, state, commandAddress, currentAddress, offset, tracePackets);
+            }
+
             if (packetType != 3)
             {
                 TracePacketParseFailure(
@@ -3809,6 +3838,7 @@ public static partial class AgcExports
                 {
                     state.PendingChainAddress = chainAddress;
                     state.PendingChainDwords = chainLength;
+                    state.RingChunkBase = chainAddress;
                     TraceAgc(
                         $"agc.dcb_chain queue={state.QueueName} " +
                         $"submission={state.ActiveSubmissionId} " +
@@ -3817,6 +3847,24 @@ public static partial class AgcExports
 
                     // The link is a jump, not a call: whatever follows it in this
                     // buffer is unreachable padding.
+                    return false;
+                }
+
+                // sceAgcDcbJump reserves a command-ring chunk's tail packet with a
+                // placeholder target (observed as lo=1, size=0 in Ghost of Yotei's
+                // ring prologue) meaning "continue at the next contiguous chunk".
+                // Distinct from the chainAddress==0 padding case above.
+                if (chainAddress == 1 && state.RingChunkBase != 0)
+                {
+                    var nextChunk = state.RingChunkBase + RingChunkBytes;
+                    TraceAgc(
+                        $"agc.dcb.chunk_advance from=0x{currentAddress:X16} " +
+                        $"next=0x{nextChunk:X16}");
+
+                    state.PendingChainAddress = nextChunk;
+                    state.PendingChainDwords = RingChunkBytes / sizeof(uint);
+                    state.RingChunkBase = nextChunk;
+                    state.FollowedChunkAdvance = true;
                     return false;
                 }
             }
@@ -5549,6 +5597,52 @@ public static partial class AgcExports
         return true;
     }
 
+    // Suspends the queue on ring memory that the game has not written yet
+    // (zero packet header): the CP equivalent of running up to the ring's
+    // write pointer. The wait monitor resumes parsing here once the game
+    // appends more commands.
+    private static bool SuspendOnUnwrittenRingWord(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong commandAddress,
+        ulong wordAddress,
+        uint offset,
+        bool tracePacket)
+    {
+        var waiter = new GpuWaitRegistry.WaitingDcb
+        {
+            CommandBufferAddress = commandAddress,
+            ResumeAddress = wordAddress,
+            TotalDwords = offset + RingResumeWindowDwords,
+            ResumeOffset = offset,
+            ReferenceValue = 0,
+            Mask = 0xFFFF_FFFFu,
+            CompareFunction = 4, // resume once the dword becomes nonzero
+            ControlValue = 0,
+            Is64Bit = false,
+            IsStandard = false,
+            WaitAddress = wordAddress,
+            Memory = ctx.Memory,
+            QueueName = state.QueueName,
+            SubmissionId = state.ActiveSubmissionId,
+            RegisteredTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            State = state,
+        };
+        GpuWaitRegistry.Register(waiter.WaitAddress, waiter);
+        var gpuState = _submittedGpuStates.GetValue(
+            ctx.Memory,
+            static _ => new SubmittedGpuState());
+        EnsureGpuWaitMonitor(ctx, gpuState);
+        if (tracePacket)
+        {
+            TraceAgc(
+                $"agc.dcb.ring_tail_pending addr=0x{wordAddress:X16} " +
+                $"queue={state.QueueName}");
+        }
+
+        return true;
+    }
+
     // Returns true when the DCB should suspend parsing at this wait (its
     // continuation was registered into GpuWaitRegistry); false to keep parsing
     // (already satisfied, unreadable, or legacy force-satisfy mode).
@@ -6174,6 +6268,7 @@ public static partial class AgcExports
         }
 
         var (destination, dataSelection) = DecodeStandardReleaseMemControl(control);
+        var interruptSelection = (control >> 24) & 0x7u;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
         var data = ((ulong)dataHi << 32) | dataLo;
         var writeLength = dataSelection switch
@@ -6225,12 +6320,27 @@ public static partial class AgcExports
                         "release_mem_standard", destinationAddress, data, dataSelection);
                 }
 
+                // int_sel != 0 requests an end-of-pipe interrupt at retire;
+                // deliver it to the registered graphics-filter kernel events
+                // (same path as the AGC-nop release_mem form) in addition to
+                // the label write above — the driver's interrupt thread waits
+                // on the kevent, not on the label, before it accounts this
+                // completion and kicks dependent queues.
+                var wokenQueues = 0;
+                if (interruptSelection != 0)
+                {
+                    wokenQueues = KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
+                        KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                        data);
+                }
+
                 if (tracePacket)
                 {
                     TraceAgc(
                         $"agc.dcb.release_mem_standard dst_sel={destination} " +
                         $"dst=0x{destinationAddress:X16} data_sel={dataSelection} " +
-                        $"data=0x{data:X16} wrote={wroteData}");
+                        $"data=0x{data:X16} wrote={wroteData} " +
+                        $"int={interruptSelection} woken={wokenQueues}");
                 }
             },
             $"release_mem_standard dst=0x{destinationAddress:X16} data=0x{data:X16}",
@@ -6289,6 +6399,7 @@ public static partial class AgcExports
         }
 
         var dataSelection = (control >> 16) & 0xFFu;
+        var interrupt = (control >> 24) & 0xFFu;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
         var data = ((ulong)dataHi << 32) | dataLo;
         var writeLength = dataSelection switch
@@ -6336,11 +6447,24 @@ public static partial class AgcExports
                     ReportLabelWriteFailure("release_mem", destinationAddress, data, dataSelection);
                 }
 
+                // A nonzero interrupt selection raises an end-of-pipe interrupt
+                // once the release retires; the AGC driver's interrupt thread
+                // waits on that kernel event (not on the label write) before it
+                // accounts completions and kicks dependent queues.
+                var wokenQueues = 0;
+                if (interrupt != 0)
+                {
+                    wokenQueues = KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
+                        KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                        data);
+                }
+
                 if (tracePacket)
                 {
                     TraceAgc(
                         $"agc.dcb.release_mem dst=0x{destinationAddress:X16} " +
-                        $"data_sel={dataSelection} data=0x{data:X16} wrote={wroteData}");
+                        $"data_sel={dataSelection} data=0x{data:X16} wrote={wroteData} " +
+                        $"int={interrupt} woken={wokenQueues}");
                 }
             },
             $"release_mem dst=0x{destinationAddress:X16} data=0x{data:X16}",
