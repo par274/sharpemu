@@ -14185,8 +14185,23 @@ internal static unsafe class VulkanVideoPresenter
             {
                 Format.R8Unorm or
                 Format.R8Uint or
-                Format.R8Sint => 8,
-                Format.R16Sfloat => 16,
+                Format.R8Sint or
+                Format.R8SNorm => 8,
+                // Every single-channel 16-bit format shares this class, not just
+                // the float one. Omitting the rest made GetVulkanImageByteCount
+                // return zero for them, and a zero expected size rejects the
+                // guest's upload outright — the texture then samples as blank
+                // for the life of the run. Silent Hill uploads R16Unorm at
+                // 144x81 through 1024x1024 and every one was dropped.
+                Format.R16Sfloat or
+                Format.R16Unorm or
+                Format.R16SNorm or
+                Format.R16Uint or
+                Format.R16Sint or
+                Format.R8G8Unorm or
+                Format.R8G8SNorm or
+                Format.R8G8Uint or
+                Format.R8G8Sint => 16,
                 Format.R32Uint or
                 Format.R32Sint or
                 Format.R32Sfloat or
