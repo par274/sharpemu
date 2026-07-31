@@ -4,9 +4,9 @@
 using System.Diagnostics;
 using SharpEmu.HLE.Host;
 
-namespace SharpEmu.Libs.Bink;
+namespace SharpEmu.Libs.Media;
 
-internal interface IBinkFrameDecoder : IDisposable
+internal interface IMediaFrameDecoder : IDisposable
 {
     uint Width { get; }
 
@@ -23,12 +23,12 @@ internal interface IBinkFrameDecoder : IDisposable
 /// Keeps blocking codec work away from the Vulkan presentation thread and
 /// releases decoded frames according to the movie time base.
 /// </summary>
-internal sealed class BinkFramePlayback : IDisposable
+internal sealed class MediaFramePlayback : IDisposable
 {
     private const int BufferCount = 5;
 
     private readonly object _gate = new();
-    private readonly IBinkFrameDecoder _decoder;
+    private readonly IMediaFrameDecoder _decoder;
     private readonly Queue<byte[]> _freeBuffers = new();
     private readonly Queue<DecodedFrame> _decodedFrames = new();
     private readonly Thread _decoderThread;
@@ -45,7 +45,7 @@ internal sealed class BinkFramePlayback : IDisposable
     private bool _finished;
     private int _disposed;
 
-    internal BinkFramePlayback(IBinkFrameDecoder decoder)
+    internal MediaFramePlayback(IMediaFrameDecoder decoder)
     {
         _decoder = decoder;
         Width = decoder.Width;

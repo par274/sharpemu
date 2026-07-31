@@ -5,7 +5,7 @@ using Silk.NET.Core;
 using Silk.NET.Core.Native;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
-using SharpEmu.Libs.Bink;
+using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -4504,7 +4504,7 @@ internal static unsafe class VulkanVideoPresenter
             _swapchainFormat = surfaceFormat.Format;
             _swapchainColorSpace = surfaceFormat.ColorSpace;
             _extent = ChooseExtent(capabilities);
-            Bink2MovieBridge.SetPresentationSize(_extent.Width, _extent.Height);
+            HostMovieBridge.SetPresentationSize(_extent.Width, _extent.Height);
             var presentMode = ChoosePresentMode();
             var imageCount = capabilities.MinImageCount + 1;
             if (capabilities.MaxImageCount != 0)
@@ -7727,7 +7727,7 @@ internal static unsafe class VulkanVideoPresenter
 
         private void PumpHostMovieFrame()
         {
-            if (!Bink2MovieBridge.TryDecodeNextFrame(
+            if (!HostMovieBridge.TryDecodeNextFrame(
                     advanceClock: _hostMovieLumaTextureAddress != 0 &&
                                   _hostMovieChromaTextureAddress != 0,
                     out var pixels,

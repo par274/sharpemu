@@ -4,29 +4,44 @@
 using System.Runtime.InteropServices;
 using System.Buffers.Binary;
 
-namespace SharpEmu.Libs.Bink;
+namespace SharpEmu.Libs.Media;
 
 /// <summary>
-/// Optional host-side Bink 2 bridge for games that ship a static Bink player.
+/// Host-side movie bridge for games that decode video inside their own
+/// executable instead of going through an HLE decoder.
 ///
-/// The game in that case never imports libSceVideodec, so an HLE video-decoder
-/// export cannot see its movie frames. Kernel file opens identify the active
-/// .bk2 file and the presenter requests BGRA frames from a tiny native adapter.
-/// The adapter is deliberately a separate, user-supplied library: Bink 2 is a
-/// proprietary SDK and SharpEmu must neither bundle it nor depend on its ABI.
+/// Such a game never imports libSceVideodec or sceAvPlayer, so no HLE export
+/// can see its movie frames. Kernel file opens identify the active movie and
+/// the presenter requests BGRA frames from <see cref="FfmpegVideoDecoder"/> —
+/// the same decoder sceAvPlayer uses, so every format is handled in one place.
 /// </summary>
-internal static class Bink2MovieBridge
+internal static class HostMovieBridge
 {
     private const uint MaxDimension = 16384;
     private const uint MaxHostVideoWidth = 1920;
     private const uint MaxHostVideoHeight = 1080;
+
+    private static readonly string[] SelfDecodedMovieExtensions = [".bk2"];
+
+    private static bool IsSelfDecodedMovie(string hostPath)
+    {
+        foreach (var extension in SelfDecodedMovieExtensions)
+        {
+            if (hostPath.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static readonly object Gate = new();
     private static string? _activePath;
     private static Bink2MovieInfo _activeInfo;
     private static byte[]? _frameBuffer;
     private static bool _frameBufferPresented;
-    private static BinkFramePlayback? _playback;
+    private static MediaFramePlayback? _playback;
     private static long _frameSerial;
     private static uint _presentationWidth = MaxHostVideoWidth;
     private static uint _presentationHeight = MaxHostVideoHeight;
@@ -62,7 +77,7 @@ internal static class Bink2MovieBridge
     /// statically linked into its executable.
     /// </summary>
     internal static bool ShouldSkipGuestMovie(string hostPath) =>
-        hostPath.EndsWith(".bk2", StringComparison.OrdinalIgnoreCase) &&
+        IsSelfDecodedMovie(hostPath) &&
         ResolveMode() == MovieMode.Skip;
 
     /// <summary>
@@ -71,8 +86,7 @@ internal static class Bink2MovieBridge
     /// </summary>
     internal static bool ObserveGuestMovie(string hostPath)
     {
-        if (!hostPath.EndsWith(".bk2", StringComparison.OrdinalIgnoreCase) ||
-            !File.Exists(hostPath))
+        if (!IsSelfDecodedMovie(hostPath) || !File.Exists(hostPath))
         {
             return false;
         }
@@ -186,9 +200,6 @@ internal static class Bink2MovieBridge
             case MovieMode.Dummy:
                 AttachDummyMovieLocked(hostPath);
                 return;
-            case MovieMode.Ffmpeg:
-                AttachFfmpegMovieLocked(hostPath);
-                return;
             case MovieMode.Native:
                 AttachNativeMovieLocked(hostPath);
                 return;
@@ -197,7 +208,7 @@ internal static class Bink2MovieBridge
 
     private static void AttachNativeMovieLocked(string hostPath)
     {
-        if (!FfmpegNativeBinkFrameSource.TryOpen(
+        if (!FfmpegVideoDecoder.TryOpen(
                 hostPath, _presentationWidth, _presentationHeight, out var source) ||
             source is null)
         {
@@ -250,14 +261,13 @@ internal static class Bink2MovieBridge
 
         if (string.Equals(configured, "ffmpeg", StringComparison.OrdinalIgnoreCase))
         {
-            return MovieMode.Ffmpeg;
+            return MovieMode.Native;
         }
 
-        // Native is the default: FfmpegNativeBinkFrameSource.TryOpen degrades
-        // gracefully (falls back to the guest's own decode, logging one
-        // informational line) if the FFmpeg libraries SharpEmu.CLI.csproj
-        // downloads next to the executable are genuinely unavailable, so
-        // defaulting to Native unconditionally is safe.
+        // Native is the default: FfmpegVideoDecoder.TryOpen degrades gracefully
+        // (falls back to the guest's own decode, logging one informational line)
+        // if the FFmpeg libraries SharpEmu.CLI.csproj downloads next to the
+        // executable are genuinely unavailable, so defaulting to it is safe.
         return MovieMode.Native;
     }
 
@@ -282,43 +292,15 @@ internal static class Bink2MovieBridge
             info.Width + "x" + info.Height + ".");
     }
 
-    private static void AttachFfmpegMovieLocked(string hostPath)
-    {
-        if (!TryReadBinkInfo(hostPath, out var info) || !IsValid(info))
-        {
-            Console.Error.WriteLine(
-                "[LOADER][WARN] Bink FFmpeg source has an invalid header: " +
-                Path.GetFileName(hostPath));
-            return;
-        }
-
-        if (!FfmpegBinkFrameSource.TryOpen(
-                hostPath,
-                info.Width,
-                info.Height,
-                info.FramesPerSecondNumerator,
-                info.FramesPerSecondDenominator,
-                out var source) || source is null)
-        {
-            return;
-        }
-
-        AttachPlaybackLocked(hostPath, info, source);
-        Console.Error.WriteLine(
-            "[LOADER][INFO] Bink FFmpeg source attached: " +
-            Path.GetFileName(hostPath) + " " + info.Width + "x" + info.Height + " @ " +
-            info.FramesPerSecondNumerator + "/" + info.FramesPerSecondDenominator + " fps.");
-    }
-
     private static void AttachPlaybackLocked(
         string hostPath,
         Bink2MovieInfo info,
-        IBinkFrameDecoder decoder)
+        IMediaFrameDecoder decoder)
     {
         CloseActiveLocked();
         _activePath = hostPath;
         _activeInfo = info;
-        _playback = new BinkFramePlayback(decoder);
+        _playback = new MediaFramePlayback(decoder);
     }
 
     internal static bool TryReadBinkInfo(string path, out Bink2MovieInfo info)
@@ -406,7 +388,6 @@ internal static class Bink2MovieBridge
         Skip,
         Dummy,
         Native,
-        Ffmpeg,
     }
 
     private static readonly Queue<string> PendingMoviePaths = new();

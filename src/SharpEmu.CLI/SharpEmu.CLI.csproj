@@ -111,15 +111,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
        name is a fixed constant, not derived from the RID/architecture: each
        publish output only ever holds one architecture's binaries anyway, so
        varying the name added a class of bugs (RID resolution timing, host-OS
-       vs. target-RID mixups) for no benefit. Runtime code (Program.cs's
-       FfmpegNativeBinkFrameSource uses the same literal "plugins" folder
-       name. -->
+       vs. target-RID mixups) for no benefit. Runtime code (FfmpegRuntime)
+       uses the same literal "plugins" folder name. -->
   <PropertyGroup>
     <NativeLibraryFolderName>plugins</NativeLibraryFolderName>
   </PropertyGroup>
 
   <PropertyGroup>
-    <FfmpegRuntimeTag>2c92585</FfmpegRuntimeTag>
+    <FfmpegRuntimeTag>3b502d4</FfmpegRuntimeTag>
     <FfmpegRuntimeDir>
       $(BaseIntermediateOutputPath)ffmpeg-runtime/$(FfmpegRuntimeTag)/$(RuntimeIdentifier)</FfmpegRuntimeDir>
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'win-x64'">ffmpeg-windows-x64.zip</FfmpegRuntimePackage>

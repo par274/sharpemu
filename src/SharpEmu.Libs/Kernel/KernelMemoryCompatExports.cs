@@ -3,7 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
-using SharpEmu.Libs.Bink;
+using SharpEmu.Libs.Media;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -97,7 +97,7 @@ public static partial class KernelMemoryCompatExports
 
     private static readonly object _fdGate = new();
     private static readonly Dictionary<int, FileStream> _openFiles = new();
-    private static readonly Dictionary<int, Bink2MovieBridge.BinkGuestCompletionShim>
+    private static readonly Dictionary<int, HostMovieBridge.BinkGuestCompletionShim>
         _binkGuestCompletionShims = new();
     private static readonly Dictionary<int, string> _observedBinkGuestFiles = new();
     private static readonly Dictionary<int, OpenDirectory> _openDirectories = new();
@@ -1478,7 +1478,7 @@ public static partial class KernelMemoryCompatExports
         }
         try
         {
-            if (Bink2MovieBridge.ShouldSkipGuestMovie(hostPath))
+            if (HostMovieBridge.ShouldSkipGuestMovie(hostPath))
             {
                 LogOpenTrace(
                     "_open bink-skip path='" + guestPath + "' host='" + hostPath +
@@ -1489,10 +1489,10 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
-            Bink2MovieBridge.BinkGuestCompletionShim binkCompletionShim = default;
+            HostMovieBridge.BinkGuestCompletionShim binkCompletionShim = default;
             var observedBinkMovie = false;
             var useBinkCompletionShim = access == FileAccess.Read &&
-                Bink2MovieBridge.TryTakeOverGuestMovie(
+                HostMovieBridge.TryTakeOverGuestMovie(
                     hostPath,
                     out binkCompletionShim,
                     out observedBinkMovie);
@@ -2227,7 +2227,7 @@ public static partial class KernelMemoryCompatExports
 
         if (notifyBinkClose)
         {
-            Bink2MovieBridge.NotifyGuestMovieClosed(observedBinkPath!);
+            HostMovieBridge.NotifyGuestMovieClosed(observedBinkPath!);
         }
         stream.Dispose();
         ctx[CpuRegister.Rax] = 0;
@@ -2256,7 +2256,7 @@ public static partial class KernelMemoryCompatExports
         }
 
         FileStream? stream;
-        Bink2MovieBridge.BinkGuestCompletionShim completionShim = default;
+        HostMovieBridge.BinkGuestCompletionShim completionShim = default;
         var useBinkCompletionShim = false;
         lock (_fdGate)
         {
@@ -2289,7 +2289,7 @@ public static partial class KernelMemoryCompatExports
             // logic can't race ahead of what's still on screen.
             if (completionShim.Patch(positionBefore, buffer.AsSpan(0, read)))
             {
-                Bink2MovieBridge.WaitForHostPlaybackToFinish(stream.Name);
+                HostMovieBridge.WaitForHostPlaybackToFinish(stream.Name);
             }
         }
         if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))

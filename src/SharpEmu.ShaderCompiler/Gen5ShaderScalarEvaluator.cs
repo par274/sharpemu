@@ -7,6 +7,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 
 namespace SharpEmu.ShaderCompiler;
 
@@ -36,6 +37,113 @@ public static class Gen5ShaderScalarEvaluator
             StringComparison.Ordinal);
     private static readonly object _scalarFallbackTraceGate = new();
     private static readonly HashSet<(ulong Shader, uint Pc)> _tracedScalarFallbacks = [];
+    private static readonly HashSet<(ulong Shader, uint Pc)> _tracedDivergentDescriptors = [];
+
+    private static readonly ConditionalWeakTable<Gen5ShaderProgram, Ir.Gen5ScalarSsa> _scalarSsaCache = [];
+
+    private static readonly bool _divergentDescriptorGuard = !string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_IR_DESCRIPTOR_GUARD"),
+        "0",
+        StringComparison.Ordinal);
+
+    private static Ir.Gen5ScalarSsa GetScalarSsa(Gen5ShaderState state) =>
+        _scalarSsaCache.GetValue(
+            state.Program,
+            program => Ir.Gen5ScalarSsa.Build(program.Instructions, state.UserData));
+
+    /// <summary>
+    /// The byte offset comes from an SGPR. When the instruction that produced that
+    /// register is one the scalar evaluator cannot reproduce — a vector compare
+    /// writing VCC, say, whose value depends on per-lane data — the register still
+    /// holds whatever the linear walk left in it. Adding that to an otherwise valid
+    /// base address is how descriptors turned into addresses far out of range.
+    /// </summary>
+    private static bool IsOffsetFromUnmodelledWriter(
+        Gen5ShaderState state,
+        Gen5ShaderInstruction instruction,
+        Gen5ScalarMemoryControl control)
+    {
+        if (!_divergentDescriptorGuard || control.DynamicOffsetRegister is not { } offsetRegister)
+        {
+            return false;
+        }
+
+        var ssa = GetScalarSsa(state);
+        var reaching = ssa.GetReachingDefinitionAt(instruction.Pc, offsetRegister);
+        if (reaching.State == Ir.IrReachingState.Multiple)
+        {
+            return true;
+        }
+
+        if (reaching.State != Ir.IrReachingState.Single ||
+            reaching.DefinitionPc == uint.MaxValue)
+        {
+            return false;
+        }
+
+        var writer = state.Program.Instructions
+            .FirstOrDefault(candidate => candidate.Pc == reaching.DefinitionPc);
+        return writer is not null && Ir.Gen5ScalarSsa.WritesVccImplicitly(writer);
+    }
+
+    /// <summary>
+    /// A descriptor assembled from registers that differ per incoming path is not a
+    /// descriptor, it is whichever path the linear walk happened to take last.
+    /// </summary>
+    private static bool IsDescriptorFromDivergentMerge(
+        Gen5ShaderState state,
+        uint pc,
+        uint scalarBase,
+        uint registerCount)
+    {
+        if (!_divergentDescriptorGuard)
+        {
+            return false;
+        }
+
+        var ssa = GetScalarSsa(state);
+        if (!ssa.Graph.HasControlFlow)
+        {
+            return false;
+        }
+
+        for (var offset = 0u; offset < registerCount; offset++)
+        {
+            var reaching = ssa.GetReachingDefinitionAt(pc, scalarBase + offset);
+            if (reaching.State == Ir.IrReachingState.Multiple)
+            {
+                return true;
+            }
+
+            if (ssa.GetScalarAt(pc, scalarBase + offset).State == Ir.IrScalarState.Merged)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void TraceDivergentDescriptor(
+        Gen5ShaderState state,
+        Gen5ShaderInstruction instruction,
+        uint scalarBase,
+        ulong baseAddress)
+    {
+        lock (_scalarFallbackTraceGate)
+        {
+            if (!_tracedDivergentDescriptors.Add((state.Program.Address, instruction.Pc)))
+            {
+                return;
+            }
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][WARN] agc.descriptor_divergent " +
+            $"shader=0x{state.Program.Address:X16} pc=0x{instruction.Pc:X} " +
+            $"op={instruction.Opcode} base=s{scalarBase} " +
+            $"linear_base_addr=0x{baseAddress:X16} (unbound instead of dereferenced)");
+    }
     // Shaders whose empty SRT/EUD caused a null-base scalar pointer load.
     // Host submit of those translations has lost the Vulkan device; Agc skips
     // them before QueueSubmit.
@@ -1898,19 +2006,32 @@ public static class Gen5ShaderScalarEvaluator
         var address = unchecked(
             baseAddress +
             byteOffset) & ~3UL;
+        var descriptorDiverged = IsDescriptorFromDivergentMerge(
+            state,
+            instruction.Pc,
+            scalarBase.Value,
+            isBufferLoad ? 4u : 2u) ||
+            IsOffsetFromUnmodelledWriter(state, instruction, control);
+        if (descriptorDiverged)
+        {
+            TraceDivergentDescriptor(state, instruction, scalarBase.Value, baseAddress);
+        }
+
         var bufferUnbound =
             isBufferLoad &&
-            (!hasBufferDescriptor ||
+            (descriptorDiverged ||
+             !hasBufferDescriptor ||
              bufferDescriptor.SizeBytes == 0 ||
              (scalarRegisters[scalarBase.Value] == 0 &&
               scalarRegisters[scalarBase.Value + 1] == 0 &&
               scalarBase.Value + 3 < ScalarRegisterCount &&
               scalarRegisters[scalarBase.Value + 2] == 0 &&
               scalarRegisters[scalarBase.Value + 3] == 0));
-        var scalarPointerUnbound = ShouldTreatScalarPointerAsUnbound(
-            isBufferLoad,
-            address,
-            _strictScalarLoad);
+        var scalarPointerUnbound = descriptorDiverged && !isBufferLoad ||
+            ShouldTreatScalarPointerAsUnbound(
+                isBufferLoad,
+                address,
+                _strictScalarLoad);
         if (scalarPointerUnbound)
         {
             TraceScalarPointerFallback(

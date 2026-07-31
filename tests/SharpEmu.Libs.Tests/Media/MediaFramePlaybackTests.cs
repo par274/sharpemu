@@ -1,17 +1,17 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Bink;
+using SharpEmu.Libs.Media;
 using Xunit;
 
-namespace SharpEmu.Libs.Tests.Bink;
+namespace SharpEmu.Libs.Tests.Media;
 
-public sealed class BinkFramePlaybackTests
+public sealed class MediaFramePlaybackTests
 {
     [Fact]
     public void FramesAdvanceAccordingToMovieClock()
     {
-        using var playback = new BinkFramePlayback(new SequenceDecoder(1, 2, 3));
+        using var playback = new MediaFramePlayback(new SequenceDecoder(1, 2, 3));
 
         Assert.Equal(1, WaitForAdvancedFrame(playback)[0]);
         Assert.True(playback.TryGetFrame(true, out var heldFrame, out var advanced));
@@ -22,7 +22,7 @@ public sealed class BinkFramePlaybackTests
         Assert.Equal(3, WaitForAdvancedFrame(playback)[0]);
     }
 
-    private static byte[] WaitForAdvancedFrame(BinkFramePlayback playback)
+    private static byte[] WaitForAdvancedFrame(MediaFramePlayback playback)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
         while (DateTime.UtcNow < deadline)
@@ -41,7 +41,7 @@ public sealed class BinkFramePlaybackTests
     [Fact]
     public void FirstFrameWaitsUntilPresentationStarts()
     {
-        using var playback = new BinkFramePlayback(new SequenceDecoder(1, 2));
+        using var playback = new MediaFramePlayback(new SequenceDecoder(1, 2));
 
         var first = WaitForFrame(playback, advanceClock: false);
         Assert.Equal(1, first[0]);
@@ -58,7 +58,7 @@ public sealed class BinkFramePlaybackTests
     }
 
     private static byte[] WaitForFrame(
-        BinkFramePlayback playback,
+        MediaFramePlayback playback,
         bool advanceClock)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
@@ -75,7 +75,7 @@ public sealed class BinkFramePlaybackTests
         throw new TimeoutException("The decoder did not produce a frame.");
     }
 
-    private sealed class SequenceDecoder(params byte[] values) : IBinkFrameDecoder
+    private sealed class SequenceDecoder(params byte[] values) : IMediaFrameDecoder
     {
         private int _index;
 

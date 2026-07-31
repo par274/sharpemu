@@ -2,18 +2,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
-using SharpEmu.Libs.Bink;
+using SharpEmu.Libs.Media;
 using Xunit;
 
-namespace SharpEmu.Libs.Tests.Bink;
+namespace SharpEmu.Libs.Tests.Media;
 
-public sealed class Bink2MovieBridgeTests : IDisposable
+public sealed class HostMovieBridgeTests : IDisposable
 {
     private readonly string _tempDirectory = Path.Combine(
         Path.GetTempPath(),
         $"sharpemu-bink-{Guid.NewGuid():N}");
 
-    public Bink2MovieBridgeTests()
+    public HostMovieBridgeTests()
     {
         Directory.CreateDirectory(_tempDirectory);
     }
@@ -23,7 +23,7 @@ public sealed class Bink2MovieBridgeTests : IDisposable
     {
         var path = WriteHeader("KB2j"u8, 3840, 2160, 30_000, 1_001);
 
-        Assert.True(Bink2MovieBridge.TryReadBinkInfo(path, out var info));
+        Assert.True(HostMovieBridge.TryReadBinkInfo(path, out var info));
         Assert.Equal(3840u, info.Width);
         Assert.Equal(2160u, info.Height);
         Assert.Equal(30_000u, info.FramesPerSecondNumerator);
@@ -43,7 +43,7 @@ public sealed class Bink2MovieBridgeTests : IDisposable
             60,
             1);
 
-        Assert.True(Bink2MovieBridge.TryReadBinkInfo(path, out _));
+        Assert.True(HostMovieBridge.TryReadBinkInfo(path, out _));
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class Bink2MovieBridgeTests : IDisposable
     {
         var path = WriteHeader("KB2j"u8, 1920, 1080, 60, 0);
 
-        Assert.False(Bink2MovieBridge.TryReadBinkInfo(path, out _));
+        Assert.False(HostMovieBridge.TryReadBinkInfo(path, out _));
     }
 
     private string WriteHeader(
