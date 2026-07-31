@@ -7,6 +7,8 @@
 [Oo]bj/
 [Pp]ublish/
 [Aa]rtifacts/
+artifacts-local/
+.local/
 logs/
 .tmp/
 

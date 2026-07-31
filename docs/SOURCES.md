@@ -1,0 +1,42 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+# Source index
+
+This index routes research; it does not make every statement in a source correct or authorize copying its code. Before adapting source code, record the exact revision, license, provenance, relevant section, and semantic fit in the change that uses it. Retrieved dates below are 2026-08-01 unless stated otherwise.
+
+## Primary specifications
+
+| Subject | Source | Pinned use |
+| --- | --- | --- |
+| RDNA 2 instructions | [AMD RDNA2 Shader Instruction Set Architecture, document 70648](https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture) | Instruction encoding and semantics. Record the displayed revision and local checksum before relying on a downloaded copy. Link only. |
+| Vulkan | [Vulkan 1.2 specification](https://registry.khronos.org/vulkan/specs/1.2/html/vkspec.html) | Host API behavior for the repository’s `vulkan1.2` validator target. |
+| SPIR-V | [SPIR-V 1.5 specification](https://registry.khronos.org/SPIR-V/specs/1.5/SPIRV.html) | Module and instruction semantics for current generated modules. |
+| SPIR-V validation | [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools/tree/0539c81f69a3daeb706fd3477dca61435b475156) and [SPIRV-Headers](https://github.com/KhronosGroup/SPIRV-Headers/tree/ad9184e76a66b1001c29db9b0a3e87f646c64de0) | CI pins SPIRV-Tools `v2026.2` at these commits and validates for Vulkan 1.2. Apache-2.0. |
+| x86-64 execution | [Intel 64 and IA-32 Software Developer Manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) | CPU instruction and architectural behavior. Record the manual order number and revision used by a finding. Link only. |
+| x86-64 ABI | [System V x86-64 ABI](https://gitlab.com/x86-psABIs/x86-64-ABI) | Calling convention and ELF ABI reference where observed PS5 behavior agrees. Pin the exact release or commit in the finding. |
+| OS semantics | [FreeBSD 11.0 source](https://github.com/freebsd/freebsd-src/tree/releng/11.0) and [FreeBSD manuals](https://man.freebsd.org/) | Comparative kernel and POSIX behavior only where PS5 observations support the relationship. BSD licenses. |
+| Confirmed PS5 hardware | [Sony: Unveiling New Details of PlayStation 5](https://blog.playstation.com/2020/03/18/unveiling-new-details-of-playstation-5-hardware-technical-specs/comment-page-2/) | Broad public hardware facts, not undocumented contracts. |
+
+## Licensed implementation references
+
+| Subject | Source | Use |
+| --- | --- | --- |
+| Upstream emulator | [sharpemu/sharpemu at `7c9740f`](https://github.com/sharpemu/sharpemu/commit/7c9740fee8a633e17b145c6bc6d794e41d46c73f) | Fork baseline and primary implementation. GPL-2.0-or-later. |
+| Comparative PS5 GPU implementation | [KytyPS5 at `d8a4c83`](https://github.com/KytyPS5/KytyPS5/commit/d8a4c83cc7d343b1c7a2702084f3c282fbd00cd4) | Focused comparison of command, shader, resource, and Vulkan behavior. GPL-2.0-only; inspect full commit identity before any code use. |
+| AMD compiler behavior | [LLVM AMDGPU usage](https://llvm.org/docs/AMDGPUUsage.html) and [LLVM source](https://github.com/llvm/llvm-project) | Compiler conventions and executable experiments. Pin the source commit used. Apache-2.0 with LLVM exception. |
+| AMD Vulkan behavior | [Mesa RADV](https://docs.mesa3d.org/drivers/radv.html) and [Mesa source tree](https://docs.mesa3d.org/sourcetree.html) | Host-driver, ACO, format, and address-library comparison. Pin the source commit and component license used. |
+| Vulkan practice | [Khronos Vulkan Guide](https://github.com/KhronosGroup/Vulkan-Guide), [validation guide](https://docs.vulkan.org/guide/latest/development_tools.html), and [synchronization examples](https://github.com/khronosgroup/vulkan-docs/wiki/synchronization-examples) | Experiments and host validation. The Vulkan specification remains normative. |
+| Original homebrew fixtures | [ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk) | Optional authored ABI and system-behavior fixtures in a lawful test environment. Do not use exploit tooling, proprietary modules, or protected assets. GPL-3.0. |
+
+## Community and optional analysis
+
+- [PS5 DevWiki](https://www.psdevwiki.com/ps5/) is a community index of terminology and observations. Cite an exact page and verify consequential claims through a stronger source or experiment. Do not import exploit, firmware, or key material.
+- [ps5rs](https://github.com/claimore22/ps5rs) may be evaluated as an external static-analysis sidecar for accessible SELF, ELF, and PRX metadata. It is not an independent source for NID truth, is not a foundational dependency, and must pass a separate provenance and health review before adoption.
+- SharpEmu’s [Demon’s Souls report](https://github.com/sharpemu/sharpemu/issues/2) and [memory-growth investigation](https://github.com/sharpemu/sharpemu/issues/639) orient the first experiment. Their reports do not replace this fork’s controlled baseline.
+
+## Excluded material
+
+Do not use model output as a factual source, unlicensed code, leaked SDK documentation or source, firmware, keys, decrypted Sony assets, copied retail binaries or shaders, success-returning stubs, speculative NID lists, or conclusions from one performance run. Prosper currently offers useful workflow ideas but no clear repository license; do not copy its code unless that changes and the exact revision is reviewed.
