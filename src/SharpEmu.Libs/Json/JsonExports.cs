@@ -345,7 +345,7 @@ public static class JsonExports
 
         var child = parent.ValueKind == System.Text.Json.JsonValueKind.Object &&
                     parent.TryGetProperty(keyState.Value, out var property)
-                    ? property : _nullElement;
+                    ? property.Clone() : _nullElement;
 
         StoreValue(ctx, childAddress, child);
 
