@@ -26,7 +26,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </DataTemplate>
   </Window.Resources>
 
-  <Grid x:Name="RootLayout" RowDefinitions="Auto,*,Auto">
+  <Grid x:Name="RootLayout" RowDefinitions="Auto,*">
 
     <!-- Selected-game backdrop: key art behind the main content, dimmed by
          a scrim so tiles and text stay readable. Fades on selection. -->
@@ -61,8 +61,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       </Border>
     </Panel>
 
-    <!-- Title bar; hidden in fullscreen (F11) along with the status bar, so
-         the game gets the whole screen. -->
+    <!-- Title bar; hidden in fullscreen (F11) so the game gets the whole screen. -->
     <Grid x:Name="TitleBar"
           Grid.Row="0"
           Height="44"
@@ -386,7 +385,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
               Classes="gameOptionsOverlay"
               x:DataType="local:GameEntry"
               x:CompileBindings="True"
-              RowDefinitions="2*,3*"
+              RowDefinitions="1*,3*"
               IsHitTestVisible="False">
           <Grid.Transitions>
             <Transitions>
@@ -499,8 +498,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     Margin="32,12,32,8"
                     ColumnDefinitions="220,*"
                     ColumnSpacing="54">
-                <StackPanel Margin="0,62,0,0"
-                            Spacing="12">
+                <Grid Margin="0,62,0,0"
+                      RowDefinitions="Auto,*">
                   <Button x:Name="GameOptionsLaunchButton"
                           Classes="gameOptionsLaunch">
                     <TextBlock VerticalAlignment="Center"
@@ -509,110 +508,111 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                               x:CompileBindings=False}" />
                   </Button>
 
-                  <Grid x:Name="GameOptionsNavHost"
-                        Background="Transparent"
-                        VerticalAlignment="Top">
-                    <Border x:Name="GameOptionsNavIndicator"
-                            Classes="optionsNavIndicator"
-                            IsHitTestVisible="False"
-                            VerticalAlignment="Top">
-                      <Border.RenderTransform>
-                        <TranslateTransform>
-                          <TranslateTransform.Transitions>
-                            <Transitions>
-                              <DoubleTransition Property="Y"
-                                                Duration="0:0:0.12"
-                                                Easing="CubicEaseOut" />
-                            </Transitions>
-                          </TranslateTransform.Transitions>
-                        </TranslateTransform>
-                      </Border.RenderTransform>
-                    </Border>
+                  <ScrollViewer x:Name="GameOptionsNavScroll"
+                                Grid.Row="1"
+                                Margin="0,12,0,0"
+                                HorizontalScrollBarVisibility="Disabled"
+                                VerticalScrollBarVisibility="Hidden"
+                                BringIntoViewOnFocusChange="True">
+                    <ScrollViewer.Styles>
+                      <Style Selector="ScrollBar">
+                        <Setter Property="IsHitTestVisible" Value="False" />
+                        <Setter Property="Opacity" Value="0" />
+                      </Style>
+                    </ScrollViewer.Styles>
+                    <Grid x:Name="GameOptionsNavHost"
+                          Background="Transparent"
+                          VerticalAlignment="Top">
+                      <Border x:Name="GameOptionsNavIndicator"
+                              Classes="optionsNavIndicator"
+                              IsHitTestVisible="False"
+                              VerticalAlignment="Top" />
 
-                    <StackPanel>
-                      <Button x:Name="GameOptionsGeneralNav"
-                              Classes="optionsNav active"
-                              AutomationProperties.Name="{Binding [Options.General],
-                                                                  Source={x:Static local:Localization.Instance},
-                                                                  x:CompileBindings=False}">
-                        <Grid ColumnDefinitions="36,*">
-                          <TextBlock Grid.Column="0"
-                                     Classes="materialSymbol optionsNavIcon"
-                                     Text="tune" />
-                          <TextBlock Grid.Column="1"
-                                     Classes="optionsNavLabel"
-                                     Text="{Binding [Options.General],
-                                                    Source={x:Static local:Localization.Instance},
-                                                    x:CompileBindings=False}" />
-                        </Grid>
-                      </Button>
-                      <Button x:Name="GameOptionsLoggingNav"
-                              Classes="optionsNav"
-                              AutomationProperties.Name="{Binding [Options.Logging],
-                                                                  Source={x:Static local:Localization.Instance},
-                                                                  x:CompileBindings=False}">
-                        <Grid ColumnDefinitions="36,*">
-                          <TextBlock Grid.Column="0"
-                                     Classes="materialSymbol optionsNavIcon"
-                                     Text="terminal" />
-                          <TextBlock Grid.Column="1"
-                                     Classes="optionsNavLabel"
-                                     Text="{Binding [Options.Logging],
-                                                    Source={x:Static local:Localization.Instance},
-                                                    x:CompileBindings=False}" />
-                        </Grid>
-                      </Button>
-                      <Button x:Name="GameOptionsRenderingNav"
-                              Classes="optionsNav"
-                              AutomationProperties.Name="{Binding [Options.Graphics],
-                                                                  Source={x:Static local:Localization.Instance},
-                                                                  x:CompileBindings=False}">
-                        <Grid ColumnDefinitions="36,*">
-                          <TextBlock Grid.Column="0"
-                                     Classes="materialSymbol optionsNavIcon"
-                                     Text="monitor" />
-                          <TextBlock Grid.Column="1"
-                                     Classes="optionsNavLabel"
-                                     Text="{Binding [Options.Graphics],
-                                                    Source={x:Static local:Localization.Instance},
-                                                    x:CompileBindings=False}" />
-                        </Grid>
-                      </Button>
-                      <Button x:Name="GameOptionsEnvironmentNav"
-                              Classes="optionsNav"
-                              AutomationProperties.Name="{Binding [Options.Env.Tab],
-                                                                  Source={x:Static local:Localization.Instance},
-                                                                  x:CompileBindings=False}">
-                        <Grid ColumnDefinitions="36,*">
-                          <TextBlock Grid.Column="0"
-                                     Classes="materialSymbol optionsNavIcon"
-                                     Text="deployed_code" />
-                          <TextBlock Grid.Column="1"
-                                     Classes="optionsNavLabel"
-                                     Text="{Binding [Options.Env.Tab],
-                                                    Source={x:Static local:Localization.Instance},
-                                                    x:CompileBindings=False}" />
-                        </Grid>
-                      </Button>
-                      <Button x:Name="GameOptionsBackNav"
-                              Classes="optionsNav"
-                              AutomationProperties.Name="{Binding [Common.Back],
-                                                                  Source={x:Static local:Localization.Instance},
-                                                                  x:CompileBindings=False}">
-                        <Grid ColumnDefinitions="36,*">
-                          <TextBlock Grid.Column="0"
-                                     Classes="materialSymbol optionsNavIcon"
-                                     Text="arrow_back" />
-                          <TextBlock Grid.Column="1"
-                                     Classes="optionsNavLabel"
-                                     Text="{Binding [Common.Back],
-                                                    Source={x:Static local:Localization.Instance},
-                                                    x:CompileBindings=False}" />
-                        </Grid>
-                      </Button>
-                    </StackPanel>
-                  </Grid>
-                </StackPanel>
+                      <StackPanel>
+                        <Button x:Name="GameOptionsGeneralNav"
+                                Classes="optionsNav active"
+                                AutomationProperties.Name="{Binding [Options.General],
+                                                                    Source={x:Static local:Localization.Instance},
+                                                                    x:CompileBindings=False}">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="tune" />
+                            <TextBlock Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="{Binding [Options.General],
+                                                      Source={x:Static local:Localization.Instance},
+                                                      x:CompileBindings=False}" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="GameOptionsLoggingNav"
+                                Classes="optionsNav"
+                                AutomationProperties.Name="{Binding [Options.Logging],
+                                                                    Source={x:Static local:Localization.Instance},
+                                                                    x:CompileBindings=False}">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="terminal" />
+                            <TextBlock Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="{Binding [Options.Logging],
+                                                      Source={x:Static local:Localization.Instance},
+                                                      x:CompileBindings=False}" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="GameOptionsRenderingNav"
+                                Classes="optionsNav"
+                                AutomationProperties.Name="{Binding [Options.Graphics],
+                                                                    Source={x:Static local:Localization.Instance},
+                                                                    x:CompileBindings=False}">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="monitor" />
+                            <TextBlock Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="{Binding [Options.Graphics],
+                                                      Source={x:Static local:Localization.Instance},
+                                                      x:CompileBindings=False}" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="GameOptionsEnvironmentNav"
+                                Classes="optionsNav"
+                                AutomationProperties.Name="{Binding [Options.Env.Tab],
+                                                                    Source={x:Static local:Localization.Instance},
+                                                                    x:CompileBindings=False}">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="deployed_code" />
+                            <TextBlock Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="{Binding [Options.Env.Tab],
+                                                      Source={x:Static local:Localization.Instance},
+                                                      x:CompileBindings=False}" />
+                          </Grid>
+                        </Button>
+                        <Button x:Name="GameOptionsBackNav"
+                                Classes="optionsNav"
+                                AutomationProperties.Name="{Binding [Common.Back],
+                                                                    Source={x:Static local:Localization.Instance},
+                                                                    x:CompileBindings=False}">
+                          <Grid ColumnDefinitions="36,*">
+                            <TextBlock Grid.Column="0"
+                                       Classes="materialSymbol optionsNavIcon"
+                                       Text="arrow_back" />
+                            <TextBlock Grid.Column="1"
+                                       Classes="optionsNavLabel"
+                                       Text="{Binding [Common.Back],
+                                                      Source={x:Static local:Localization.Instance},
+                                                      x:CompileBindings=False}" />
+                          </Grid>
+                        </Button>
+                      </StackPanel>
+                    </Grid>
+                  </ScrollViewer>
+                </Grid>
 
                 <Grid Grid.Column="1"
                       Margin="0,36,0,0">
@@ -957,19 +957,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         Classes="optionsNavIndicator"
                         Height="54"
                         VerticalAlignment="Top"
-                        IsHitTestVisible="False">
-                  <Border.RenderTransform>
-                    <TranslateTransform>
-                      <TranslateTransform.Transitions>
-                        <Transitions>
-                          <DoubleTransition Property="Y"
-                                            Duration="0:0:0.16"
-                                            Easing="CubicEaseOut" />
-                        </Transitions>
-                      </TranslateTransform.Transitions>
-                    </TranslateTransform>
-                  </Border.RenderTransform>
-                </Border>
+                        IsHitTestVisible="False" />
 
                 <StackPanel>
                   <Button x:Name="OptionsGeneralNav" Classes="optionsNav active">
@@ -1491,20 +1479,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     </Grid>
 
-    <!-- Status bar -->
-    <Grid x:Name="StatusBar" Grid.Row="2" Height="32" Background="{StaticResource ChromeBrush}"
-          ColumnDefinitions="*,Auto">
-      <TextBlock x:Name="EmulatorPathText" Grid.Column="0" Text="Emulator: locating…" FontSize="11"
-                 Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0"
-                 TextTrimming="CharacterEllipsis" />
-      <TextBlock x:Name="StatusBarRight" Grid.Column="1" Text="" FontSize="11"
-                 Foreground="{StaticResource FaintBrush}" VerticalAlignment="Center" Margin="16,0" />
-    </Grid>
-
     <!-- Portable resize hit targets for the frameless desktop window. They
          are disabled while maximized or fullscreen in code-behind. -->
     <Panel x:Name="ResizeHandles"
-           Grid.RowSpan="3"
+           Grid.RowSpan="2"
            ZIndex="1000"
            IsVisible="False">
       <Border Tag="North"

@@ -3,7 +3,6 @@
 
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Media;
 using Avalonia.VisualTree;
 using SharpEmu.Libs.VideoOut;
 
@@ -30,6 +29,7 @@ public partial class MainWindow
     private bool _isGameSettingsOpen;
     private bool _isLoadingGameSettings;
     private bool _updatingGameHostDisplayOptions;
+    private int _gameOptionsIndicatorIndex;
     private int _gameOptionsSectionIndex;
     private string? _gameSettingsTitleId;
 
@@ -58,13 +58,28 @@ public partial class MainWindow
                 }
             };
             navigationButtons[index].PointerEntered += (_, _) =>
-                SetGameOptionsNavigationIndicator(section);
+            {
+                if (_isGameSettingsOpen)
+                {
+                    SetGameOptionsNavigationIndicator(section);
+                }
+            };
             navigationButtons[index].GotFocus += (_, _) =>
-                SetGameOptionsNavigationIndicator(section);
+            {
+                if (_isGameSettingsOpen)
+                {
+                    SetGameOptionsNavigationIndicator(section);
+                }
+            };
         }
 
         GameOptionsNavHost.PointerExited += (_, _) =>
-            SetGameOptionsNavigationIndicator(_gameOptionsSectionIndex);
+        {
+            if (_isGameSettingsOpen)
+            {
+                SetGameOptionsNavigationIndicator(_gameOptionsSectionIndex);
+            }
+        };
 
         GameOptionsLaunchButton.Click += (_, _) =>
         {
@@ -73,13 +88,9 @@ public partial class MainWindow
         };
         GameOptionsOpenFolderButton.Click += (_, _) => OpenSelectedGameFolder();
         GameOptionsCopyPathButton.Click += async (_, _) =>
-            await CopyToClipboardAsync(
-                (GameList.SelectedItem as GameEntry)?.Path,
-                "Clipboard.Path");
+            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path);
         GameOptionsCopyTitleIdButton.Click += async (_, _) =>
-            await CopyToClipboardAsync(
-                (GameList.SelectedItem as GameEntry)?.TitleId,
-                "Clipboard.TitleId");
+            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
         GameOptionsRemoveButton.Click += (_, _) =>
         {
             CloseGameSettings();
@@ -102,7 +113,7 @@ public partial class MainWindow
             toggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         }
 
-        SetGameOptionsSection(0);
+        SetGameOptionsSection(0, animateIndicator: false);
     }
 
     private void OpenSelectedGameSettings()
@@ -123,7 +134,7 @@ public partial class MainWindow
         _gameSettingsTitleId = game.TitleId;
         GameOptionsOverlay.DataContext = game;
         LoadGameSettings(game.TitleId);
-        SetGameOptionsSection(0);
+        SetGameOptionsSection(0, animateIndicator: false);
         GameOptionsLaunchButton.IsEnabled = !_isRunning;
         GameOptionsCopyTitleIdButton.IsEnabled =
             !string.IsNullOrWhiteSpace(game.TitleId);
@@ -147,6 +158,7 @@ public partial class MainWindow
         }
 
         _isGameSettingsOpen = false;
+        SetGameOptionsNavigationIndicator(_gameOptionsIndicatorIndex, animate: false);
         _gameSettingsTitleId = null;
         _gameEnvironmentPassthrough.Clear();
         SetGameOptionsOpenClass(BackdropLayer, active: false);
@@ -395,13 +407,13 @@ public partial class MainWindow
         return GameEnvironmentToggleNames.Contains(name, StringComparer.OrdinalIgnoreCase);
     }
 
-    private void SetGameOptionsSection(int section)
+    private void SetGameOptionsSection(int section, bool animateIndicator = true)
     {
         var buttons = GameOptionsSectionButtons();
         var panels = GameOptionsSectionPanels();
         section = Math.Clamp(section, 0, buttons.Length - 1);
         _gameOptionsSectionIndex = section;
-        SetGameOptionsNavigationIndicator(section);
+        SetGameOptionsNavigationIndicator(section, animateIndicator);
 
         for (var index = 0; index < buttons.Length; index++)
         {
@@ -413,17 +425,17 @@ public partial class MainWindow
         SetActiveClass(GameOptionsBackNav, active: false);
     }
 
-    private void SetGameOptionsNavigationIndicator(int section)
+    private void SetGameOptionsNavigationIndicator(int section, bool animate = true)
     {
-        if (GameOptionsNavIndicator.RenderTransform is not TranslateTransform transform)
-        {
-            return;
-        }
-
         var buttons = GameOptionsNavigationButtons();
-        var button = buttons[Math.Clamp(section, 0, buttons.Length - 1)];
-        transform.Y = button.TranslatePoint(default, GameOptionsNavHost)?.Y
-            ?? section * button.Bounds.Height;
+        _gameOptionsIndicatorIndex = Math.Clamp(section, 0, buttons.Length - 1);
+        var button = buttons[_gameOptionsIndicatorIndex];
+        MoveNavigationIndicator(
+            GameOptionsNavIndicator,
+            GameOptionsNavHost,
+            button,
+            _gameOptionsIndicatorIndex,
+            animate);
     }
 
     private Button[] GameOptionsNavigationButtons() =>

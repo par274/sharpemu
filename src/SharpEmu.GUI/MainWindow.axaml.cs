@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Animation.Easings;
 using Avalonia.Automation;
 using Avalonia.Collections;
 using Avalonia.Controls;
@@ -12,6 +13,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Platform.Storage;
+using Avalonia.Rendering.Composition;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using SharpEmu.Core.Cpu;
@@ -33,6 +35,8 @@ public partial class MainWindow : Window
 {
     private const int MaxConsoleLines = 4000;
     private const int MaxConsoleLinesPerFlush = 500;
+    private static readonly TimeSpan NavigationIndicatorAnimationDuration =
+        TimeSpan.FromMilliseconds(240);
 
     private static readonly IBrush DefaultLineBrush = new SolidColorBrush(Color.Parse("#C7CFDE"));
     private static readonly IBrush DimLineBrush = new SolidColorBrush(Color.Parse("#6B7488"));
@@ -289,9 +293,9 @@ public partial class MainWindow : Window
         CtxLaunch.Click += (_, _) => LaunchSelected();
         CtxOpenFolder.Click += (_, _) => OpenSelectedGameFolder();
         CtxCopyPath.Click += async (_, _) =>
-            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path, "Clipboard.Path");
+            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path);
         CtxCopyTitleId.Click += async (_, _) =>
-            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId, "Clipboard.TitleId");
+            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
         CtxGameSettings.Click += (_, _) => OpenSelectedGameSettings();
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
 
@@ -366,6 +370,13 @@ public partial class MainWindow : Window
         LibraryToolbar.IsVisible = index == 0;
         OptionsPageSurface.IsVisible = index == 1;
         OptionsPage.IsVisible = index == 1;
+
+        if (index == 1)
+        {
+            Dispatcher.UIThread.Post(
+                () => SetOptionsNavigationIndicator(_optionsSectionIndex, animate: false),
+                DispatcherPriority.Loaded);
+        }
     }
 
     private static void SetActiveClass(Button button, bool active)
@@ -458,17 +469,69 @@ public partial class MainWindow : Window
             active ? KeyboardNavigationMode.Continue : KeyboardNavigationMode.None);
     }
 
-    private void SetOptionsNavigationIndicator(int section)
+    private void SetOptionsNavigationIndicator(int section, bool animate = true)
     {
-        if (OptionsNavIndicator.RenderTransform is not TranslateTransform transform)
+        var buttons = OptionsNavigationButtons();
+        var button = buttons[Math.Clamp(section, 0, buttons.Length - 1)];
+        MoveNavigationIndicator(
+            OptionsNavIndicator,
+            OptionsNavHost,
+            button,
+            section,
+            animate);
+    }
+
+    private static void ConfigureNavigationIndicatorAnimation(Border indicator)
+    {
+        if (ElementComposition.GetElementVisual(indicator) is not { } visual)
         {
             return;
         }
 
-        var buttons = OptionsNavigationButtons();
-        var button = buttons[Math.Clamp(section, 0, buttons.Length - 1)];
-        transform.Y = button.TranslatePoint(default, OptionsNavHost)?.Y
+        var translationAnimation = visual.Compositor.CreateVector3KeyFrameAnimation();
+        translationAnimation.Duration = NavigationIndicatorAnimationDuration;
+        translationAnimation.Target = nameof(CompositionVisual.Translation);
+        translationAnimation.InsertExpressionKeyFrame(
+            1f,
+            "this.FinalValue",
+            new SineEaseInOut());
+
+        var animations = visual.Compositor.CreateImplicitAnimationCollection();
+        animations[nameof(CompositionVisual.Translation)] = translationAnimation;
+        visual.ImplicitAnimations = animations;
+    }
+
+    private static void MoveNavigationIndicator(
+        Border indicator,
+        Control host,
+        Button button,
+        int section,
+        bool animate = true)
+    {
+        if (ElementComposition.GetElementVisual(indicator) is not { } visual)
+        {
+            return;
+        }
+
+        var targetY = button.TranslatePoint(default, host)?.Y
             ?? section * button.Bounds.Height;
+
+        if (!animate)
+        {
+            visual.ImplicitAnimations = null;
+            visual.StopAnimation(nameof(CompositionVisual.Translation));
+        }
+        else if (visual.ImplicitAnimations is null)
+        {
+            ConfigureNavigationIndicatorAnimation(indicator);
+        }
+
+        visual.Translation = new Vector3D(0, targetY, 0);
+
+        if (!animate)
+        {
+            ConfigureNavigationIndicatorAnimation(indicator);
+        }
     }
 
     // ---- Github http client config ----
@@ -929,11 +992,6 @@ public partial class MainWindow : Window
             titleBar.IsVisible = !isFullscreen;
         }
 
-        if (StatusBar is { } statusBar)
-        {
-            statusBar.IsVisible = !isFullscreen;
-        }
-
         if (ResizeHandles is { } handles)
         {
             handles.IsVisible = CanResize && WindowState == WindowState.Normal;
@@ -1321,9 +1379,6 @@ public partial class MainWindow : Window
             ? Path.GetFullPath(found)
             : null;
 
-        EmulatorPathText.Text = _emulatorExePath is not null
-            ? Localization.Instance.Format("Status.EmulatorPath", _emulatorExePath)
-            : Localization.Instance.Get("Status.EmulatorNotFound");
     }
 
     // ---- Game library ----
@@ -1398,11 +1453,6 @@ public partial class MainWindow : Window
         var excluded = new HashSet<string>(_settings.ExcludedGames, GameLibraryPath.Comparer);
         _libraryWatcher.Watch(folders);
         var showLoadingState = showProgress && _allGames.Count == 0;
-        if (showProgress)
-        {
-            StatusBarRight.Text = Localization.Instance.Get("Status.ScanningLibrary");
-        }
-
         if (showLoadingState)
         {
             EmptyState.IsVisible = false;
@@ -1423,12 +1473,6 @@ public partial class MainWindow : Window
         LoadingState.IsVisible = false;
         LoadGameDetailsInBackground(reconciliation.CoversToLoad, reconciliation.Games);
         UpdateDiscordPresence();
-        if (showProgress)
-        {
-            StatusBarRight.Text = folders.Length == 0
-                ? Localization.Instance.Get("Status.AddFolderPrompt")
-                : Localization.Instance.Format("Status.LibraryScanned", games.Count, folders.Length);
-        }
     }
 
     /// <summary>
@@ -1855,12 +1899,13 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            StatusBarRight.Text = Localization.Instance.Format("Status.CouldNotOpenFolder", ex.Message);
+            AppendConsoleLine(
+                Localization.Instance.Format("Status.CouldNotOpenFolder", ex.Message),
+                WarningLineBrush);
         }
     }
 
-    /// <summary>Copies <paramref name="text"/> and reports it via <paramref name="whatKey"/>, e.g. "Clipboard.Path".</summary>
-    private async Task CopyToClipboardAsync(string? text, string whatKey)
+    private async Task CopyToClipboardAsync(string? text)
     {
         if (string.IsNullOrEmpty(text) || Clipboard is null)
         {
@@ -1868,7 +1913,6 @@ public partial class MainWindow : Window
         }
 
         await Clipboard.SetTextAsync(text);
-        StatusBarRight.Text = Localization.Instance.Format("Status.CopiedToClipboard", Localization.Instance.Get(whatKey));
     }
 
     private void RemoveSelectedFromLibrary()
@@ -1888,7 +1932,6 @@ public partial class MainWindow : Window
             string.Equals(g.Path, game.Path, GameLibraryPath.Comparison));
         GameList.SelectedItem = null;
         RefreshVisibleGames();
-        StatusBarRight.Text = Localization.Instance.Format("Status.RemovedFromLibrary", game.Name);
     }
 
     private void RefreshVisibleGames(IReadOnlySet<GameEntry>? backgroundsChanged = null)
@@ -2198,7 +2241,6 @@ public partial class MainWindow : Window
         _runningGameName = displayName;
         _runningGameTitleId = resolvedTitleId;
         _runningSinceUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        StatusBarRight.Text = Localization.Instance.Format("Status.Running", displayName);
         UpdateRunButtons();
         UpdateDiscordPresence();
 
@@ -2251,7 +2293,6 @@ public partial class MainWindow : Window
         _emulator.Stop();
         _runningGameName = null;
         _runningGameTitleId = null;
-        StatusBarRight.Text = Localization.Instance.Get("Status.Stopping");
         UpdateDiscordPresence();
         ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
         Console.Error.WriteLine("[GUI][INFO] Waiting for the SDL game process to exit.");
@@ -2318,7 +2359,6 @@ public partial class MainWindow : Window
             brush);
         CloseFileLogSoon();
 
-        StatusBarRight.Text = Localization.Instance.Get("Status.Idle");
         _runningGameName = null;
         _runningGameTitleId = null;
         UpdateRunButtons();
