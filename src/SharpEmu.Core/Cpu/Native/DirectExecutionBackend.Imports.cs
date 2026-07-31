@@ -215,6 +215,12 @@ public sealed partial class DirectExecutionBackend
 			_lastReportedRawSentinelRecoveries = num2;
 		}
 		if (importStubEntry.IsLeaf &&
+			TryDispatchHotMemoryLeaf(cpuContext, importStubEntry, argPackPtr, out var hotMemoryResult))
+		{
+			return hotMemoryResult;
+		}
+
+		if (importStubEntry.IsLeaf &&
 			TryDispatchLeafImport(cpuContext, importStubEntry, argPackPtr, num, out var leafResult))
 		{
 			return leafResult;
@@ -381,7 +387,8 @@ public sealed partial class DirectExecutionBackend
 		bool flag4 = !string.IsNullOrWhiteSpace(_importFilter);
 		bool flag5 = false;
 		ExportedFunction? matchedExport = importStubEntry.Export;
-		bool periodicTrace = num <= 128 ||
+		bool periodicTrace = _logImportPeriodic &&
+			(num <= 128 ||
 			(num >= 240 && num <= 400) ||
 			(num >= 900 && num <= 1300) ||
 			num % 100000 == 0L ||
@@ -389,7 +396,7 @@ public sealed partial class DirectExecutionBackend
 			(importStubEntry.Nid == "rTXw65xmLIA" && (num <= 256 || num % 128 == 0)) ||
 			flag ||
 			flag2 ||
-			flag3;
+			flag3);
 		if (matchedExport is not null)
 		{
 			if (flag4)
@@ -1274,6 +1281,41 @@ public sealed partial class DirectExecutionBackend
 			Mxcsr: context.Mxcsr,
 			RestoreFullFpuState: false);
 
+	/// <summary>
+	/// Ultra-thin path for hot memcpy/memmove leaf imports: skip
+	/// CpuContext register marshalling, import-call frames, and vector return
+	/// stores when guest memory can satisfy the copy directly.
+	/// </summary>
+	private unsafe bool TryDispatchHotMemoryLeaf(
+		CpuContext cpuContext,
+		ImportStubEntry importStubEntry,
+		nint argPackPtr,
+		out ulong result)
+	{
+		result = 0;
+		var nid = importStubEntry.Nid;
+		if (nid is not ("Q3VBxCXhUHs" or "+P6FRGH4LfA"))
+		{
+			return false;
+		}
+
+		var destination = *(ulong*)argPackPtr;
+		var source = *(ulong*)(argPackPtr + 8);
+		var count = *(ulong*)(argPackPtr + 16);
+		if (count > (ulong)int.MaxValue)
+		{
+			return false;
+		}
+
+		if (count != 0 && !cpuContext.Memory.TryCopy(destination, source, count))
+		{
+			return false;
+		}
+
+		result = destination;
+		return true;
+	}
+
 	private unsafe bool TryDispatchLeafImport(
 		CpuContext cpuContext,
 		ImportStubEntry importStubEntry,
@@ -1337,7 +1379,7 @@ public sealed partial class DirectExecutionBackend
 			Volatile.Write(ref activeGuestThreadState.LastReturnRip, returnRip);
 			Volatile.Write(ref activeGuestThreadState.LastImportNid, importStubEntry.Nid);
 		}
-		if (dispatchIndex % 100000 == 0)
+		if (_logImportPeriodic && dispatchIndex % 100000 == 0)
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][TRACE] Import#{dispatchIndex}: {export.LibraryName}:{export.Name} ({importStubEntry.Nid}) " +
@@ -1471,7 +1513,12 @@ public sealed partial class DirectExecutionBackend
 			"xk0AcarP3V4" or // scePadOpen
 			"yH17Q6NWtVg" or // sceUserServiceGetEvent
 			"D-CzAxQL0XI" or // sceUserServiceGetPlatformPrivacySetting
-			"K-jXhbt2gn4";   // scePthreadMutexTrylock
+			"K-jXhbt2gn4" or // scePthreadMutexTrylock
+			// Hot memory leaves: skip non-NoBlock call-frame bookkeeping on top of TryCopy.
+			"Q3VBxCXhUHs" or // memcpy
+			"+P6FRGH4LfA" or // memmove
+			"DfivPArhucg" or // memcmp
+			"8zTFvBIAIN8";   // memset
 
 	private bool ShouldLogImportResult(string nid, OrbisGen2Result result)
 	{
