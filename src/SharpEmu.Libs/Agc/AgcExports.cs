@@ -95,8 +95,10 @@ public static partial class AgcExports
     private const uint SpiShaderPgmRsrc1Hs = 0x10A;
     private const uint SpiShaderPgmLoLs = 0x148;
     private const uint SpiShaderPgmHiLs = 0x149;
-    private const uint SpiShaderPgmLoGs = 0x8A;
-    private const uint SpiShaderPgmHiGs = 0x8B;
+    // Not 0x8A/0x8B - those are SPI_SHADER_PGM_RSRC1/RSRC2_GS, and reading them
+    // as an address yields a 58-bit value (observed live: 0x30004622C008300).
+    private const uint SpiShaderPgmLoGs = 0x88;
+    private const uint SpiShaderPgmHiGs = 0x89;
     private const uint SpiShaderPgmChksumGs = 0x80;
     private const uint SpiPsInputEna = 0x1B3;
     private const uint SpiPsInputAddr = 0x1B4;
@@ -2171,6 +2173,18 @@ public static partial class AgcExports
     public static int DcbDrawIndexIndirectGetSize(CpuContext ctx)
     {
         ctx[CpuRegister.Rax] = 5u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
+        Nid = "r98I08t+LOg",
+        ExportName = "sceAgcDcbDrawIndexIndirectMultiGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndexIndirectMultiGetSize(CpuContext ctx)
+    {
+        // Eight, matching the packet DcbDrawIndexIndirectMulti emits.
+        ctx[CpuRegister.Rax] = 8u * sizeof(uint);
         return (int)ctx[CpuRegister.Rax];
     }
 
@@ -6427,6 +6441,48 @@ public static partial class AgcExports
     }
 
     /// <summary>
+    /// Test-only view of a parsed graphics context register. False when the
+    /// register was never written.
+    /// </summary>
+    internal static bool TryGetGraphicsContextRegisterForTests(
+        CpuContext ctx,
+        uint registerOffset,
+        out uint value)
+    {
+        value = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            return gpuState.Graphics.CxRegisters.TryGetValue(registerOffset, out value);
+        }
+    }
+
+    /// <summary>
+    /// SH-register counterpart of <see cref="TryGetGraphicsContextRegisterForTests"/>;
+    /// the shader stage addresses live here.
+    /// </summary>
+    internal static bool TryGetGraphicsShRegisterForTests(
+        CpuContext ctx,
+        uint registerOffset,
+        out uint value)
+    {
+        value = 0;
+        if (!_submittedGpuStates.TryGetValue(ctx.Memory, out var gpuState))
+        {
+            return false;
+        }
+
+        lock (gpuState.Gate)
+        {
+            return gpuState.Graphics.ShRegisters.TryGetValue(registerOffset, out value);
+        }
+    }
+
+    /// <summary>
     /// GraphicsDcbSetIndexSize writes VGT_INDEX_TYPE via SET_UCONFIG_REG.
     /// Mirror that into <see cref="SubmittedDcbState.IndexSize"/>.
     /// </summary>
@@ -7444,22 +7500,6 @@ public static partial class AgcExports
             }
         }
 
-        state.UcRegisters.TryGetValue(VgtPrimitiveType, out var earlyPrimitiveType);
-        if (IsRectListPrimitive(earlyPrimitiveType) &&
-            (exportEvaluation.VertexInputs is null || exportEvaluation.VertexInputs.Count == 0) &&
-            !VertexProgramExportsParameters(exportState.Program) &&
-            GetInterpolatedAttributeCount(pixelState) != 0)
-        {
-            ReturnPooledEvaluationArrays(exportEvaluation);
-            ReturnPooledEvaluationArrays(pixelEvaluation);
-            error =
-                $"rect-list-no-param-exports ps_inputs={GetInterpolatedAttributeCount(pixelState)}";
-            TraceAgcShader(
-                $"agc.rect_list_skip es=0x{exportShaderAddress:X16} " +
-                $"ps=0x{pixelShaderAddress:X16} {error}");
-            return false;
-        }
-
         // Every bound color target the shader exports to. Deferred renderers
         // draw a multi-render-target G-buffer (up to eight slots) in one pass.
         // Fall back to slot 0 if we cannot match any export to a bound target.
@@ -8235,20 +8275,6 @@ public static partial class AgcExports
         target < ColorTargetCount
             ? (packedMasks >> (int)(target * 4)) & 0xFu
             : 0;
-
-    private static bool VertexProgramExportsParameters(Gen5ShaderProgram program)
-    {
-        foreach (var instruction in program.Instructions)
-        {
-            if (instruction.Control is Gen5ExportControl export &&
-                export.Target is >= 32 and < 64)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
 
     private static uint GetInterpolatedAttributeCount(Gen5ShaderState state)
     {
@@ -12672,9 +12698,6 @@ public static partial class AgcExports
 
     private static bool IsEsGeometryShaderType(byte shaderType) =>
         shaderType is GsShaderType or GsBackShaderType;
-
-    private static bool IsRectListPrimitive(uint primitiveType) =>
-        AgcPrimitiveHelpers.IsRectListPrimitive(primitiveType);
 
     private static int SetIndirectPatchAddress(CpuContext ctx, string registerSpace)
     {

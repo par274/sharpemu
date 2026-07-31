@@ -1,4 +1,4 @@
-// Copyright (C) 2026 SharpEmu Emulator Project
+﻿// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
@@ -15,14 +15,24 @@ public static class SaveDataDialogExports
 
     private const int ErrorOk = 0;
     private const int ErrorNotInitialized = unchecked((int)0x80B80003);
-    private const int ErrorAlreadyInitialized = unchecked((int)0x80B80004);
     private const int ErrorNotFinished = unchecked((int)0x80B80005);
     private const int ErrorNotRunning = unchecked((int)0x80B8000B);
     private const int ErrorArgNull = unchecked((int)0x80B8000D);
 
     private const int ResultSize = 0x48;
     private const int ButtonIdAffirmative = 1;
+
+    // How many polls report RUNNING before the dialog auto-finishes.
+    private const int RunningPollsBeforeFinish = 1;
+
+    // OrbisSaveDataDialogParam, confirmed against a captured block (see Open).
+    private const int ParamSizeOffset = 0x30;
+    private const int ParamModeOffset = 0x34;
+    private const int ParamDispTypeOffset = 0x38;
+    private const int ParamUserDataOffset = 0xC8;
+
     private static int _status;
+    private static int _runningPolls;
     private static int _lastMode;
     private static ulong _lastUserData;
 
@@ -33,17 +43,13 @@ public static class SaveDataDialogExports
         LibraryName = "libSceSaveDataDialog")]
     public static int SaveDataDialogInitialize(CpuContext ctx)
     {
-        var previous = Interlocked.CompareExchange(
-            ref _status,
-            StatusInitialized,
-            StatusNone);
-        if (previous == StatusNone || previous == StatusFinished)
-        {
-            Interlocked.Exchange(ref _status, StatusInitialized);
-            return ctx.SetReturn(ErrorOk);
-        }
-
-        return ctx.SetReturn(ErrorAlreadyInitialized);
+        // Repeated initialization succeeds, matching MsgDialogInitialize. Retail firmware
+        // reports ALREADY_INITIALIZED, but titles re-initialize defensively and then spin
+        // on the error forever. Only NONE is promoted, so re-initializing mid-flow cannot
+        // clobber a running or finished dialog.
+        var previous = Interlocked.CompareExchange(ref _status, StatusInitialized, StatusNone);
+        TraceSaveDataDialog($"initialize (status was {previous}) -> ok");
+        return ctx.SetReturn(ErrorOk);
     }
 
     [SysAbiExport(
@@ -61,16 +67,33 @@ public static class SaveDataDialogExports
 
         if (_status is not (StatusInitialized or StatusFinished))
         {
+            TraceSaveDataDialog($"open REJECTED: not initialized (status={_status})");
             return ctx.SetReturn(ErrorNotInitialized);
         }
 
-        _lastMode = TryReadInt32(ctx, paramAddress, out var mode) ? mode : 0;
-        _lastUserData = ctx.TryReadUInt64(paramAddress + 0xC8, out var userData) ? userData : 0;
+        // Layout confirmed from a captured param block: +0x00 is
+        // OrbisCommonDialogBaseParam.size (0x30), and the dialog's own fields start at
+        // +0x30 (param.size = 0x98). Reading mode at +0x00 therefore returned a constant
+        // 48, which GetResult echoed back; titles compare that against the mode they
+        // asked for and reopen the dialog when it does not match.
+        _lastMode = TryReadInt32(ctx, paramAddress + ParamModeOffset, out var mode) ? mode : 0;
+
+        // +0xC8 is outside the 0x98 bytes the title declared, so only read it when the
+        // declared size covers it - a null the title can handle beats trailing memory
+        // handed back as a pointer.
+        _lastUserData = TryReadInt32(ctx, paramAddress + ParamSizeOffset, out var declaredSize) &&
+            declaredSize >= ParamUserDataOffset + sizeof(ulong) &&
+            ctx.TryReadUInt64(paramAddress + ParamUserDataOffset, out var userData)
+                ? userData
+                : 0;
 
         // There is no host save dialog yet. Enter RUNNING so the close path sees a live
-        // dialog; the guest's next status poll auto-dismisses it (see PollStatus).
+        // dialog; a later status poll auto-dismisses it (see PollStatus).
+        Interlocked.Exchange(ref _runningPolls, 0);
         Interlocked.Exchange(ref _status, StatusRunning);
-        TraceSaveDataDialog($"open mode={_lastMode} userData=0x{_lastUserData:X16} -> running");
+        var dispType = TryReadInt32(ctx, paramAddress + ParamDispTypeOffset, out var type) ? type : 0;
+        TraceSaveDataDialog(
+            $"open mode={_lastMode} dispType={dispType} userData=0x{_lastUserData:X16} -> running");
         return ctx.SetReturn(ErrorOk);
     }
 
@@ -88,14 +111,30 @@ public static class SaveDataDialogExports
         LibraryName = "libSceSaveDataDialog")]
     public static int SaveDataDialogUpdateStatus(CpuContext ctx) => ctx.SetReturn(PollStatus());
 
-    // With no host UI the dialog cannot wait for user input: the first status poll after
-    // Open observes the dialog as already dismissed. Advancing on both UpdateStatus and
-    // GetStatus keeps every guest polling pattern free of infinite RUNNING loops, while
-    // an Open -> Close sequence with no poll in between still exercises the close path.
+    // With no host UI the dialog cannot wait for user input, so it auto-dismisses - but it
+    // must be observably running first. A title whose state machine only accepts FINISHED
+    // after it has seen RUNNING restarts the dialog forever otherwise, and one spinning in
+    // `while (GetStatus() == RUNNING)` just goes around once more.
     private static int PollStatus()
     {
-        Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning);
-        return Volatile.Read(ref _status);
+        if (Volatile.Read(ref _status) != StatusRunning)
+        {
+            return Volatile.Read(ref _status);
+        }
+
+        if (Interlocked.Increment(ref _runningPolls) <= RunningPollsBeforeFinish)
+        {
+            return StatusRunning;
+        }
+
+        var previous = Interlocked.CompareExchange(ref _status, StatusFinished, StatusRunning);
+        var current = Volatile.Read(ref _status);
+        if (previous != current)
+        {
+            TraceSaveDataDialog($"status {previous} -> {current}");
+        }
+
+        return current;
     }
 
     [SysAbiExport(
@@ -120,6 +159,7 @@ public static class SaveDataDialogExports
 
         if (Volatile.Read(ref _status) != StatusFinished)
         {
+            TraceSaveDataDialog($"get_result REJECTED: not finished (status={Volatile.Read(ref _status)})");
             return ctx.SetReturn(ErrorNotFinished);
         }
 
@@ -134,9 +174,12 @@ public static class SaveDataDialogExports
 
         if (!ctx.Memory.TryWrite(resultAddress, result))
         {
+            TraceSaveDataDialog($"get_result FAILED: result=0x{resultAddress:X12} unwritable");
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
+        TraceSaveDataDialog(
+            $"get_result mode={_lastMode} buttonId={ButtonIdAffirmative} userData=0x{_lastUserData:X16}");
         return ctx.SetReturn(ErrorOk);
     }
 
@@ -164,11 +207,13 @@ public static class SaveDataDialogExports
     {
         if (Interlocked.Exchange(ref _status, StatusNone) == StatusNone)
         {
+            TraceSaveDataDialog("terminate REJECTED: not initialized");
             return ctx.SetReturn(ErrorNotInitialized);
         }
 
         _lastMode = 0;
         _lastUserData = 0;
+        TraceSaveDataDialog("terminate");
         return ctx.SetReturn(ErrorOk);
     }
 
@@ -186,6 +231,14 @@ public static class SaveDataDialogExports
         LibraryName = "libSceSaveDataDialog")]
     public static int SaveDataDialogProgressBarSetValue(CpuContext ctx) => ctx.SetReturn(ErrorOk);
 
+    internal static void ResetForTests()
+    {
+        Volatile.Write(ref _status, StatusNone);
+        Volatile.Write(ref _runningPolls, 0);
+        _lastMode = 0;
+        _lastUserData = 0;
+    }
+
     private static bool TryReadInt32(CpuContext ctx, ulong address, out int value)
     {
         value = 0;
@@ -201,7 +254,10 @@ public static class SaveDataDialogExports
 
     private static void TraceSaveDataDialog(string message)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_SAVEDATA"), "1", StringComparison.Ordinal))
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_LOG_SAVEDATA"),
+                "1",
+                StringComparison.Ordinal))
         {
             return;
         }
