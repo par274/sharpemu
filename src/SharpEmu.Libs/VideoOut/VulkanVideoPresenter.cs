@@ -2405,6 +2405,7 @@ internal static unsafe class VulkanVideoPresenter
         try
         {
             using var presenter = new Presenter(width, height);
+            _activePresenter = presenter;
             presenter.Run();
         }
         catch (Exception exception)
@@ -2413,6 +2414,7 @@ internal static unsafe class VulkanVideoPresenter
         }
         finally
         {
+            _activePresenter = null;
             lock (_gate)
             {
                 _closed = true;
@@ -3391,6 +3393,19 @@ internal static unsafe class VulkanVideoPresenter
         private readonly Dictionary<string, ulong> _lastSubmittedTimelineByGuestQueue =
             new(StringComparer.Ordinal);
         private readonly Stack<DescriptorPool> _recycledDescriptorPools = new();
+        // Global Data Share (GDS): a single device-wide host-visible buffer bound
+        // as descriptor set 1 on every compute pipeline. The PS5 GPU exposes 64
+        // KiB of GDS; ds_append/ds_consume atomics land here and the CPU-side DMA
+        // path reads the resulting counters back through the same mapping. The
+        // dword count must match Gen5SpirvTranslator.GdsDwordCount (16384).
+        private const ulong GdsByteSize = 0x10000;
+        private VkBuffer _gdsBuffer;
+        private DeviceMemory _gdsMemory;
+        private void* _gdsMapped;
+        private DescriptorSetLayout _gdsDescriptorSetLayout;
+        private DescriptorSetLayout _emptyDescriptorSetLayout;
+        private DescriptorPool _gdsDescriptorPool;
+        private DescriptorSet _gdsDescriptorSet;
         private VulkanGuestQueueIdentity _activeGuestQueue =
             VulkanGuestQueueIdentity.Default;
         private long _activeGuestWorkSequence;
@@ -5342,6 +5357,16 @@ internal static unsafe class VulkanVideoPresenter
                         ? _guestFenceWaitTimeoutNs
                         : _submissionCapacityWaitNs);
             }
+        }
+
+        // Presenter-thread entry point for the GDS readback fence (see the static
+        // FlushGpuWorkForGdsReadback wrapper). FlushBatchedGuestCommands submits
+        // any command buffer still being batched so its fence is pending before
+        // we wait for every guest submission to complete.
+        internal void WaitForSubmittedGuestGpuWork()
+        {
+            FlushBatchedGuestCommands();
+            WaitForAllGuestSubmissions();
         }
 
         private void WaitForAllGuestSubmissions()
