@@ -1365,14 +1365,18 @@ public static partial class Gen5SpirvTranslator
                     variable,
                     SpirvDecoration.Location,
                     input.Location);
-                _vertexInputsByPc.TryAdd(
-                    input.Pc,
-                    new SpirvVertexInput(
-                        variable,
-                        type,
-                        componentType,
-                        input.ComponentCount,
-                        componentKind));
+                var vertexInput = new SpirvVertexInput(
+                    variable,
+                    type,
+                    componentType,
+                    input.ComponentCount,
+                    componentKind);
+                _vertexInputsByPc.TryAdd(input.Pc, vertexInput);
+                foreach (var aliasPc in input.AliasPcs ?? [])
+                {
+                    _vertexInputsByPc.TryAdd(aliasPc, vertexInput);
+                }
+
                 _interfaces.Add(variable);
             }
         }

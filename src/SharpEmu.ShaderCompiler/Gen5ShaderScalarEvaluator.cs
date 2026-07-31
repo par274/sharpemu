@@ -281,6 +281,13 @@ public static class Gen5ShaderScalarEvaluator
         var globalMemoryBindings = new List<Gen5GlobalMemoryBinding>();
         var globalMemoryByAddress = new Dictionary<(uint ScalarAddress, ulong BaseAddress), Gen5GlobalMemoryBinding>();
         var vertexInputBindings = new List<Gen5VertexInputBinding>();
+        // Absolute element address plus record layout identifies the guest
+        // stream view an attribute reads, so every fetch that resolves to it
+        // shares one location instead of claiming a new one.
+        var vertexInputByView =
+            new Dictionary<(ulong Address, uint Stride, uint DataFormat,
+                uint NumberFormat, uint ComponentCount), int>();
+        var vertexInputAliasPcs = new List<List<uint>>();
         // Shared, cached, read-only: computed once per decoded program. The
         // set already includes every instruction's destination registers, so
         // the per-load additions the loop used to make are redundant.
@@ -653,6 +660,41 @@ public static class Gen5ShaderScalarEvaluator
                         return false;
                     }
 
+                    var vertexInputView = (
+                        SaturatingAdd(
+                            vertexInputBinding.BaseAddress,
+                            vertexInputBinding.OffsetBytes),
+                        vertexInputBinding.Stride,
+                        vertexInputBinding.DataFormat,
+                        vertexInputBinding.NumberFormat,
+                        vertexInputBinding.ComponentCount);
+                    if (vertexInputByView.TryGetValue(
+                            vertexInputView,
+                            out var existingVertexInput))
+                    {
+                        var aliasPcs = vertexInputAliasPcs[existingVertexInput];
+                        if (!aliasPcs.Contains(instruction.Pc))
+                        {
+                            aliasPcs.Add(instruction.Pc);
+                        }
+
+                        // Descriptors for one view agree on size, but a path
+                        // that resolved a larger reachable range still has to
+                        // win so the capture covers every fetch.
+                        var aliasedBinding = vertexInputBindings[existingVertexInput];
+                        if (aliasedBinding.DataLength < vertexInputBinding.DataLength)
+                        {
+                            vertexInputBindings[existingVertexInput] = aliasedBinding with
+                            {
+                                DataLength = vertexInputBinding.DataLength,
+                            };
+                        }
+
+                        continue;
+                    }
+
+                    vertexInputByView[vertexInputView] = vertexInputBindings.Count;
+                    vertexInputAliasPcs.Add([]);
                     vertexInputBindings.Add(vertexInputBinding);
                     continue;
                 }
@@ -803,6 +845,18 @@ public static class Gen5ShaderScalarEvaluator
 
         if (vertexInputBindings.Count != 0)
         {
+            for (var index = 0; index < vertexInputBindings.Count; index++)
+            {
+                if (vertexInputAliasPcs[index].Count != 0)
+                {
+                    vertexInputBindings[index] = vertexInputBindings[index] with
+                    {
+                        AliasPcs = vertexInputAliasPcs[index],
+                    };
+                }
+            }
+
+            TraceVertexInputShape(vertexInputBindings);
             if (!TryCaptureVertexInputData(
                     ctx,
                     vertexInputBindings,
@@ -949,6 +1003,43 @@ public static class Gen5ShaderScalarEvaluator
         captured.Sort(static (left, right) => left.Location.CompareTo(right.Location));
         TraceTitleVertexInputs(captured);
         return true;
+    }
+
+    private static readonly bool _traceVertexInputShape =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VERTEX_SHAPE"),
+            "1",
+            StringComparison.Ordinal);
+
+    private static readonly HashSet<string> _tracedVertexInputShapes = [];
+
+    private static void TraceVertexInputShape(
+        IReadOnlyList<Gen5VertexInputBinding> bindings)
+    {
+        if (!_traceVertexInputShape)
+        {
+            return;
+        }
+
+        var distinctPcs = bindings.Select(static binding => binding.Pc).Distinct().Count();
+        var identities = bindings
+            .Select(static binding =>
+                $"{binding.BaseAddress:X}/{binding.Stride}/{binding.OffsetBytes}/" +
+                $"{binding.DataFormat}/{binding.NumberFormat}/{binding.ComponentCount}")
+            .ToArray();
+        var shape =
+            $"count={bindings.Count} distinct_pc={distinctPcs} " +
+            $"distinct_view={identities.Distinct().Count()} " +
+            $"views={string.Join(',', identities)}";
+        lock (_tracedVertexInputShapes)
+        {
+            if (!_tracedVertexInputShapes.Add(shape))
+            {
+                return;
+            }
+        }
+
+        Console.Error.WriteLine($"[VERTEX-SHAPE] {shape}");
     }
 
     private static void TraceTitleVertexInputs(IReadOnlyList<Gen5VertexInputBinding> bindings)
