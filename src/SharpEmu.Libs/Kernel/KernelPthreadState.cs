@@ -75,6 +75,26 @@ internal static class KernelPthreadState
         return Threads.TryGetValue(threadHandle, out identity);
     }
 
+    internal static bool TryGetCurrentThreadIdentity(
+        out ulong threadHandle,
+        out ThreadIdentity identity)
+    {
+        threadHandle = GuestThreadExecution.CurrentGuestThreadHandle;
+        if (threadHandle != 0 && TryGetThreadIdentity(threadHandle, out identity))
+        {
+            return true;
+        }
+
+        threadHandle = _currentThreadHandle;
+        if (threadHandle != 0 && TryGetThreadIdentity(threadHandle, out identity))
+        {
+            return true;
+        }
+
+        identity = default;
+        return false;
+    }
+
     private static ThreadIdentity EnsureGuestThreadIdentity(ulong guestThreadHandle)
     {
         if (Threads.TryGetValue(guestThreadHandle, out var existing))
