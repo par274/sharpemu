@@ -3246,6 +3246,11 @@ internal static unsafe class VulkanVideoPresenter
         private readonly VulkanHostBufferPool _hostBufferPool;
         private readonly List<GuestBufferAllocation> _guestBufferAllocations = [];
         private readonly Queue<PendingGuestSubmission> _pendingGuestSubmissions = new();
+        // Submissions whose fence timed out. Keep GPU objects alive until the
+        // fence signals (or the device is lost) so a single hung compute
+        // dispatch cannot re-block every subsequent capacity wait for the full
+        // fence timeout (~3s → ~0.3 FPS).
+        private readonly Queue<PendingGuestSubmission> _abandonedGuestSubmissions = new();
         private readonly Dictionary<string, ulong> _lastSubmittedTimelineByGuestQueue =
             new(StringComparer.Ordinal);
         private readonly Stack<DescriptorPool> _recycledDescriptorPools = new();
@@ -5200,6 +5205,45 @@ internal static unsafe class VulkanVideoPresenter
             {
                 CollectCompletedGuestSubmissions(waitForOldest: true);
             }
+
+            while (_abandonedGuestSubmissions.Count != 0)
+            {
+                CollectAbandonedGuestSubmissions();
+                if (_abandonedGuestSubmissions.Count == 0)
+                {
+                    break;
+                }
+
+                if (!_abandonedGuestSubmissions.TryPeek(out var oldest))
+                {
+                    break;
+                }
+
+                var fence = oldest.Fence;
+                var result = _vk.WaitForFences(
+                    _device,
+                    1,
+                    &fence,
+                    true,
+                    _guestFenceWaitTimeoutNs);
+                if (result == Result.Timeout || result == Result.ErrorDeviceLost)
+                {
+                    if (result == Result.ErrorDeviceLost)
+                    {
+                        _deviceLost = true;
+                    }
+
+                    while (_abandonedGuestSubmissions.TryDequeue(out var abandoned))
+                    {
+                        RetireGuestSubmission(abandoned);
+                    }
+
+                    break;
+                }
+
+                Check(result, $"vkWaitForFences(abandoned: {oldest.DebugName})");
+                CollectAbandonedGuestSubmissions();
+            }
         }
 
         private void CollectCompletedGuestSubmissions(bool waitForOldest, ulong maxWaitNs = 0)
@@ -5227,18 +5271,26 @@ internal static unsafe class VulkanVideoPresenter
                     // would otherwise block the render thread forever, starving
                     // the swapchain present (black screen). Log the culprit and
                     // continue so at least the last good frame can be shown.
-                    if (!isProbeWait && _tracedFenceTimeouts.Add(oldest.DebugName))
+                    if (isProbeWait)
+                    {
+                        return;
+                    }
+
+                    if (_tracedFenceTimeouts.Add(oldest.DebugName))
                     {
                         Console.Error.WriteLine(
                             $"[LOADER][WARN] vk.fence_wait_timeout submission='{oldest.DebugName}' " +
                             $"— GPU work not completing after {_guestFenceWaitTimeoutNs / 1_000_000}ms; " +
-                            "render thread continuing (present not blocked).");
+                            "abandoning in-flight tracking so later frames are not re-blocked.");
                     }
 
-                    return;
+                    // Move out of the blocking queue without destroying GPU
+                    // objects yet — the work may still be running. Poll and
+                    // retire from the abandoned list once the fence signals.
+                    _pendingGuestSubmissions.Dequeue();
+                    _abandonedGuestSubmissions.Enqueue(oldest);
                 }
-
-                if (result == Result.ErrorDeviceLost)
+                else if (result == Result.ErrorDeviceLost)
                 {
                     _deviceLost = true;
                     if (!_deviceLostLogged)
@@ -5279,42 +5331,77 @@ internal static unsafe class VulkanVideoPresenter
                 }
 
                 _pendingGuestSubmissions.Dequeue();
+                RetireGuestSubmission(submission);
+            }
 
-                if (!_deviceLost)
+            CollectAbandonedGuestSubmissions();
+            ProcessDeferredTextureDestroys();
+        }
+
+        private void CollectAbandonedGuestSubmissions()
+        {
+            var pending = _abandonedGuestSubmissions.Count;
+            for (var i = 0; i < pending; i++)
+            {
+                if (!_abandonedGuestSubmissions.TryDequeue(out var submission))
                 {
-                    foreach (var image in submission.TraceImages)
-                    {
-                        TraceGuestImageContents(image);
-                    }
+                    break;
                 }
 
-                foreach (var resources in submission.Resources)
+                var status = _vk.GetFenceStatus(_device, submission.Fence);
+                if (status == Result.NotReady && !_deviceLost)
                 {
-                    DestroyTranslatedDrawResources(resources);
+                    _abandonedGuestSubmissions.Enqueue(submission);
+                    continue;
                 }
 
-                foreach (var (buffer, memory) in submission.RetireBuffers)
+                if (status == Result.ErrorDeviceLost)
                 {
-                    _vk.DestroyBuffer(_device, buffer, null);
-                    _vk.FreeMemory(_device, memory, null);
+                    _deviceLost = true;
+                }
+                else if (status != Result.NotReady && status != Result.Success)
+                {
+                    Check(status, $"vkGetFenceStatus(abandoned: {submission.DebugName})");
                 }
 
-                // The fence has signalled, so the detile dispatch that used these
-                // is done reading them; hand them back for the next texture.
-                foreach (var transients in submission.RetireDetile)
-                {
-                    _detilePass?.Retire(transients);
-                }
+                RetireGuestSubmission(submission);
+            }
+        }
 
-                ReleaseGuestCommandBuffer(submission.CommandBuffer);
-                ReleaseGuestFence(submission.Fence, needsReset: true);
-                if (submission.Timeline > _completedTimeline)
+        private void RetireGuestSubmission(PendingGuestSubmission submission)
+        {
+            if (!_deviceLost)
+            {
+                foreach (var image in submission.TraceImages)
                 {
-                    _completedTimeline = submission.Timeline;
+                    TraceGuestImageContents(image);
                 }
             }
 
-            ProcessDeferredTextureDestroys();
+            // The fence has signalled, so the detile dispatch that used these
+            // is done reading them; hand them back for the next texture.
+            foreach (var transients in submission.RetireDetile)
+            {
+                _detilePass?.Retire(transients);
+            }
+
+            foreach (var resources in submission.Resources)
+            {
+                DestroyTranslatedDrawResources(resources);
+            }
+
+            foreach (var (buffer, memory) in submission.RetireBuffers)
+            {
+                _vk.DestroyBuffer(_device, buffer, null);
+                _vk.FreeMemory(_device, memory, null);
+            }
+
+            ReleaseGuestCommandBuffer(submission.CommandBuffer);
+            ReleaseGuestFence(submission.Fence, needsReset: true);
+            if (submission.Timeline > _completedTimeline)
+            {
+                _completedTimeline = submission.Timeline;
+            }
         }
 
         private void WaitForAllGuestSubmissionsForCpuVisibility()
