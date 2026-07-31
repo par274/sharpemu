@@ -903,6 +903,22 @@ public static partial class Gen5SpirvTranslator
                         width);
                     break;
                 }
+                case "VBfeI32":
+                {
+                    // Same extract as VBfeU32 but sign-extended from the top bit
+                    // of the extracted field, so the result type must be signed
+                    // and bitcast back for storage.
+                    var width = BitwiseAnd(GetRawSource(instruction, 2), UInt(31));
+                    result = Bitcast(
+                        _uintType,
+                        _module.AddInstruction(
+                            SpirvOp.BitFieldSExtract,
+                            _intType,
+                            Bitcast(_intType, GetRawSource(instruction, 0)),
+                            BitwiseAnd(GetRawSource(instruction, 1), UInt(31)),
+                            width));
+                    break;
+                }
                 case "VBfiB32":
                 {
                     var mask = GetRawSource(instruction, 0);
