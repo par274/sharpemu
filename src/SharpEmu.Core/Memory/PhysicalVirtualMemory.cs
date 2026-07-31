@@ -678,7 +678,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // MemoryRegions are inserted only once every gap in the range has been
         // backed. If any gap fails to back, every earlier host allocation is freed
         // and no region is inserted, so the address space is left untouched.
-        var stagedAllocations = new List<(ulong Address, ulong Size)>();
+        //
+        // On Windows a free gap reported by VirtualQuery is not necessarily a
+        // standalone allocation: it may be the unused tail of the 64 KiB
+        // allocation granule that an earlier fixed page-map already claimed.
+        // Reserving it directly with a plain fixed VirtualAlloc fails whenever
+        // the gap does not start on a granule boundary, which then permanently
+        // strands the rest of that granule (nothing can reserve a sub-range
+        // starting mid-granule). Route free gaps through the same granule-safe
+        // path AllocateAt uses so consecutive PS5 16 KiB pages that land in one
+        // 64 KiB granule are always backed as a unit.
+        var stagedAllocations = new List<(ulong Address, ulong Size, bool GranuleTracked)>();
 
         var cursor = start;
         while (cursor < end)
@@ -697,7 +707,29 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 goto Rollback;
             }
 
-            if (info.State == HostRegionState.Free)
+            // On Windows, a Free run may be the untouched tail of a granule an
+            // earlier gap in this same range already reserved (it reads Free
+            // because only that earlier gap's own pages got committed), and a
+            // Reserved run is exactly such an already-claimed-but-uncommitted
+            // granule slice waiting for its bytes to be committed. A plain
+            // fixed VirtualAlloc fails on a non-granule-aligned start and
+            // strands the remainder, so both cases route through the same
+            // granule-safe path AllocateAt uses.
+            var needsGranuleAwareBacking = OperatingSystem.IsWindows() &&
+                (info.State == HostRegionState.Free || info.State == HostRegionState.Reserved);
+
+            if (needsGranuleAwareBacking)
+            {
+                var runSize = runEnd - cursor;
+                if (TryAllocateFixedThroughGranules(cursor, runSize, hostProtection, traceReject: false) != cursor)
+                {
+                    goto Rollback;
+                }
+
+                stagedAllocations.Add((cursor, runSize, true));
+                TraceVmem($"Backed fixed range gap: 0x{cursor:X16} - 0x{runEnd:X16} ({runSize} bytes)");
+            }
+            else if (info.State == HostRegionState.Free)
             {
                 var runSize = runEnd - cursor;
                 var allocated = _hostMemory.Allocate(cursor, runSize, hostProtection);
@@ -711,9 +743,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     goto Rollback;
                 }
 
-                stagedAllocations.Add((cursor, runSize));
+                stagedAllocations.Add((cursor, runSize, false));
                 TraceVmem($"Backed fixed range gap: 0x{cursor:X16} - 0x{runEnd:X16} ({runSize} bytes)");
             }
+
 
             cursor = runEnd;
         }
@@ -728,7 +761,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterWriteLock();
         try
         {
-            foreach (var (gapAddress, gapSize) in stagedAllocations)
+            foreach (var (gapAddress, gapSize, _) in stagedAllocations)
             {
                 InsertRegionSorted(new MemoryRegion
                 {
@@ -748,9 +781,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return true;
 
     Rollback:
-        foreach (var (gapAddress, _) in stagedAllocations)
+        foreach (var (gapAddress, _, granuleTracked) in stagedAllocations)
         {
-            _hostMemory.Free(gapAddress);
+            // Granule-tracked commits live inside a shared 64 KiB reservation
+            // that other backed gaps (or a future caller) may depend on;
+            // freeing it here would release memory this call does not own
+            // exclusively. Leave it committed — it stays valid, unmapped-by-us
+            // host memory — and only release standalone allocations.
+            if (!granuleTracked)
+            {
+                _hostMemory.Free(gapAddress);
+            }
         }
 
         return false;

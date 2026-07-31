@@ -133,6 +133,30 @@ public sealed class GuestMemoryAllocatorTests
     }
 
     [Fact]
+    public void TryBackFixedRangeSharesAHostGranuleAcrossCallsOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // Same Ghost of Yotei regression as AdjacentFixedGuestPageMappingsShareAHostGranule,
+        // but through the sceKernelBatchMap partial-overlap path (TryBackFixedRange)
+        // that the AMPR shader-cache streamer actually uses: the first fixed 16 KiB
+        // page-map reserves the whole 64 KiB granule and commits only its own
+        // pages, so the second page-map in the same granule must observe Reserved
+        // (not Free) and commit into the existing reservation instead of taking a
+        // plain fixed VirtualAlloc, which fails off a granule boundary.
+        using var memory = new PhysicalVirtualMemory(new GranularityAwareHostMemory());
+        const ulong baseAddress = 0x0000008001600000;
+
+        Assert.True(memory.TryBackFixedRange(baseAddress, 0x4000, executable: false));
+        Assert.True(memory.TryBackFixedRange(baseAddress + 0x4000, 0x4000, executable: false));
+
+        Assert.True(memory.IsAccessible(baseAddress, 0x8000));
+    }
+
+    [Fact]
     public void AlignedAllocationDoesNotRetainOverallocatedMappingsOutsideMacOS()
     {
         if (OperatingSystem.IsMacOS())
@@ -161,6 +185,14 @@ public sealed class GuestMemoryAllocatorTests
     [Fact]
     public void TryBackFixedRangeRollsBackEarlierGapsWhenLaterGapCannotBeBacked()
     {
+        if (OperatingSystem.IsWindows())
+        {
+            // On Windows, free/reserved gaps route through the granule-safe
+            // path (see TryBackFixedRangeSharesAHostGranuleAcrossCallsOnWindows),
+            // not the plain fixed Allocate this fake models.
+            return;
+        }
+
         // Layout: committed | free | committed | free
         // First free gap allocates successfully, second fails.
         // The first allocation must be freed — nothing should leak.
@@ -182,6 +214,14 @@ public sealed class GuestMemoryAllocatorTests
     [Fact]
     public void TryBackFixedRangeFillsOnlyTheFreePagesOfAPartiallyOccupiedRange()
     {
+        if (OperatingSystem.IsWindows())
+        {
+            // On Windows, the free tail routes through the granule-safe path,
+            // not the plain fixed Allocate this fake models (it stubs Reserve
+            // to always fail, since it does not simulate granularity).
+            return;
+        }
+
         const ulong rangeBase = 0x0000_0020_2F00_0000;
         const ulong rangeSize = 0x40_0000;
         const ulong occupiedSize = 0x4_0000;
