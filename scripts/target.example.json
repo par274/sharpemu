@@ -1,0 +1,27 @@
+{
+  "titleId": "SET_ON_WINDOWS",
+  "region": "SET_ON_WINDOWS",
+  "version": "1.004.000",
+  "ebootPath": "C:\\replace-with-lawful-local-copy\\eboot.bin",
+  "ebootSha256": "REPLACE_WITH_SHA256",
+  "emulatorPath": "artifacts\\publish\\SharpEmu.CLI\\Release\\net10.0\\win-x64\\SharpEmu.exe",
+  "arguments": [
+    "--cpu-engine=native",
+    "--log-level=debug",
+    "--window-mode=windowed",
+    "--resolution=1280x720",
+    "--vsync=off"
+  ],
+  "route": "startup-to-character-creation",
+  "expectedCheckpoint": "character creation nickname prompt",
+  "host": {
+    "gpu": "SET_ON_WINDOWS",
+    "driverVersion": "SET_ON_WINDOWS",
+    "vulkanVersion": "SET_ON_WINDOWS"
+  },
+  "limits": {
+    "wallTimeSeconds": 900,
+    "workingSetGiB": 24,
+    "sampleIntervalMilliseconds": 2000
+  }
+}
