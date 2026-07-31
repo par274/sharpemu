@@ -6,7 +6,6 @@ Options page section transitions and content layout
 
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:local="using:SharpEmu.GUI"
         xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings">
   <Style Selector="Border.optionsContentSurface">
     <Setter Property="Background" Value="Transparent" />
@@ -50,12 +49,6 @@ Options page section transitions and content layout
     <Setter Property="Background" Value="#06FFFFFF" />
     <Setter Property="BorderBrush" Value="#0AFFFFFF" />
     <Setter Property="BorderThickness" Value="1" />
-  </Style>
-
-  <Style Selector="local|SettingRow.optionRow:pointerover /template/ Border#PART_RowSurface,
-                   local|SettingRow.optionRow:focus-within /template/ Border#PART_RowSurface">
-    <Setter Property="Background" Value="#0DFFFFFF" />
-    <Setter Property="BorderBrush" Value="#22FFFFFF" />
   </Style>
 
   <Style Selector="ComboBox.optionValue, settingsControls|SplitNumericUpDown.optionValue, TextBox.optionValue">
