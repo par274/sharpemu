@@ -30,6 +30,7 @@ public static class PerfOverlay
         StringComparison.Ordinal);
 
     private static long _lastPresentTimestamp;
+    private static long _lastSubmitTimestamp;
     private static long _sessionStartTimestamp;
     private static readonly double[] _frameMilliseconds = new double[FrameHistorySize];
     private static int _frameHistoryIndex;
@@ -40,8 +41,11 @@ public static class PerfOverlay
 
     // Refreshed once per second so per-frame fills never allocate.
     private static long _statsWindowStart = Stopwatch.GetTimestamp();
+    // Headline FPS tracks guest VideoOut flips (RecordSubmit), not host
+    // swapchain presents. Metal's free-running present timer hits ~120 Hz on
+    // ProMotion even while the guest is stalled on GPU waits.
     private static double _fps;
-    private static double _submittedFps;
+    private static double _presentFps;
     private static double _drawsPerSecond;
     private static double _averageFrameMs;
     private static double _allocatedMbPerSecond;
@@ -64,24 +68,29 @@ public static class PerfOverlay
 
     public static void Toggle() => _enabled = !_enabled;
 
-    /// <summary>Called by the presenter after each successful present.</summary>
+    /// <summary>Called by the presenter after each successful host present.</summary>
     public static void RecordPresent()
     {
-        var now = Stopwatch.GetTimestamp();
-        Interlocked.CompareExchange(ref _sessionStartTimestamp, now, 0);
-        var last = _lastPresentTimestamp;
-        _lastPresentTimestamp = now;
+        Interlocked.CompareExchange(ref _sessionStartTimestamp, Stopwatch.GetTimestamp(), 0);
         Interlocked.Increment(ref _presentedInWindow);
-        if (last != 0)
-        {
-            var milliseconds = (now - last) * 1000.0 / Stopwatch.Frequency;
-            _frameMilliseconds[_frameHistoryIndex] = milliseconds;
-            _frameHistoryIndex = (_frameHistoryIndex + 1) % FrameHistorySize;
-        }
+        _lastPresentTimestamp = Stopwatch.GetTimestamp();
     }
 
     /// <summary>Called on every guest flip submission.</summary>
-    public static void RecordSubmit() => Interlocked.Increment(ref _submittedInWindow);
+    public static void RecordSubmit()
+    {
+        var now = Stopwatch.GetTimestamp();
+        Interlocked.CompareExchange(ref _sessionStartTimestamp, now, 0);
+        Interlocked.Increment(ref _submittedInWindow);
+        var last = Interlocked.Exchange(ref _lastSubmitTimestamp, now);
+        if (last != 0)
+        {
+            var milliseconds = (now - last) * 1000.0 / Stopwatch.Frequency;
+            var index = _frameHistoryIndex;
+            _frameMilliseconds[index] = milliseconds;
+            _frameHistoryIndex = (index + 1) % FrameHistorySize;
+        }
+    }
 
     /// <summary>Called per translated draw/dispatch executed.</summary>
     public static void RecordDraw() => Interlocked.Increment(ref _drawsInWindow);
@@ -128,26 +137,46 @@ public static class PerfOverlay
         {
             var seconds = (double)elapsedTicks / Stopwatch.Frequency;
             _statsWindowStart = now;
-            _fps = Interlocked.Exchange(ref _presentedInWindow, 0) / seconds;
-            _submittedFps = Interlocked.Exchange(ref _submittedInWindow, 0) / seconds;
+            _fps = Interlocked.Exchange(ref _submittedInWindow, 0) / seconds;
+            _presentFps = Interlocked.Exchange(ref _presentedInWindow, 0) / seconds;
             _drawsPerSecond = Interlocked.Exchange(ref _drawsInWindow, 0) / seconds;
-
-            double totalMs = 0;
-            var samples = 0;
-            foreach (var ms in _frameMilliseconds)
-            {
-                if (ms > 0)
-                {
-                    totalMs += ms;
-                    samples++;
-                }
-            }
-
-            _averageFrameMs = samples > 0 ? totalMs / samples : 0;
 
             var allocated = GC.GetTotalAllocatedBytes(precise: false);
             _allocatedMbPerSecond = (allocated - _lastAllocatedBytes) / seconds / (1024.0 * 1024.0);
             _lastAllocatedBytes = allocated;
+
+            // Headline MS must track *current* guest cadence. Averaging the whole
+            // 128-slot history kept a single 8s boot gap on screen for minutes
+            // (FPS 0 + 8000 MS) even after the stall ended.
+            var lastSubmit = Interlocked.Read(ref _lastSubmitTimestamp);
+            string msLabel;
+            if (_fps > 0)
+            {
+                var lastIndex = (_frameHistoryIndex - 1 + FrameHistorySize) % FrameHistorySize;
+                var lastInterval = _frameMilliseconds[lastIndex];
+                _averageFrameMs = lastInterval > 0 ? lastInterval : 1000.0 / _fps;
+                msLabel = $"{_averageFrameMs:0.0} MS";
+            }
+            else if (lastSubmit != 0)
+            {
+                // No guest flips this window: show stall age, but label it so it
+                // is not read as "the game is rendering 20s frames" during boot
+                // asset load (ALLOC high, DRAWS 0 after splash).
+                _averageFrameMs = (now - lastSubmit) * 1000.0 / Stopwatch.Frequency;
+                msLabel = _allocatedMbPerSecond > 50.0
+                    ? $"LOAD {_averageFrameMs / 1000.0:0.0}S"
+                    : $"STALL {_averageFrameMs / 1000.0:0.0}S";
+            }
+            else if (_presentFps > 0)
+            {
+                _averageFrameMs = 1000.0 / _presentFps;
+                msLabel = $"{_averageFrameMs:0.0} MS";
+            }
+            else
+            {
+                _averageFrameMs = 0;
+                msLabel = "0.0 MS";
+            }
 
             var gen0 = GC.CollectionCount(0);
             var gen1 = GC.CollectionCount(1);
@@ -174,7 +203,7 @@ public static class PerfOverlay
             var elapsedHours = elapsedSeconds / 3600;
             var elapsedMinutes = elapsedSeconds / 60 % 60;
             var elapsedRemainingSeconds = elapsedSeconds % 60;
-            _line1 = $"FPS {_fps:0.0}  FLIP {_submittedFps:0.0}  {_averageFrameMs:0.0} MS";
+            _line1 = $"FPS {_fps:0.0}  PRES {_presentFps:0.0}  {msLabel}";
             _line2 = $"DRAWS {_drawsPerSecond:0}/S  {drawsPerFrame:0}/F  Q {pendingWork}+{inFlightSubmissions}";
             _line3 = $"ALLOC {_allocatedMbPerSecond:0.0} MB/S  GC {_gen0PerWindow}/{_gen1PerWindow}/{_gen2PerWindow}";
             var heapMb = GC.GetTotalMemory(false) / (1024 * 1024);
