@@ -1792,6 +1792,28 @@ internal static unsafe class VulkanVideoPresenter
     internal static bool IsLinearFloatPresentSource(Format format) =>
         format is Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat;
 
+    // A guest image accepts a request in a different Vulkan format without
+    // being recreated when the two formats are the same texel layout read
+    // through different transfer functions (sRGB vs UNORM counterparts).
+    // Both must also be legal alias views of each other so the shared
+    // mutable-format image can serve either identity. Same-class numeric
+    // reinterpretation (R32Uint over R8G8B8A8Unorm, packed 10:10:10:2 over
+    // 8:8:8:8) is excluded: the attachment keeps the existing image's
+    // format, and a fragment shader translated for the other numeric type
+    // would no longer match it.
+    internal static bool IsAliasableGuestImageFormat(
+        Format existingFormat,
+        Format requestedFormat) =>
+        existingFormat != requestedFormat &&
+        Presenter.IsCompatibleViewFormat(existingFormat, requestedFormat) &&
+        Presenter.GetStorageImageFormat(existingFormat) ==
+            Presenter.GetStorageImageFormat(requestedFormat);
+
+    internal static bool IsCompatibleGuestImageViewFormat(
+        Format imageFormat,
+        Format viewFormat) =>
+        Presenter.IsCompatibleViewFormat(imageFormat, viewFormat);
+
     private static byte[]? TakeGuestImageInitialData(ulong address)
     {
         lock (_gate)
@@ -12174,6 +12196,14 @@ internal static unsafe class VulkanVideoPresenter
                         ? GetDepthOnlyColorTarget(depthOnlyTarget)
                         : work.Targets[index];
                 targets[index] = GetOrCreateGuestImage(targetDescriptor, formats[index]);
+                // A view-compatible alias accept can return an image whose
+                // identity differs from the request (sRGB vs UNORM
+                // counterpart). The render pass, framebuffer views, and
+                // pipeline cache key must all follow the format that actually
+                // backs the attachment; a pipeline keyed on the requested
+                // format could later be replayed inside a render pass of the
+                // other identity.
+                formats[index] = targets[index].Format;
                 if (work.Targets[index].Address != 0 &&
                     TakeGuestImageInitialData(work.Targets[index].Address) is { } initialData &&
                     !targets[index].Initialized &&
@@ -13173,6 +13203,20 @@ internal static unsafe class VulkanVideoPresenter
                     $"address 0x{target.Address:X16}.");
             }
 
+            if (!supportsStorageUsage)
+            {
+                // sRGB targets must stay shareable with later UNORM
+                // ImageLoad/Store aliases of the same surface. The image is
+                // created with MUTABLE_FORMAT | EXTENDED_USAGE, so carrying
+                // storage usage is legal as long as the view-compatible UNORM
+                // counterpart supports storage; stores then go through the
+                // UNORM alias view instead of recreating the image.
+                var storageCounterpart = GetStorageImageFormat(format);
+                supportsStorageUsage = storageCounterpart != format &&
+                    IsCompatibleViewFormat(format, storageCounterpart) &&
+                    SupportsStorageImage(storageCounterpart);
+            }
+
             // Storage/UAV images keep native guest dimensions (compute shaders index them directly).
             var physicalWidth = requiresStorage
                 ? target.Width
@@ -13198,13 +13242,29 @@ internal static unsafe class VulkanVideoPresenter
                 format);
             if (_guestImages.TryGetValue(target.Address, out var existing))
             {
+                // View-compatible formats (sRGB vs UNORM of the same texel
+                // layout) are the same guest surface accessed through
+                // different number formats — render as sRGB, ImageLoad/Store
+                // as UNORM is a standard PS5 pattern (AvPlayer movie copies,
+                // post-process chains). Recreating the image for that case
+                // ping-pongs content between two VkImages and every transition
+                // loses the rendered pixels; the mutable-format image accepts
+                // an alternate-format view instead. Aliasing is limited to
+                // sRGB/UNORM counterparts: broader same-class reinterpretation
+                // (e.g. R32Uint over R8G8B8A8Unorm) would attach pipelines
+                // whose fragment output type no longer matches the attachment,
+                // so those keep the recreate path.
+                var exactFormatMatch =
+                    existing.GuestFormat == guestFormat &&
+                    existing.Format == format;
                 if (existing.LogicalWidth == target.Width &&
                     existing.LogicalHeight == target.Height &&
                     existing.LogicalDepth == depth &&
                     existing.Type == type &&
                     existing.MipLevels == mipLevels &&
-                    existing.GuestFormat == guestFormat &&
-                    existing.Format == format)
+                    (exactFormatMatch ||
+                     (IsAliasableGuestImageFormat(existing.Format, format) &&
+                      (!requiresStorage || existing.SupportsStorageUsage))))
                 {
                     if (requiresStorage && !existing.SupportsStorageUsage)
                     {
@@ -15284,6 +15344,9 @@ internal static unsafe class VulkanVideoPresenter
                 Format.R8G8B8A8Uint or
                 Format.R8G8B8A8Sint or
                 Format.R8G8B8A8Unorm or
+                Format.R8G8B8A8Srgb or
+                Format.B8G8R8A8Unorm or
+                Format.B8G8R8A8Srgb or
                 Format.A2R10G10B10UnormPack32 or
                 Format.A2B10G10R10UnormPack32 => 4,
                 Format.R16G16B16A16Uint or
