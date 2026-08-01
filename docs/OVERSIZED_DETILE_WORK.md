@@ -345,6 +345,12 @@ trials retain one 335,544,320-byte TiledSource referenced by sixteen bindings
 and one 524,288-byte RgbaPixels array referenced by ten bindings, rather than
 sixteen and ten separately allocated arrays.
 
+At the sample immediately before the oversized event, managed GC heap/
+committed memory was 807.5/820.7, 577.6/650.7, and 604.6/760.0 MiB after the
+change. The corresponding before-implementation samples were 5,261.4/5,552.8,
+5,278.5/5,620.7, and 5,168.1/5,380.1 MiB. These are event-adjacent memory
+measurements, not timing-neutral performance benchmarks.
+
 All three after trials reached the same first rendered frame after splash as
 the before trials. They additionally logged a guest-frame presentation, but
 there is no screenshot or log evidence of the nickname prompt or character
