@@ -2578,9 +2578,18 @@ internal static unsafe class VulkanVideoPresenter
             "managed.guest-queue-retained",
             checked((long)payloadBytes),
             countDelta: 1);
+        var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(work);
+        MemoryDiagnostics.Adjust(
+            "managed.guest-queue-actual-retained",
+            checked((long)diagnosticPayloadBytes),
+            countDelta: 1);
         MemoryDiagnostics.Adjust(
             "managed.guest-queue-enqueued",
             checked((long)payloadBytes),
+            countDelta: 1);
+        MemoryDiagnostics.Adjust(
+            "managed.guest-queue-actual-enqueued",
+            checked((long)diagnosticPayloadBytes),
             countDelta: 1);
         // Wake any thread waiting for guest work completion or queue space.
         System.Threading.Monitor.PulseAll(_gate);
@@ -2916,6 +2925,11 @@ internal static unsafe class VulkanVideoPresenter
                 "managed.guest-queue-retained",
                 -checked((long)releasedPayloadBytes),
                 countDelta: -1);
+            var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(pending.Work);
+            MemoryDiagnostics.Adjust(
+                "managed.guest-queue-actual-retained",
+                -checked((long)diagnosticPayloadBytes),
+                countDelta: -1);
             ReleasePendingGuestImageUploadsLocked(pending.Work);
             if (pending.Sequence == _completedGuestWorkSequence + 1)
             {
@@ -2955,6 +2969,22 @@ internal static unsafe class VulkanVideoPresenter
             GetTexturePayloadBytes(compute.Textures),
             GetGlobalBufferPayloadBytes(compute.GlobalMemoryBuffers)),
         VulkanOffscreenGuestDraw offscreen => GetDrawPayloadBytes(offscreen.Draw),
+        VulkanGuestImageWrite { Pixels: { } pixels } => (ulong)pixels.LongLength,
+        _ => 0,
+    };
+
+    // Diagnostic-only accounting. GPU-detile submissions intentionally carry
+    // raw bytes in TiledSource while leaving RgbaPixels empty. The production
+    // queue budget currently measures only RgbaPixels; keep that behavior
+    // unchanged here and expose the complete guest-work ownership separately.
+    private static ulong GetGuestWorkDiagnosticPayloadBytes(object work) => work switch
+    {
+        VulkanComputeGuestDispatch compute => SaturatingAdd(
+            GetTexturePayloadBytesIncludingTiled(compute.Textures),
+            GetGlobalBufferPayloadBytes(compute.GlobalMemoryBuffers)),
+        VulkanOffscreenGuestDraw offscreen => SaturatingAdd(
+            GetDrawPayloadBytes(offscreen.Draw),
+            GetTiledTexturePayloadBytes(offscreen.Draw.Textures)),
         VulkanGuestImageWrite { Pixels: { } pixels } => (ulong)pixels.LongLength,
         _ => 0,
     };
@@ -3012,6 +3042,27 @@ internal static unsafe class VulkanVideoPresenter
         foreach (var texture in textures)
         {
             bytes = SaturatingAdd(bytes, (ulong)texture.RgbaPixels.LongLength);
+        }
+
+        return bytes;
+    }
+
+    private static ulong GetTexturePayloadBytesIncludingTiled(
+        IReadOnlyList<GuestDrawTexture> textures) =>
+        SaturatingAdd(
+            GetTexturePayloadBytes(textures),
+            GetTiledTexturePayloadBytes(textures));
+
+    private static ulong GetTiledTexturePayloadBytes(
+        IReadOnlyList<GuestDrawTexture> textures)
+    {
+        var bytes = 0UL;
+        foreach (var texture in textures)
+        {
+            if (texture.TiledSource is { } tiledSource)
+            {
+                bytes = SaturatingAdd(bytes, (ulong)tiledSource.LongLength);
+            }
         }
 
         return bytes;
