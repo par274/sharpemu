@@ -7,4 +7,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <PropertyGroup>
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+  </ItemGroup>
 </Project>

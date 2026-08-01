@@ -169,7 +169,15 @@ internal static unsafe class VulkanDetileSelfTest
 
             void* mapped;
             Check(
-                vk.MapMemory(device, readbackMemory, 0, (ulong)expected.Length, 0, &mapped),
+                VulkanMemoryDiagnostics.Map(
+                    vk,
+                    device,
+                    readbackMemory,
+                    0,
+                    (ulong)expected.Length,
+                    0,
+                    &mapped,
+                    $"selftest {label}"),
                 $"vkMapMemory(selftest {label})");
             var actual = new Span<byte>(mapped, expected.Length);
             var firstMismatch = -1;
@@ -182,7 +190,7 @@ internal static unsafe class VulkanDetileSelfTest
                 }
             }
 
-            vk.UnmapMemory(device, readbackMemory);
+            VulkanMemoryDiagnostics.Unmap(vk, device, readbackMemory);
 
             Console.Error.WriteLine(firstMismatch < 0
                 ? $"[DETILE-SELFTEST] {label} PASS: {Width}x{Height}x{layers} matches CPU detile ({expected.Length} bytes)."
@@ -197,7 +205,7 @@ internal static unsafe class VulkanDetileSelfTest
 
             if (readbackMemory.Handle != 0)
             {
-                vk.FreeMemory(device, readbackMemory, null);
+                VulkanMemoryDiagnostics.Free(vk, device, readbackMemory);
             }
 
             if (image.Handle != 0)
@@ -207,7 +215,7 @@ internal static unsafe class VulkanDetileSelfTest
 
             if (imageMemory.Handle != 0)
             {
-                vk.FreeMemory(device, imageMemory, null);
+                VulkanMemoryDiagnostics.Free(vk, device, imageMemory);
             }
         }
     }
@@ -302,7 +310,10 @@ internal static unsafe class VulkanDetileSelfTest
                 requirements.MemoryTypeBits,
                 MemoryPropertyFlags.DeviceLocalBit),
         };
-        Check(vk.AllocateMemory(device, &allocateInfo, null, out memory), "vkAllocateMemory(selftest image)");
+        Check(
+            VulkanMemoryDiagnostics.Allocate(
+                vk, device, &allocateInfo, out memory, "selftest image"),
+            "vkAllocateMemory(selftest image)");
         Check(vk.BindImageMemory(device, image, memory, 0), "vkBindImageMemory(selftest)");
         return image;
     }
@@ -447,7 +458,10 @@ internal static unsafe class VulkanDetileSelfTest
                 requirements.MemoryTypeBits,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit),
         };
-        Check(vk.AllocateMemory(device, &allocateInfo, null, out memory), "vkAllocateMemory(selftest buffer)");
+        Check(
+            VulkanMemoryDiagnostics.Allocate(
+                vk, device, &allocateInfo, out memory, "selftest buffer"),
+            "vkAllocateMemory(selftest buffer)");
         Check(vk.BindBufferMemory(device, buffer, memory, 0), "vkBindBufferMemory(selftest)");
         return buffer;
     }

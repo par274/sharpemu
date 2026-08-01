@@ -8,6 +8,7 @@ using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Logging;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 
@@ -5080,7 +5081,9 @@ public static partial class AgcExports
             return;
         }
 
-        var pixels = new byte[imageBytes];
+        var pixels = AllocateDiagnosticBytes(
+            checked((int)imageBytes),
+            "managed.agc-dma-image-allocated");
         if (ctx.Memory.TryRead(destinationAddress, pixels))
         {
             GuestGpu.Current.SubmitGuestImageWrite(destinationAddress, pixels);
@@ -9536,7 +9539,9 @@ public static partial class AgcExports
                 return null;
             }
 
-            var blockLinear = new byte[blockByteCount];
+            var blockLinear = AllocateDiagnosticBytes(
+                checked((int)blockByteCount),
+                "managed.agc-texture-linear-allocated");
             if (!GnmTiling.TryDetile(
                     source,
                     blockLinear,
@@ -9548,7 +9553,9 @@ public static partial class AgcExports
                 return null;
             }
 
-            var tailLinear = new byte[logicalByteCount];
+            var tailLinear = AllocateDiagnosticBytes(
+                logicalByteCount,
+                "managed.agc-texture-linear-allocated");
             var rowBytes = elementsWide * bytesPerElement;
             for (var y = 0; y < elementsHigh; y++)
             {
@@ -9571,7 +9578,9 @@ public static partial class AgcExports
 
         var logicalSliceByteCount = logicalByteCount / volumeDepth;
         var physicalSliceByteCount = source.Length / volumeDepth;
-        var linear = new byte[logicalByteCount];
+        var linear = AllocateDiagnosticBytes(
+            logicalByteCount,
+            "managed.agc-texture-linear-allocated");
         for (var slice = 0; slice < volumeDepth; slice++)
         {
             if (!GnmTiling.TryDetile(
@@ -9587,6 +9596,25 @@ public static partial class AgcExports
         }
 
         return linear;
+    }
+
+    private static byte[] AllocateDiagnosticBytes(int length, string category)
+    {
+        var bytes = new byte[length];
+        MemoryDiagnostics.Adjust(
+            category,
+            checked((long)bytes.LongLength),
+            countDelta: 1);
+        return bytes;
+    }
+
+    private static byte[] CopyDiagnosticBytes(
+        ReadOnlySpan<byte> source,
+        string category)
+    {
+        var bytes = AllocateDiagnosticBytes(source.Length, category);
+        source.CopyTo(bytes);
+        return bytes;
     }
 
     private static void TraceTextureFallback(TextureDescriptor descriptor, string reason)
@@ -9815,7 +9843,9 @@ public static partial class AgcExports
                 // tiled bytes as scanlines. Read the full physical footprint
                 // and run the same AddrLib-derived detile path used below for
                 // sampled textures before seeding the Vulkan image.
-                var storageSource = new byte[(int)physicalSourceByteCount];
+                var storageSource = AllocateDiagnosticBytes(
+                    checked((int)physicalSourceByteCount),
+                    "managed.agc-texture-source-allocated");
                 if (ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
                 {
                     readSucceeded = true;
@@ -9826,9 +9856,9 @@ public static partial class AgcExports
                         storageSource,
                         baseMipInTail,
                         mipTailElementX,
-                        mipTailElementY) ?? storageSource
-                            .AsSpan(0, checked((int)sourceByteCount))
-                            .ToArray();
+                        mipTailElementY) ?? CopyDiagnosticBytes(
+                            storageSource.AsSpan(0, checked((int)sourceByteCount)),
+                            "managed.agc-texture-linear-allocated");
                     if (linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
                     {
                         linearNonzero = true;
@@ -9962,7 +9992,9 @@ public static partial class AgcExports
                     (long)elementsWide * elementsHigh * bytesPerElement <= (long)physicalSourceByteCount)
                 {
                     var sliceBytes = checked((int)physicalSourceByteCount);
-                    var tiledLayers = new byte[(long)sliceBytes * arrayLayers];
+                    var tiledLayers = AllocateDiagnosticBytes(
+                        checked((int)((long)sliceBytes * arrayLayers)),
+                        "managed.agc-texture-source-allocated");
                     var readAllLayers = true;
                     for (var layer = 0u; layer < arrayLayers; layer++)
                     {
@@ -10013,11 +10045,15 @@ public static partial class AgcExports
 
             if (totalBytes <= int.MaxValue)
             {
-                var layered = new byte[totalBytes];
+                var layered = AllocateDiagnosticBytes(
+                    checked((int)totalBytes),
+                    "managed.agc-texture-linear-allocated");
                 var uploadedLayers = 0u;
                 for (var layer = 0u; layer < arrayLayers; layer++)
                 {
-                    var sliceSource = new byte[(int)chainSliceBytes];
+                    var sliceSource = AllocateDiagnosticBytes(
+                        checked((int)chainSliceBytes),
+                        "managed.agc-texture-source-allocated");
                     if (!ctx.Memory.TryRead(
                             descriptor.Address + layer * chainSliceBytes + baseMipByteOffset,
                             sliceSource))
@@ -10032,7 +10068,9 @@ public static partial class AgcExports
                         sliceSource,
                         baseMipInTail,
                         mipTailElementX,
-                        mipTailElementY) ?? sliceSource.AsSpan(0, layerBytes).ToArray();
+                        mipTailElementY) ?? CopyDiagnosticBytes(
+                            sliceSource.AsSpan(0, layerBytes),
+                            "managed.agc-texture-linear-allocated");
                     sliceLinear.AsSpan(0, layerBytes)
                         .CopyTo(layered.AsSpan(checked((int)(layer * layerBytes))));
                     uploadedLayers++;
@@ -10069,7 +10107,9 @@ public static partial class AgcExports
             _arrayUploadUnsupported.TryAdd(descriptor.Address, 0);
         }
 
-        var source = new byte[(int)physicalSourceByteCount];
+        var source = AllocateDiagnosticBytes(
+            checked((int)physicalSourceByteCount),
+            "managed.agc-texture-source-allocated");
         if (!ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, source))
         {
             TraceTextureFallback(
@@ -10179,7 +10219,9 @@ public static partial class AgcExports
             source,
             baseMipInTail,
             mipTailElementX,
-            mipTailElementY) ?? source.AsSpan(0, checked((int)sourceByteCount)).ToArray();
+            mipTailElementY) ?? CopyDiagnosticBytes(
+                source.AsSpan(0, checked((int)sourceByteCount)),
+                "managed.agc-texture-linear-allocated");
         DumpLinearTextureIfRequested(descriptor, sourceWidth, rgba);
         texture = new GuestDrawTexture(
             descriptor.Address,
@@ -10231,7 +10273,9 @@ public static partial class AgcExports
             return;
         }
 
-        var initialData = new byte[byteCount];
+        var initialData = AllocateDiagnosticBytes(
+            checked((int)byteCount),
+            "managed.agc-render-target-seed-allocated");
         var readOk = ctx.Memory.TryRead(target.Address, initialData);
         var nonZero = readOk && initialData.AsSpan().IndexOfAnyExcept((byte)0) >= 0;
         if (_traceDraws && _rtSeedTraced.Add(target.Address))

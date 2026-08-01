@@ -7,6 +7,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Logging;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
@@ -1920,8 +1921,17 @@ internal static unsafe class VulkanVideoPresenter
         Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 1);
     }
 
-    internal static bool IsTextureContentCached(in TextureContentIdentity identity) =>
-        _cachedTextureIdentities.ContainsKey(identity);
+    internal static bool IsTextureContentCached(in TextureContentIdentity identity)
+    {
+        var cached = _cachedTextureIdentities.ContainsKey(identity);
+        MemoryDiagnostics.Adjust(
+            cached
+                ? "managed.vulkan-texture-cache-hit"
+                : "managed.vulkan-texture-cache-miss",
+            0,
+            countDelta: 1);
+        return cached;
+    }
 
     private static void MarkTextureContentCached(in TextureContentIdentity identity) =>
         _cachedTextureIdentities.TryAdd(identity, 0);
@@ -2564,6 +2574,26 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         _pendingGuestWorkBytes = SaturatingAdd(_pendingGuestWorkBytes, payloadBytes);
+        MemoryDiagnostics.Adjust(
+            "managed.guest-queue-retained",
+            checked((long)payloadBytes),
+            countDelta: 1);
+        MemoryDiagnostics.Adjust(
+            "managed.guest-queue-enqueued",
+            checked((long)payloadBytes),
+            countDelta: 1);
+        if (MemoryDiagnostics.IsEnabled)
+        {
+            var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(work);
+            MemoryDiagnostics.Adjust(
+                "managed.guest-queue-actual-retained",
+                checked((long)diagnosticPayloadBytes),
+                countDelta: 1);
+            MemoryDiagnostics.Adjust(
+                "managed.guest-queue-actual-enqueued",
+                checked((long)diagnosticPayloadBytes),
+                countDelta: 1);
+        }
         // Wake any thread waiting for guest work completion or queue space.
         System.Threading.Monitor.PulseAll(_gate);
         return sequence;
@@ -2888,9 +2918,24 @@ internal static unsafe class VulkanVideoPresenter
                     $"contiguous_completed={_completedGuestWorkSequence} " +
                     $"out_of_order={_completedGuestWorkOutOfOrder.Count}");
             }
+            var releasedPayloadBytes = Math.Min(
+                pending.PayloadBytes,
+                _pendingGuestWorkBytes);
             _pendingGuestWorkBytes = pending.PayloadBytes >= _pendingGuestWorkBytes
                 ? 0
                 : _pendingGuestWorkBytes - pending.PayloadBytes;
+            MemoryDiagnostics.Adjust(
+                "managed.guest-queue-retained",
+                -checked((long)releasedPayloadBytes),
+                countDelta: -1);
+            if (MemoryDiagnostics.IsEnabled)
+            {
+                var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(pending.Work);
+                MemoryDiagnostics.Adjust(
+                    "managed.guest-queue-actual-retained",
+                    -checked((long)diagnosticPayloadBytes),
+                    countDelta: -1);
+            }
             ReleasePendingGuestImageUploadsLocked(pending.Work);
             if (pending.Sequence == _completedGuestWorkSequence + 1)
             {
@@ -2930,6 +2975,22 @@ internal static unsafe class VulkanVideoPresenter
             GetTexturePayloadBytes(compute.Textures),
             GetGlobalBufferPayloadBytes(compute.GlobalMemoryBuffers)),
         VulkanOffscreenGuestDraw offscreen => GetDrawPayloadBytes(offscreen.Draw),
+        VulkanGuestImageWrite { Pixels: { } pixels } => (ulong)pixels.LongLength,
+        _ => 0,
+    };
+
+    // Diagnostic-only accounting. GPU-detile submissions intentionally carry
+    // raw bytes in TiledSource while leaving RgbaPixels empty. The production
+    // queue budget currently measures only RgbaPixels; keep that behavior
+    // unchanged here and expose the complete guest-work ownership separately.
+    private static ulong GetGuestWorkDiagnosticPayloadBytes(object work) => work switch
+    {
+        VulkanComputeGuestDispatch compute => SaturatingAdd(
+            GetTexturePayloadBytesIncludingTiled(compute.Textures),
+            GetGlobalBufferPayloadBytes(compute.GlobalMemoryBuffers)),
+        VulkanOffscreenGuestDraw offscreen => SaturatingAdd(
+            GetDrawPayloadBytes(offscreen.Draw),
+            GetTiledTexturePayloadBytes(offscreen.Draw.Textures)),
         VulkanGuestImageWrite { Pixels: { } pixels } => (ulong)pixels.LongLength,
         _ => 0,
     };
@@ -2987,6 +3048,27 @@ internal static unsafe class VulkanVideoPresenter
         foreach (var texture in textures)
         {
             bytes = SaturatingAdd(bytes, (ulong)texture.RgbaPixels.LongLength);
+        }
+
+        return bytes;
+    }
+
+    private static ulong GetTexturePayloadBytesIncludingTiled(
+        IReadOnlyList<GuestDrawTexture> textures) =>
+        SaturatingAdd(
+            GetTexturePayloadBytes(textures),
+            GetTiledTexturePayloadBytes(textures));
+
+    private static ulong GetTiledTexturePayloadBytes(
+        IReadOnlyList<GuestDrawTexture> textures)
+    {
+        var bytes = 0UL;
+        foreach (var texture in textures)
+        {
+            if (texture.TiledSource is { } tiledSource)
+            {
+                bytes = SaturatingAdd(bytes, (ulong)tiledSource.LongLength);
+            }
         }
 
         return bytes;
@@ -4790,7 +4872,8 @@ internal static unsafe class VulkanVideoPresenter
                     MemoryPropertyFlags.DeviceLocalBit),
             };
             Check(
-                _vk.AllocateMemory(_device, &memoryInfo, null, out _overlayImageMemory),
+                VulkanMemoryDiagnostics.Allocate(
+                    _vk, _device, &memoryInfo, out _overlayImageMemory, "overlay"),
                 "vkAllocateMemory(overlay)");
             Check(
                 _vk.BindImageMemory(_device, _overlayImage, _overlayImageMemory, 0),
@@ -4809,7 +4892,15 @@ internal static unsafe class VulkanVideoPresenter
                     out _overlayStagingMemory[slot]);
                 void* mapped;
                 Check(
-                    _vk.MapMemory(_device, _overlayStagingMemory[slot], 0, overlayBytes, 0, &mapped),
+                    VulkanMemoryDiagnostics.Map(
+                        _vk,
+                        _device,
+                        _overlayStagingMemory[slot],
+                        0,
+                        overlayBytes,
+                        0,
+                        &mapped,
+                        "overlay staging"),
                     "vkMapMemory(overlay staging)");
                 _overlayStagingMapped[slot] = (nint)mapped;
             }
@@ -5125,7 +5216,7 @@ internal static unsafe class VulkanVideoPresenter
                 foreach (var (buffer, memory) in _batchRetireBuffers)
                 {
                     _vk.DestroyBuffer(_device, buffer, null);
-                    _vk.FreeMemory(_device, memory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, memory);
                 }
 
                 foreach (var transients in _batchRetireDetile)
@@ -5474,7 +5565,7 @@ internal static unsafe class VulkanVideoPresenter
             foreach (var (buffer, memory) in submission.RetireBuffers)
             {
                 _vk.DestroyBuffer(_device, buffer, null);
-                _vk.FreeMemory(_device, memory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, memory);
             }
 
             ReleaseGuestCommandBuffer(submission.CommandBuffer);
@@ -5905,7 +5996,8 @@ internal static unsafe class VulkanVideoPresenter
             try
             {
                 Check(
-                    _vk.AllocateMemory(_device, &allocationInfo, null, out memory),
+                    VulkanMemoryDiagnostics.Allocate(
+                        _vk, _device, &allocationInfo, out memory, "flip snapshot"),
                     "vkAllocateMemory(flip snapshot)");
                 Check(
                     _vk.BindImageMemory(_device, image, memory, 0),
@@ -5915,7 +6007,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (memory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, memory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, memory);
                 }
                 _vk.DestroyImage(_device, image, null);
                 throw;
@@ -6337,11 +6429,12 @@ internal static unsafe class VulkanVideoPresenter
                     MemoryPropertyFlags.DeviceLocalBit),
             };
             Check(
-                _vk.AllocateMemory(
+                VulkanMemoryDiagnostics.Allocate(
+                    _vk,
                     _device,
                     &allocationInfo,
-                    null,
-                    out _presentationImageMemory[index]),
+                    out _presentationImageMemory[index],
+                    "HDR presentation source"),
                 "vkAllocateMemory(HDR presentation source)");
             Check(
                 _vk.BindImageMemory(
@@ -8874,7 +8967,7 @@ internal static unsafe class VulkanVideoPresenter
                 _vk.DestroyImage(_device, texture.Image, null);
                 if (texture.ImageMemory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, texture.ImageMemory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, texture.ImageMemory);
                 }
             }
 
@@ -8885,7 +8978,7 @@ internal static unsafe class VulkanVideoPresenter
 
             if (texture.StagingMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, texture.StagingMemory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, texture.StagingMemory);
             }
         }
 
@@ -8992,13 +9085,15 @@ internal static unsafe class VulkanVideoPresenter
 
                     void* mapped;
                     Check(
-                        _vk.MapMemory(
+                        VulkanMemoryDiagnostics.Map(
+                            _vk,
                             _device,
                             resource.StagingMemory,
                             0,
                             uploadSize,
                             0,
-                            &mapped),
+                            &mapped,
+                            "storage texture"),
                         "vkMapMemory(storage texture)");
                     fixed (byte* source = uploadPixels)
                     {
@@ -9009,7 +9104,7 @@ internal static unsafe class VulkanVideoPresenter
                             uploadPixels.Length);
                     }
 
-                    _vk.UnmapMemory(_device, resource.StagingMemory);
+                    VulkanMemoryDiagnostics.Unmap(_vk, _device, resource.StagingMemory);
                     resource.NeedsUpload = true;
                     guestImage.InitialUploadPending = true;
                     TraceVulkanShader(
@@ -9066,7 +9161,8 @@ internal static unsafe class VulkanVideoPresenter
                     MemoryPropertyFlags.DeviceLocalBit),
             };
             Check(
-                _vk.AllocateMemory(_device, &allocationInfo, null, out var memory),
+                VulkanMemoryDiagnostics.Allocate(
+                    _vk, _device, &allocationInfo, out var memory, "storage scratch"),
                 "vkAllocateMemory(storage scratch)");
             Check(
                 _vk.BindImageMemory(_device, image, memory, 0),
@@ -9340,7 +9436,10 @@ internal static unsafe class VulkanVideoPresenter
                     imageRequirements.MemoryTypeBits,
                     MemoryPropertyFlags.DeviceLocalBit),
             };
-            Check(_vk.AllocateMemory(_device, &memoryInfo, null, out var imageMemory), "vkAllocateMemory(texture)");
+            Check(
+                VulkanMemoryDiagnostics.Allocate(
+                    _vk, _device, &memoryInfo, out var imageMemory, "texture"),
+                "vkAllocateMemory(texture)");
             Check(_vk.BindImageMemory(_device, image, imageMemory, 0), "vkBindImageMemory(texture)");
 
             var viewInfo = new ImageViewCreateInfo
@@ -9542,12 +9641,15 @@ internal static unsafe class VulkanVideoPresenter
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
                 out var memory);
             void* mapped;
-            Check(_vk.MapMemory(_device, memory, 0, size, 0, &mapped), "vkMapMemory(texture)");
+            Check(
+                VulkanMemoryDiagnostics.Map(
+                    _vk, _device, memory, 0, size, 0, &mapped, "texture"),
+                "vkMapMemory(texture)");
             fixed (byte* source = pixels)
             {
                 System.Buffer.MemoryCopy(source, mapped, pixels.Length, pixels.Length);
             }
-            _vk.UnmapMemory(_device, memory);
+            VulkanMemoryDiagnostics.Unmap(_vk, _device, memory);
             SetDebugName(ObjectType.Buffer, buffer.Handle, debugName);
             return (buffer, memory);
         }
@@ -9641,7 +9743,8 @@ internal static unsafe class VulkanVideoPresenter
                         MemoryPropertyFlags.DeviceLocalBit),
                 };
                 Check(
-                    _vk.AllocateMemory(_device, &memoryInfo, null, out memory),
+                    VulkanMemoryDiagnostics.Allocate(
+                        _vk, _device, &memoryInfo, out memory, "render-target feedback snapshot"),
                     "vkAllocateMemory(render-target feedback snapshot)");
                 Check(
                     _vk.BindImageMemory(_device, image, memory, 0),
@@ -9708,7 +9811,7 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (memory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, memory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, memory);
                 }
 
                 throw;
@@ -9751,7 +9854,8 @@ internal static unsafe class VulkanVideoPresenter
                         MemoryPropertyFlags.DeviceLocalBit),
                 };
                 Check(
-                    _vk.AllocateMemory(_device, &memoryInfo, null, out memory),
+                    VulkanMemoryDiagnostics.Allocate(
+                        _vk, _device, &memoryInfo, out memory, "depth feedback snapshot"),
                     "vkAllocateMemory(depth feedback snapshot)");
                 Check(
                     _vk.BindImageMemory(_device, image, memory, 0),
@@ -9808,7 +9912,7 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 if (memory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, memory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, memory);
                 }
                 throw;
             }
@@ -10392,7 +10496,10 @@ internal static unsafe class VulkanVideoPresenter
                 out var memory,
                 preferredMemoryFlags: MemoryPropertyFlags.HostCachedBit);
             void* mapped;
-            Check(_vk.MapMemory(_device, memory, 0, size, 0, &mapped), "vkMapMemory(guest buffer)");
+            Check(
+                VulkanMemoryDiagnostics.Map(
+                    _vk, _device, memory, 0, size, 0, &mapped, "guest buffer"),
+                "vkMapMemory(guest buffer)");
             var shadow = new byte[checked((int)size)];
             _ = _guestMemory?.TryRead(start, shadow);
             shadow.CopyTo(new Span<byte>(mapped, shadow.Length));
@@ -10415,11 +10522,11 @@ internal static unsafe class VulkanVideoPresenter
         {
             if (allocation.Mapped != 0)
             {
-                _vk.UnmapMemory(_device, allocation.Memory);
+                VulkanMemoryDiagnostics.Unmap(_vk, _device, allocation.Memory);
             }
 
             _vk.DestroyBuffer(_device, allocation.Buffer, null);
-            _vk.FreeMemory(_device, allocation.Memory, null);
+            VulkanMemoryDiagnostics.Free(_vk, _device, allocation.Memory);
         }
 
         private VertexBufferResource CreateVertexBufferResource(
@@ -10548,7 +10655,15 @@ internal static unsafe class VulkanVideoPresenter
                 // may legally stay mapped for its lifetime.
                 void* persistentMapping;
                 Check(
-                    _vk.MapMemory(_device, allocatedMemory, 0, capacity, 0, &persistentMapping),
+                    VulkanMemoryDiagnostics.Map(
+                        _vk,
+                        _device,
+                        allocatedMemory,
+                        0,
+                        capacity,
+                        0,
+                        &persistentMapping,
+                        "host persistent"),
                     "vkMapMemory(host persistent)");
                 allocation = new VulkanHostBufferAllocation(
                     buffer,
@@ -10587,15 +10702,15 @@ internal static unsafe class VulkanVideoPresenter
             _vk.DestroyBuffer(_device, buffer, null);
             if (memory.Handle != 0)
             {
-                _vk.FreeMemory(_device, memory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, memory);
             }
         }
 
         private void DestroyHostBufferAllocation(VulkanHostBufferAllocation allocation)
         {
-            _vk.UnmapMemory(_device, allocation.Memory);
+            VulkanMemoryDiagnostics.Unmap(_vk, _device, allocation.Memory);
             _vk.DestroyBuffer(_device, allocation.Buffer, null);
-            _vk.FreeMemory(_device, allocation.Memory, null);
+            VulkanMemoryDiagnostics.Free(_vk, _device, allocation.Memory);
         }
 
         private static PrimitiveTopology GetPrimitiveTopology(
@@ -11272,7 +11387,10 @@ internal static unsafe class VulkanVideoPresenter
                     memoryFlags,
                     preferredMemoryFlags),
             };
-            Check(_vk.AllocateMemory(_device, &memoryInfo, null, out memory), "vkAllocateMemory");
+            Check(
+                VulkanMemoryDiagnostics.Allocate(
+                    _vk, _device, &memoryInfo, out memory, "buffer"),
+                "vkAllocateMemory");
             Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory");
             return buffer;
         }
@@ -11301,7 +11419,15 @@ internal static unsafe class VulkanVideoPresenter
                     out _frameUploadMemory[slot]);
                 void* mapped;
                 Check(
-                    _vk.MapMemory(_device, _frameUploadMemory[slot], 0, size, 0, &mapped),
+                    VulkanMemoryDiagnostics.Map(
+                        _vk,
+                        _device,
+                        _frameUploadMemory[slot],
+                        0,
+                        size,
+                        0,
+                        &mapped,
+                        "frame upload"),
                     "vkMapMemory(frame upload)");
                 _frameUploadMapped[slot] = (nint)mapped;
             }
@@ -13230,7 +13356,15 @@ internal static unsafe class VulkanVideoPresenter
             {
                 void* mapped;
                 Check(
-                    _vk.MapMemory(_device, stagingMemory, 0, byteCount, 0, &mapped),
+                    VulkanMemoryDiagnostics.Map(
+                        _vk,
+                        _device,
+                        stagingMemory,
+                        0,
+                        byteCount,
+                        0,
+                        &mapped,
+                        "guest image init"),
                     "vkMapMemory(guest image init)");
                 fixed (byte* source = uploadPixels)
                 {
@@ -13241,7 +13375,7 @@ internal static unsafe class VulkanVideoPresenter
                         uploadPixels.Length);
                 }
 
-                _vk.UnmapMemory(_device, stagingMemory);
+                VulkanMemoryDiagnostics.Unmap(_vk, _device, stagingMemory);
 
                 // Recorded into the shared batch; the staging buffer joins
                 // the batch's retire list and is destroyed when the batch
@@ -13345,7 +13479,7 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (stagingMemory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, stagingMemory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, stagingMemory);
                 }
             }
         }
@@ -13585,7 +13719,8 @@ internal static unsafe class VulkanVideoPresenter
                     MemoryPropertyFlags.DeviceLocalBit),
             };
             Check(
-                _vk.AllocateMemory(_device, &allocationInfo, null, out var memory),
+                VulkanMemoryDiagnostics.Allocate(
+                    _vk, _device, &allocationInfo, out var memory, "offscreen"),
                 "vkAllocateMemory(offscreen)");
             Check(_vk.BindImageMemory(_device, image, memory, 0), "vkBindImageMemory(offscreen)");
             // Rendering and uploads only define the mips they touch; define the whole
@@ -13902,7 +14037,10 @@ internal static unsafe class VulkanVideoPresenter
                 AllocationSize = requirements.Size,
                 MemoryTypeIndex = FindMemoryType(requirements.MemoryTypeBits, MemoryPropertyFlags.DeviceLocalBit),
             };
-            Check(_vk.AllocateMemory(_device, &memoryInfo, null, out var memory), "vkAllocateMemory(depth)");
+            Check(
+                VulkanMemoryDiagnostics.Allocate(
+                    _vk, _device, &memoryInfo, out var memory, "depth"),
+                "vkAllocateMemory(depth)");
             Check(_vk.BindImageMemory(_device, image, memory, 0), "vkBindImageMemory(depth)");
 
             var viewInfo = new ImageViewCreateInfo
@@ -14269,7 +14407,7 @@ internal static unsafe class VulkanVideoPresenter
 
             if (resource.Memory.Handle != 0)
             {
-                _vk.FreeMemory(_device, resource.Memory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, resource.Memory);
             }
 
         }
@@ -14320,7 +14458,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (resource.Memory.Handle != 0)
             {
-                _vk.FreeMemory(_device, resource.Memory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, resource.Memory);
             }
         }
 
@@ -15369,7 +15507,15 @@ internal static unsafe class VulkanVideoPresenter
 
                 void* mapped;
                 Check(
-                    _vk.MapMemory(_device, memory, 0, byteCount, 0, &mapped),
+                    VulkanMemoryDiagnostics.Map(
+                        _vk,
+                        _device,
+                        memory,
+                        0,
+                        byteCount,
+                        0,
+                        &mapped,
+                        "guest readback"),
                     "vkMapMemory(guest readback)");
                 try
                 {
@@ -15432,13 +15578,13 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 finally
                 {
-                    _vk.UnmapMemory(_device, memory);
+                    VulkanMemoryDiagnostics.Unmap(_vk, _device, memory);
                 }
             }
             finally
             {
                 _vk.DestroyBuffer(_device, buffer, null);
-                _vk.FreeMemory(_device, memory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, memory);
             }
         }
 
@@ -17042,7 +17188,7 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (texture.OwnsStorage && texture.ImageMemory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, texture.ImageMemory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, texture.ImageMemory);
                 }
 
                 if (texture.StagingBuffer.Handle != 0)
@@ -17052,7 +17198,7 @@ internal static unsafe class VulkanVideoPresenter
 
                 if (texture.StagingMemory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, texture.StagingMemory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, texture.StagingMemory);
                 }
 
                 if (texture.NeedsUpload &&
@@ -17211,11 +17357,12 @@ internal static unsafe class VulkanVideoPresenter
                     MemoryPropertyFlags.DeviceLocalBit),
             };
             Check(
-                _vk.AllocateMemory(
+                VulkanMemoryDiagnostics.Allocate(
+                    _vk,
                     _device,
                     &allocationInfo,
-                    null,
-                    out memory),
+                    out memory,
+                    $"host movie {planeName}"),
                 $"vkAllocateMemory(host movie {planeName})");
             Check(
                 _vk.BindImageMemory(_device, image, memory, 0),
@@ -17254,7 +17401,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (_hostMovieImageMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _hostMovieImageMemory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, _hostMovieImageMemory);
                 _hostMovieImageMemory = default;
             }
             if (_hostMovieChromaImageView.Handle != 0)
@@ -17269,7 +17416,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (_hostMovieChromaImageMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _hostMovieChromaImageMemory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, _hostMovieChromaImageMemory);
                 _hostMovieChromaImageMemory = default;
             }
             _hostMovieImageWidth = 0;
@@ -17427,7 +17574,12 @@ internal static unsafe class VulkanVideoPresenter
                         MemoryPropertyFlags.DeviceLocalBit),
                 };
                 Check(
-                    _vk.AllocateMemory(_device, &allocationInfo, null, out _presentEncodeMemory),
+                    VulkanMemoryDiagnostics.Allocate(
+                        _vk,
+                        _device,
+                        &allocationInfo,
+                        out _presentEncodeMemory,
+                        "present encode"),
                     "vkAllocateMemory(present encode)");
                 Check(
                     _vk.BindImageMemory(_device, _presentEncodeImage, _presentEncodeMemory, 0),
@@ -17453,7 +17605,7 @@ internal static unsafe class VulkanVideoPresenter
 
             if (_presentEncodeMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _presentEncodeMemory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, _presentEncodeMemory);
                 _presentEncodeMemory = default;
             }
 
@@ -17810,7 +17962,15 @@ internal static unsafe class VulkanVideoPresenter
             var byteCount = checked((ulong)_extent.Width * _extent.Height * 4);
             void* mapped;
             Check(
-                _vk.MapMemory(_device, _stagingMemory, 0, byteCount, 0, &mapped),
+                VulkanMemoryDiagnostics.Map(
+                    _vk,
+                    _device,
+                    _stagingMemory,
+                    0,
+                    byteCount,
+                    0,
+                    &mapped,
+                    "swapchain readback"),
                 "vkMapMemory(swapchain readback)");
             try
             {
@@ -17864,7 +18024,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             finally
             {
-                _vk.UnmapMemory(_device, _stagingMemory);
+                VulkanMemoryDiagnostics.Unmap(_vk, _device, _stagingMemory);
             }
         }
 
@@ -18216,7 +18376,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (_frameUploadMapped.Length > slot && _frameUploadMapped[slot] != 0)
                 {
-                    _vk.UnmapMemory(_device, _frameUploadMemory[slot]);
+                    VulkanMemoryDiagnostics.Unmap(_vk, _device, _frameUploadMemory[slot]);
                 }
                 if (_frameUploadBuffers[slot].Handle != 0)
                 {
@@ -18224,7 +18384,7 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 if (_frameUploadMemory[slot].Handle != 0)
                 {
-                    _vk.FreeMemory(_device, _frameUploadMemory[slot], null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, _frameUploadMemory[slot]);
                 }
             }
             _frameUploadBuffers = [];
@@ -18237,7 +18397,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (_stagingMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _stagingMemory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, _stagingMemory);
                 _stagingMemory = default;
                 _stagingSize = 0;
             }
@@ -18264,7 +18424,7 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (_overlayImageMemory.Handle != 0)
             {
-                _vk.FreeMemory(_device, _overlayImageMemory, null);
+                VulkanMemoryDiagnostics.Free(_vk, _device, _overlayImageMemory);
                 _overlayImageMemory = default;
             }
             for (var slot = 0; slot < _overlayStagingBuffers.Length; slot++)
@@ -18275,7 +18435,7 @@ internal static unsafe class VulkanVideoPresenter
                 }
                 if (_overlayStagingMemory[slot].Handle != 0)
                 {
-                    _vk.FreeMemory(_device, _overlayStagingMemory[slot], null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, _overlayStagingMemory[slot]);
                 }
             }
             _overlayStagingBuffers = [];
@@ -18400,7 +18560,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (memory.Handle != 0)
                 {
-                    _vk.FreeMemory(_device, memory, null);
+                    VulkanMemoryDiagnostics.Free(_vk, _device, memory);
                 }
             }
             _presentationImageMemory = [];

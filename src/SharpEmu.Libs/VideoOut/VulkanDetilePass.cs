@@ -668,7 +668,9 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
             AllocationSize = requirements.Size,
             MemoryTypeIndex = FindMemoryType(requirements.MemoryTypeBits, required, hostVisible),
         };
-        Check(_vk.AllocateMemory(_device, &allocateInfo, null, out var memory), "vkAllocateMemory(detile)");
+        Check(
+            VulkanMemoryDiagnostics.Allocate(_vk, _device, &allocateInfo, out var memory, "detile"),
+            "vkAllocateMemory(detile)");
         Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory(detile)");
         var allocation = new Allocation(buffer, memory, size, hostVisible);
         _allAllocations.Add(allocation);
@@ -713,18 +715,24 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
     private void UploadBytes(DeviceMemory memory, ReadOnlySpan<byte> data)
     {
         void* mapped;
-        Check(_vk.MapMemory(_device, memory, 0, (ulong)data.Length, 0, &mapped), "vkMapMemory(detile)");
+        Check(
+            VulkanMemoryDiagnostics.Map(
+                _vk, _device, memory, 0, (ulong)data.Length, 0, &mapped, "detile"),
+            "vkMapMemory(detile)");
         data.CopyTo(new Span<byte>(mapped, data.Length));
-        _vk.UnmapMemory(_device, memory);
+        VulkanMemoryDiagnostics.Unmap(_vk, _device, memory);
     }
 
     private void UploadUInts(DeviceMemory memory, uint[] data)
     {
         void* mapped;
         var byteCount = (ulong)data.Length * sizeof(uint);
-        Check(_vk.MapMemory(_device, memory, 0, byteCount, 0, &mapped), "vkMapMemory(detile terms)");
+        Check(
+            VulkanMemoryDiagnostics.Map(
+                _vk, _device, memory, 0, byteCount, 0, &mapped, "detile terms"),
+            "vkMapMemory(detile terms)");
         data.AsSpan().CopyTo(new Span<uint>(mapped, data.Length));
-        _vk.UnmapMemory(_device, memory);
+        VulkanMemoryDiagnostics.Unmap(_vk, _device, memory);
     }
 
     private void WriteDescriptors(
@@ -827,7 +835,7 @@ internal sealed unsafe class VulkanDetilePass : IDisposable
 
         if (memory.Handle != 0)
         {
-            _vk.FreeMemory(_device, memory, null);
+            VulkanMemoryDiagnostics.Free(_vk, _device, memory);
         }
     }
 

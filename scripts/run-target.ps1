@@ -8,7 +8,8 @@ param(
     [string]$ConfigPath = ".local/target.json",
     [ValidateRange(1, 20)]
     [int]$Runs = 1,
-    [string]$OutputRoot = "artifacts-local/runs"
+    [string]$OutputRoot = "artifacts-local/runs",
+    [string[]]$AdditionalArguments = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -196,6 +197,11 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $sampleCount = 0
     $exitCode = $null
     $processStarted = $false
+    $emulationProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+    $comparisonArguments = @($arguments + $AdditionalArguments)
+    $launchAdditionalArguments = @($AdditionalArguments | ForEach-Object {
+        ([string]$_).Replace("{runDirectory}", $runDirectory).Replace("{runId}", $runId)
+    })
 
     $manifest = [ordered]@{
         schemaVersion = 1
@@ -215,7 +221,8 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         }
         emulator = [ordered]@{
             sha256 = $emulatorHash
-            arguments = $arguments
+            arguments = @($arguments + $launchAdditionalArguments)
+            comparisonArguments = $comparisonArguments
         }
         limits = [ordered]@{
             wallTimeSeconds = $wallTimeSeconds
@@ -232,6 +239,9 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $startInfo.WorkingDirectory = [System.IO.Path]::GetDirectoryName($ebootPath)
     $startInfo.UseShellExecute = $false
     foreach ($argument in $arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+    foreach ($argument in $launchAdditionalArguments) {
         [void]$startInfo.ArgumentList.Add($argument)
     }
     [void]$startInfo.ArgumentList.Add("--log-file=$logPath")
@@ -252,6 +262,25 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             $processTree = @(Get-ProcessTree -RootProcessId $process.Id)
             $workingSetBytes = [long](($processTree | Measure-Object -Property WorkingSet64 -Sum).Sum)
             $privateBytes = [long](($processTree | Measure-Object -Property PrivateMemorySize64 -Sum).Sum)
+            $emulationProcessId = $null
+            if ($AdditionalArguments.Count -gt 0) {
+                $treeIds = [System.Collections.Generic.HashSet[int]]::new()
+                foreach ($treeProcess in $processTree) {
+                    [void]$treeIds.Add([int]$treeProcess.Id)
+                }
+
+                $emulationProcess = Get-CimInstance Win32_Process -Property ProcessId, Name, CommandLine |
+                    Where-Object {
+                        $treeIds.Contains([int]$_.ProcessId) -and
+                        $_.Name -eq "SharpEmu.exe" -and
+                        $_.CommandLine -like "*--sharpemu-mitigated-child*"
+                    } |
+                    Select-Object -First 1
+                if ($null -ne $emulationProcess) {
+                    $emulationProcessId = [int]$emulationProcess.ProcessId
+                    [void]$emulationProcessIds.Add($emulationProcessId)
+                }
+            }
             $peakWorkingSetBytes = [Math]::Max($peakWorkingSetBytes, $workingSetBytes)
             $peakPrivateBytes = [Math]::Max($peakPrivateBytes, $privateBytes)
             $sampleCount++
@@ -260,6 +289,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 timestampUtc = [DateTimeOffset]::UtcNow.ToString("O")
                 elapsedMilliseconds = [long]$stopwatch.Elapsed.TotalMilliseconds
                 processCount = $processTree.Count
+                emulationProcessId = $emulationProcessId
                 workingSetBytes = $workingSetBytes
                 privateBytes = $privateBytes
             }
@@ -304,6 +334,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             sampleCount = $sampleCount
             peakWorkingSetBytes = $peakWorkingSetBytes
             peakPrivateBytes = $peakPrivateBytes
+            emulationProcessIds = @($emulationProcessIds | Sort-Object)
             checkpointObserved = $null
             notes = "Record the observed checkpoint after reviewing the run. Do not infer it from process exit."
         }

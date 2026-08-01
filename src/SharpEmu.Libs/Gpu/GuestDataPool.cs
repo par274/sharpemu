@@ -3,6 +3,7 @@
 
 using System.Buffers;
 using System.Numerics;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Gpu;
 
@@ -52,6 +53,7 @@ internal static class GuestDataPool
             ArgumentOutOfRangeException.ThrowIfNegative(minimumLength);
             var length = GetAllocationLength(minimumLength);
             byte[]? array = null;
+            var allocated = false;
             lock (_gate)
             {
                 if (length <= _maxArrayLength &&
@@ -61,8 +63,25 @@ internal static class GuestDataPool
                     _cachedBytes -= (ulong)array.LongLength;
                 }
 
-                array ??= new byte[length];
+                if (array is null)
+                {
+                    array = new byte[length];
+                    allocated = true;
+                }
+
                 _leases.Add(array);
+                if (allocated)
+                {
+                    var allocatedBytes = checked((long)array.LongLength);
+                    MemoryDiagnostics.Adjust(
+                        "managed.guest-data-pool-retained",
+                        allocatedBytes,
+                        countDelta: 1);
+                    MemoryDiagnostics.Adjust(
+                        "managed.guest-data-pool-allocated",
+                        allocatedBytes,
+                        countDelta: 1);
+                }
             }
 
             return array;
@@ -71,6 +90,7 @@ internal static class GuestDataPool
         public override void Return(byte[] array, bool clearArray = false)
         {
             ArgumentNullException.ThrowIfNull(array);
+            var arrayBytes = checked((long)array.LongLength);
             lock (_gate)
             {
                 if (!_leases.Remove(array))
@@ -78,6 +98,14 @@ internal static class GuestDataPool
                     return;
                 }
             }
+
+            // The lease no longer belongs to the pool while Return evaluates
+            // whether it can be cached. Keep the current-retained counter
+            // aligned with that ownership boundary.
+            MemoryDiagnostics.Adjust(
+                "managed.guest-data-pool-retained",
+                -arrayBytes,
+                countDelta: -1);
 
             if (clearArray)
             {
@@ -107,6 +135,10 @@ internal static class GuestDataPool
 
                 bucket.Push(array);
                 _cachedBytes += (ulong)array.LongLength;
+                MemoryDiagnostics.Adjust(
+                    "managed.guest-data-pool-retained",
+                    arrayBytes,
+                    countDelta: 1);
             }
         }
 
@@ -114,8 +146,19 @@ internal static class GuestDataPool
         {
             lock (_gate)
             {
+                var cachedBytes = checked((long)_cachedBytes);
+                var cachedArrayCount = 0;
+                foreach (var bucket in _cachedByBucket.Values)
+                {
+                    cachedArrayCount += bucket.Count;
+                }
+
                 _cachedByBucket.Clear();
                 _cachedBytes = 0;
+                MemoryDiagnostics.Adjust(
+                    "managed.guest-data-pool-retained",
+                    -cachedBytes,
+                    countDelta: -cachedArrayCount);
             }
         }
 
