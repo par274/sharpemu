@@ -198,6 +198,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $exitCode = $null
     $processStarted = $false
     $emulationProcessIds = [System.Collections.Generic.HashSet[int]]::new()
+    $comparisonArguments = @($arguments + $AdditionalArguments)
     $launchAdditionalArguments = @($AdditionalArguments | ForEach-Object {
         ([string]$_).Replace("{runDirectory}", $runDirectory).Replace("{runId}", $runId)
     })
@@ -221,6 +222,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         emulator = [ordered]@{
             sha256 = $emulatorHash
             arguments = @($arguments + $launchAdditionalArguments)
+            comparisonArguments = $comparisonArguments
         }
         limits = [ordered]@{
             wallTimeSeconds = $wallTimeSeconds

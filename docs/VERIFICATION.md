@@ -47,6 +47,20 @@ dotnet publish ./src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r win-x64 --se
 ./scripts/compare-runs.ps1 -Latest 3
 ```
 
+For an opt-in memory diagnostic stream whose per-run path remains comparable,
+use the original placeholder in the additional argument template:
+
+```powershell
+./scripts/run-target.ps1 -Runs 3 -AdditionalArguments @('--memory-diagnostics={runDirectory}\memory-diagnostics.jsonl')
+./scripts/compare-runs.ps1 -Latest 3
+```
+
+Each manifest preserves the expanded launched arguments in
+`emulator.arguments` and records the original templates in
+`emulator.comparisonArguments`. The comparison script hashes the stable field
+and falls back to `emulator.arguments` for older manifests that predate the
+stable field.
+
 The runner verifies target and emulator hashes, records the clean or dirty commit state, samples the complete SharpEmu process tree, and stops it at the configured wall-time or aggregate working-set limit. Each trial writes a manifest, JSON-lines metrics, and SharpEmu log under ignored `artifacts-local/runs/`.
 
 After inspecting each run, record the actually observed checkpoint and concise notes in its local manifest. Do not infer a checkpoint from exit code or elapsed time. Use screenshots or diagnostic captures locally when they are needed to support that observation.

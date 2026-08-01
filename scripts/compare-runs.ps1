@@ -40,12 +40,31 @@ if ($manifests.Count -eq 0) {
     throw "No run manifests were found."
 }
 
+function Get-ComparisonEmulator {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Manifest
+    )
+
+    $comparisonArgumentsProperty = $Manifest.emulator.PSObject.Properties["comparisonArguments"]
+    $comparisonArguments = if ($null -ne $comparisonArgumentsProperty -and $null -ne $comparisonArgumentsProperty.Value) {
+        @($comparisonArgumentsProperty.Value | ForEach-Object { [string]$_ })
+    } else {
+        @($Manifest.emulator.arguments | ForEach-Object { [string]$_ })
+    }
+
+    return [ordered]@{
+        sha256 = [string]$Manifest.emulator.sha256
+        arguments = $comparisonArguments
+    }
+}
+
 $comparisonIdentities = foreach ($manifest in $manifests) {
     $identity = [ordered]@{
         repositoryCommit = $manifest.repositoryCommit
         repositoryDirty = $manifest.repositoryDirty
         target = $manifest.target
-        emulator = $manifest.emulator
+        emulator = Get-ComparisonEmulator -Manifest $manifest
         limits = $manifest.limits
         machine = $manifest.machine
     }
