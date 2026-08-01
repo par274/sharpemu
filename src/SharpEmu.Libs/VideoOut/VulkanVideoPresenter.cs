@@ -4041,6 +4041,10 @@ internal static unsafe class VulkanVideoPresenter
                 "vkCreateDebugUtilsMessengerEXT");
         }
 
+
+        [ThreadStatic]
+        private static string? _pendingShaderModuleDumpPath;
+
         private static unsafe uint DebugCallback(
             DebugUtilsMessageSeverityFlagsEXT severity,
             DebugUtilsMessageTypeFlagsEXT type,
@@ -4055,6 +4059,28 @@ internal static unsafe class VulkanVideoPresenter
                 _ => "[VULKAN][INFO]",
             };
             Console.Error.WriteLine($"{prefix} {message}");
+
+            // vkCreateShaderModule() still returns VK_SUCCESS from the driver
+            // even when the validation layer's embedded spirv-val flags the
+            // module as invalid - the failure only surfaces here, never as a
+            // non-Success Result our own Check() calls would catch. Flag it
+            // loudly so it isn't mistaken for a passive/advisory message.
+            if (severity == DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt &&
+                message is not null &&
+                message.Contains("vkCreateShaderModule", StringComparison.Ordinal))
+            {
+                var dumpPath = _pendingShaderModuleDumpPath;
+                var dumpHint = dumpPath is null
+                    ? "Set SHARPEMU_SHADER_SPIRV_DUMP_DIR to a directory to "
+                        + "capture every module's .spv bytes for offline "
+                        + "spirv-dis/spirv-val analysis."
+                    : $"Dumped module for this failure: {dumpPath}";
+
+                Console.Error.WriteLine(
+                    "[SHARPEMU][ERROR] A guest shader compiled to invalid SPIR-V."
+                    + "The shader module was created without an API-level error. {dumpHint}");
+            }
+
             return Vk.False;
         }
         private void CreateSurface()
@@ -6844,20 +6870,43 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
+        private static int _shaderModuleDumpSequence;
+
         private ShaderModule CreateShaderModule(byte[] code)
         {
-            fixed (byte* codePointer = code)
+            string? dumpPath = null;
+            var dumpDirectory = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_SPIRV_DUMP_DIR");
+            if (!string.IsNullOrWhiteSpace(dumpDirectory))
             {
-                var createInfo = new ShaderModuleCreateInfo
+                Directory.CreateDirectory(dumpDirectory);
+                
+                var sequence = Interlocked.Increment(ref _shaderModuleDumpSequence);
+                dumpPath = Path.Combine(dumpDirectory, $"{sequence:D4}.spv");
+                File.WriteAllBytes(dumpPath, code);
+            
+                _pendingShaderModuleDumpPath = dumpPath;
+            }
+
+            
+            try
+            {
+                fixed (byte* codePointer = code)
                 {
-                    SType = StructureType.ShaderModuleCreateInfo,
-                    CodeSize = (nuint)code.Length,
-                    PCode = (uint*)codePointer,
-                };
-                Check(
-                    _vk.CreateShaderModule(_device, &createInfo, null, out var module),
-                    "vkCreateShaderModule");
-                return module;
+                    var createInfo = new ShaderModuleCreateInfo
+                    {
+                        SType = StructureType.ShaderModuleCreateInfo,
+                        CodeSize = (nuint)code.Length,
+                        PCode = (uint*)codePointer,
+                    };
+                    Check(
+                        _vk.CreateShaderModule(_device, &createInfo, null, out var module),
+                        "vkCreateShaderModule");
+                    return module;
+                }
+            }
+            finally
+            {
+                _pendingShaderModuleDumpPath = null;
             }
         }
 
