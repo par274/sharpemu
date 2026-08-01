@@ -8,6 +8,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
 Status: the investigation narrowed the remainder to a managed-runtime segment
 hypothesis and an external Windows/Vulkan virtual-allocation boundary, but did
 not identify a named owner with enough evidence to justify a memory correction.
+The Vulkan host-allocation probe was a completed temporary experiment and is
+not retained on the final PR head. It did not identify the dominant owner, and
+its allocator and partial-lifecycle machinery added risk without resolving the
+1.675–2.173 GiB remainder. Normal execution continues to use Vulkan's default
+host allocator.
 The largest unresolved shape is a fully resident 512 MiB
 `Read/Write/WriteCombine` region. It is not an exact guest mapping, does not
 overlap a tracked Vulkan host-visible mapping, and was not requested by the
@@ -29,7 +34,9 @@ target and artifact paths are intentionally omitted from this tracked finding.
 | Item | Value |
 | --- | --- |
 | Source baseline | `a0d9134cacea945713f96ea3824e7694733daf7e` |
-| Diagnostic source revision | `766a44db0d470069b3038701df12d738805d6487` |
+| Diagnostic source revisions | `b798a77fc47eb3cd8830012d31969745a918f106` introduced the probe; `766a44db0d470069b3038701df12d738805d6487` hardened it for the temporary experiment. |
+| Experiment finding revisions | `20182fa77363a9dc7d999b3eabdb1306ae0e07de`, `1162336cf8bc651ae118173f9a89e6f9fadfee13` |
+| Probe cleanup revision | `5776346a012171b5f67d89c31405948aa71d971b` |
 | Title ID | `PPSA01341` |
 | Region / target version | Europe (`EP9000`) / `1.004.000` |
 | Target eboot SHA-256 | `22ED8843917CB16438B7B780998E408321F5CEBE79DD10F388AE59CFCA588306` |
@@ -64,8 +71,8 @@ vmmap64.exe -p <actual SharpEmu child PID> <output.csv>
 ```
 
 The existing corrected arithmetic reports four retained valid captures with a
-1.88–2.41 GiB `Private Data` working-set remainder. The correction matrix
-added a bounded, opt-in probe at the instance and device `VkAllocationCallbacks`
+1.88–2.41 GiB `Private Data` working-set remainder. The historical correction
+matrix added a bounded, opt-in probe at the instance and device `VkAllocationCallbacks`
 roots. Its `pfnAllocation`/`pfnReallocation`/`pfnFree` ledger records only
 scalar address, size, alignment, scope, ID, and time-frontier metadata. Its
 `pfnInternalAllocation`/`pfnInternalFree` path records only bounded scalar
@@ -80,6 +87,14 @@ The probe was deliberately limited to callbacks supplied at
 Child-object allocators and implementation/driver allocations outside this
 callback coverage remain unresolved. The probe therefore answers the
 instance/device callback boundary, not all Vulkan or driver allocations.
+
+The probe was removed after the experiment because its largest request was only
+133,120 bytes, its outstanding bookkeeping stayed near 2 MiB, and internal
+notifications were zero while the dominant remainder stayed unresolved. The
+extra allocator and partial-initialization lifecycle machinery was not
+justified for a boundary that still required elevated WPR attribution. The
+final PR head passes null allocation callbacks to instance/device creation and
+destruction, restoring the normal Vulkan default-allocation path.
 
 Before adding broader instrumentation, the installed Microsoft Windows
 Performance Recorder was checked:
@@ -99,9 +114,10 @@ in [SOURCES.md](SOURCES.md).
 
 ## Controlled run matrix
 
-The control and final diagnostics were run after commit `766a44d`, with the
-same published binary and unchanged target policy. Every run ended at the
-existing working-set safety cutoff; none reached the requested checkpoint.
+The control and final diagnostics were historical experiment runs after commit
+`766a44d`, with the same published binary and unchanged target policy. They are
+not measurements from the final cleanup head. Every run ended at the existing
+working-set safety cutoff; none reached the requested checkpoint.
 
 | Run | Diagnostics | VMMap captures | Duration | Peak process-tree WS | Peak private | Result |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
@@ -114,7 +130,7 @@ The runner does not permit VMMap-assisted capture when diagnostics are disabled,
 so the clean control has no VMMap export. This is a runner constraint, not an
 assumption that the control and diagnostic samples are synchronized.
 
-The direct `pfnAllocation` request ledger state at each matched VMMap
+The historical direct `pfnAllocation` request ledger state at each matched VMMap
 frontier in the three enabled runs was:
 
 | Run | Active entries | Active requested bytes | Allocation IDs | Events | Dropped entries/events | Duplicate/untracked releases | Largest request |
@@ -130,10 +146,12 @@ and unmatched frees were all zero. The absence is an observation about this
 loader/driver path, not proof that implementation allocations do not exist
 outside the callback coverage.
 
-The active-byte value is requested bytes in the callback ledger, not a VMMap
-resident value. The diagnostic structures are bounded and the normal path is
-disabled. Deterministic tests cover balance, reallocation, duplicate release,
-bound drops, disabled behavior, and callback-session lifetime.
+The active-byte value is requested bytes in the historical callback ledger, not
+a VMMap resident value. The diagnostic structures were bounded and disabled
+on the normal path. Historical deterministic tests covered balance,
+reallocation, duplicate release, bound drops, disabled behavior, callback
+contract failures, internal notifications, and callback-session lifetime. The
+probe and those focused tests are absent from the final PR head.
 
 The process-tree peak is not a synchronized ownership measurement. The enabled
 run peaks span 6.026–6.499 GiB versus 6.015 GiB for the control. The first two
@@ -339,8 +357,9 @@ leak,” or “driver allocation.”
 ## Recommended next boundary
 
 Run one controlled, elevated WPR `VirtualAllocation` trace with the existing
-target arguments and safety policy, preferably with the new probe disabled so
-the trace observes the ordinary allocator boundary. Start the trace before the
+target arguments and safety policy. The final PR already uses the ordinary
+Vulkan default allocator, so the trace observes the normal allocator boundary.
+Start the trace before the
 emulator, stop it after the working-set cutoff, and inspect the address and
 allocation stack for the 32,437.25 MiB, 512 MiB, 1 GiB, and related regions in
 WPA. Keep the ETL and WPA workspace outside Git. The correction trials did not
@@ -368,13 +387,24 @@ implemented in a separate reviewed change.
 
 ## Verification
 
-The narrow probe's focused deterministic tests passed: 15/15
+### Historical temporary experiment
+
+The probe revision `766a44d` passed 15/15
 `VulkanHostAllocationDiagnosticsTests`, including allocation-contract fault
 injection, internal-notification counters, and partial-root lifetime order.
-The self-contained Windows publish and final target matrix completed. The
-required Fast lane and final `git diff --check` are recorded with the
-documentation commit. The shader lane was not run because no shader or GPU
-semantics changed.
+Its self-contained Windows publish and four-run target matrix completed. Those
+results are historical experiment evidence only.
+
+### Final PR head after probe removal
+
+The final cleanup head removes the probe source and focused tests, restores
+null Vulkan allocation callbacks, and restores the pre-probe lifecycle path.
+Revision `5776346a012171b5f67d89c31405948aa71d971b` passed the Fast lane with
+801/801 tests, 0 errors, and the repository's 3 pre-existing compiler
+warnings; the stable-argument and VMMap-capture cleanup regressions also
+passed. No dedicated probe-focused tests remain. Final-head `git diff --check`
+passed after the documentation update. No target run or WPR trace is part of
+this cleanup.
 
 Raw VMMap CSVs, JSONL diagnostics, manifests, logs, WPR output, and any target-
 derived data remain outside Git under the investigation artifact root.

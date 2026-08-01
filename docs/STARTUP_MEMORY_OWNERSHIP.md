@@ -56,7 +56,7 @@ The late 14.04 GiB sample had 6.61 GiB host-committed guest mappings and
 memory. The remaining roughly 1.93 GiB is not assigned by this investigation;
 the live-GC comparison gives about 2.08 GiB because it includes a different
 managed-memory view. Explicit Vulkan device-memory totals are separate from
-Windows process-private memory. The instance/device Vulkan `pfnAllocation`,
+Windows process-private memory. The completed temporary instance/device Vulkan `pfnAllocation`,
 `pfnReallocation`, and `pfnFree` request ledger did not identify that remainder,
 and informational `pfnInternalAllocation`/`pfnInternalFree` notifications were
 silent in the correction matrix. Child-object allocators, implementation
