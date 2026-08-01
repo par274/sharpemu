@@ -3606,6 +3606,7 @@ internal static unsafe class VulkanVideoPresenter
         // the sample provider uses a volatile read to close the shutdown race.
         private bool _diagnosticsEnabled;
         private IDisposable? _memoryDiagnosticsProvider;
+        private VulkanHostAllocationDiagnostics? _vulkanHostAllocationDiagnostics;
         private string _diagnosticPhase = "not-started";
         private string _diagnosticActiveWorkSummary = string.Empty;
         private string _diagnosticActiveQueueName = string.Empty;
@@ -4433,6 +4434,7 @@ internal static unsafe class VulkanVideoPresenter
                     hostBufferRegisteredAllocations = hostBuffers.RegisteredAllocations,
                     textureLifetime = _resourceLifetimeDiagnostics?.GetSnapshot(),
                 },
+                vulkanHostAllocations = _vulkanHostAllocationDiagnostics?.GetSnapshot(),
                 guestWait = new
                 {
                     outstanding = waits.Outstanding,
@@ -4456,6 +4458,7 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     _resourceLifetimeDiagnostics = new VulkanResourceLifetimeDiagnostics();
                     _diagnosticBatchTextureResourceIds = new List<long>(64);
+                    _vulkanHostAllocationDiagnostics = VulkanHostAllocationDiagnostics.Start();
                     _memoryDiagnosticsProvider =
                         MemoryDiagnostics.RegisterSampleProvider(GetDiagnosticSnapshot);
                 }
@@ -4816,7 +4819,12 @@ internal static unsafe class VulkanVideoPresenter
 
                 try
                 {
-                    Check(_vk.CreateInstance(&createInfo, null, out _instance), "vkCreateInstance");
+                    Check(
+                        _vk.CreateInstance(
+                            &createInfo,
+                            VulkanHostAllocationDiagnostics.CurrentCallbacks,
+                            out _instance),
+                        "vkCreateInstance");
                     if (!_vk.TryGetInstanceExtension(_instance, out _surfaceApi))
                     {
                         throw new InvalidOperationException("VK_KHR_surface is unavailable.");
@@ -5234,7 +5242,13 @@ internal static unsafe class VulkanVideoPresenter
                     PpEnabledExtensionNames = extensions,
                 };
 
-                Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
+                Check(
+                    _vk.CreateDevice(
+                        _physicalDevice,
+                        &createInfo,
+                        VulkanHostAllocationDiagnostics.CurrentCallbacks,
+                        out _device),
+                    "vkCreateDevice");
             }
             finally
             {
@@ -19392,7 +19406,9 @@ internal static unsafe class VulkanVideoPresenter
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);
                     _pipelineCache = default;
                 }
-                _vk.DestroyDevice(_device, null);
+                _vk.DestroyDevice(
+                    _device,
+                    VulkanHostAllocationDiagnostics.CurrentCallbacks);
                 _device = default;
             }
             if (_surface.Handle != 0)
@@ -19402,9 +19418,14 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (_instance.Handle != 0)
             {
-                _vk.DestroyInstance(_instance, null);
+                _vk.DestroyInstance(
+                    _instance,
+                    VulkanHostAllocationDiagnostics.CurrentCallbacks);
                 _instance = default;
             }
+
+            _vulkanHostAllocationDiagnostics?.Dispose();
+            _vulkanHostAllocationDiagnostics = null;
         }
 
         private void RecreateSwapchainResources(string operation, Result result)
