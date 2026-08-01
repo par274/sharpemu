@@ -79,12 +79,52 @@ public sealed class MemoryDiagnosticsTests
             Assert.Equal(
                 "synthetic-event",
                 eventRoot.GetProperty("event").GetString());
+            Assert.True(eventRoot.GetProperty("elapsedMilliseconds").GetInt64() >= 0);
             Assert.Equal(
                 7,
                 eventRoot.GetProperty("data").GetProperty("sequence").GetInt32());
             Assert.Equal(
                 4096UL,
                 eventRoot.GetProperty("data").GetProperty("payloadBytes").GetUInt64());
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public void SessionWritesBoundedCurrentStateProvider()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "sharpemu-memory-diagnostics",
+            $"{Guid.NewGuid():N}.jsonl");
+
+        try
+        {
+            using (MemoryDiagnostics.RegisterSampleProvider(
+                       static () => new
+                       {
+                           phase = "synthetic-phase",
+                           pendingBytes = 1234UL,
+                       }))
+            using (MemoryDiagnosticsSession.Start(path, TimeSpan.FromHours(1)))
+            {
+            }
+
+            var records = File.ReadAllLines(path);
+            using var sample = JsonDocument.Parse(records[^1]);
+            var diagnostics = sample.RootElement.GetProperty("diagnostics");
+            Assert.Equal(
+                "synthetic-phase",
+                diagnostics.GetProperty("phase").GetString());
+            Assert.Equal(
+                1234UL,
+                diagnostics.GetProperty("pendingBytes").GetUInt64());
         }
         finally
         {

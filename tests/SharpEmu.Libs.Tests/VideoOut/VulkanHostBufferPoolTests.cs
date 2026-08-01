@@ -52,6 +52,24 @@ public sealed class VulkanHostBufferPoolTests
         Assert.False(pool.Return(new VkBuffer(9), new DeviceMemory(10)));
     }
 
+    [Fact]
+    public void DiagnosticsSnapshotReportsCachedAndRegisteredOwnership()
+    {
+        using var pool = new VulkanHostBufferPool(1024, _ => { });
+        var key = new VulkanHostBufferPoolKey(BufferUsageFlags.StorageBufferBit, 256);
+        var allocation = Allocation(11, 12, key);
+
+        pool.Register(allocation);
+        Assert.Equal(
+            new VulkanHostBufferPoolDiagnostics(0, 0, 1),
+            pool.GetDiagnosticsSnapshot());
+
+        Assert.True(pool.Return(allocation.Buffer, allocation.Memory));
+        Assert.Equal(
+            new VulkanHostBufferPoolDiagnostics(256, 1, 1),
+            pool.GetDiagnosticsSnapshot());
+    }
+
     private static VulkanHostBufferAllocation Allocation(
         ulong buffer,
         ulong memory,
