@@ -5,22 +5,27 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Startup private-data ownership
 
-Status: the investigation narrowed the remainder to a managed-runtime segment
-hypothesis and an external Windows/Vulkan virtual-allocation boundary, but did
-not identify a named owner with enough evidence to justify a memory correction.
+Status: the elevated WPR `VirtualAllocation` trace identified the commit
+boundary for the large reserved shape as .NET GC segment management and the
+512 MiB, 1 GiB, and visible 64/32 MiB shapes as Vulkan/graphics
+implementation virtual-allocation boundaries. It did not prove the owner of
+the large reservation event itself, physical placement of Vulkan memory, or an
+incorrect lifetime, so no memory correction is justified.
 The Vulkan host-allocation probe was a completed temporary experiment and is
 not retained on the final PR head. It did not identify the dominant owner, and
 its allocator and partial-lifecycle machinery added risk without resolving the
 1.675–2.173 GiB remainder. Normal execution continues to use Vulkan's default
-host allocator.
-The largest unresolved shape is a fully resident 512 MiB
+host allocator. The WPR trace observed the normal allocator path through the
+existing `VulkanMemoryDiagnostics` seam, which calls Vulkan with null
+allocation callbacks.
+The largest previously-unresolved shape is a fully resident 512 MiB
 `Read/Write/WriteCombine` region. It is not an exact guest mapping, does not
 overlap a tracked Vulkan host-visible mapping, and was not requested by the
-application's `VirtualAlloc` paths. The instance/device `pfnAllocation`,
+application's direct `VirtualAlloc` paths; WPR attributes its commit to an
+explicit `vkAllocateMemory` call. The instance/device `pfnAllocation`,
 `pfnReallocation`, and `pfnFree` request ledger still saw no request larger
 than 133,120 bytes, and the informational internal-allocation callbacks
-reported zero notifications. The next boundary is an elevated Windows
-Performance Recorder `VirtualAllocation` trace with allocation stacks.
+reported zero notifications. The WPR result is recorded below.
 
 This finding records observations, inferences, and uncertainty separately. It
 does not call the remainder a native leak, managed leak, driver allocation, or
@@ -33,13 +38,14 @@ target and artifact paths are intentionally omitted from this tracked finding.
 
 | Item | Value |
 | --- | --- |
-| Source baseline | `a0d9134cacea945713f96ea3824e7694733daf7e` |
+| Source baseline | `a899e62d55f5e5ec7f690f897867e9c6df29123c` |
 | Diagnostic source revisions | `b798a77fc47eb3cd8830012d31969745a918f106` introduced the probe; `766a44db0d470069b3038701df12d738805d6487` hardened it for the temporary experiment. |
 | Experiment finding revisions | `20182fa77363a9dc7d999b3eabdb1306ae0e07de`, `1162336cf8bc651ae118173f9a89e6f9fadfee13` |
 | Probe cleanup revision | `5776346a012171b5f67d89c31405948aa71d971b` |
 | Title ID | `PPSA01341` |
 | Region / target version | Europe (`EP9000`) / `1.004.000` |
 | Target eboot SHA-256 | `22ED8843917CB16438B7B780998E408321F5CEBE79DD10F388AE59CFCA588306` |
+| Published executable SHA-256 | `4955155317A1F096B46A34DC4B43BF7B0F5F37E61018B1A5B25424A1B4C3F893` |
 | Route / checkpoint | startup-to-character-creation / character creation nickname prompt |
 | Host | Windows 11 Pro `10.0.26200`, 16 GiB |
 | CPU | 12th Gen Intel Core i5-12400F, 12 logical processors |
@@ -50,9 +56,9 @@ target and artifact paths are intentionally omitted from this tracked finding.
 | Safety policy | 6 GiB process-tree working-set limit, existing page-file configuration, 900 s wall limit, 250 ms sampling |
 
 The target identity, arguments, limit, and machine values are recorded in the
-raw run manifests outside Git. The final committed diagnostic and control
-publishes used the same emulator binary SHA-256:
-`61081837A19C4864C17CB49663B01479A654B7E17B68115330C5F064BB310F91`.
+raw run manifests outside Git. The control and trace used the published
+binary SHA-256 recorded above. A local portable-PDB build was made only for
+WPA symbol lookup; it did not replace or instrument the published executable.
 
 ## Method and tools
 
@@ -70,9 +76,9 @@ The VMMap tool was Microsoft VMMap `3.4`, invoked by the existing runner as:
 vmmap64.exe -p <actual SharpEmu child PID> <output.csv>
 ```
 
-The existing corrected arithmetic reports four retained valid captures with a
-1.88–2.41 GiB `Private Data` working-set remainder. The historical correction
-matrix added a bounded, opt-in probe at the instance and device `VkAllocationCallbacks`
+The existing corrected arithmetic reports a 1.675–2.173 GiB `Private Data`
+working-set remainder in the current baseline matrix. The historical
+correction matrix added a bounded, opt-in probe at the instance and device `VkAllocationCallbacks`
 roots. Its `pfnAllocation`/`pfnReallocation`/`pfnFree` ledger records only
 scalar address, size, alignment, scope, ID, and time-frontier metadata. Its
 `pfnInternalAllocation`/`pfnInternalFree` path records only bounded scalar
@@ -96,21 +102,26 @@ justified for a boundary that still required elevated WPR attribution. The
 final PR head passes null allocation callbacks to instance/device creation and
 destruction, restoring the normal Vulkan default-allocation path.
 
-Before adding broader instrumentation, the installed Microsoft Windows
-Performance Recorder was checked:
+The elevated WPR run was checked and recorded as follows:
 
 ```text
 Microsoft Windows Performance Recorder Version 10.0.26100
-wpr -profiles
+wpr -status                         -> WPR is not recording
 wpr -start VirtualAllocation -filemode
+wpr -status                         -> Dropped event: 0; Logging mode: File
+wpr -stop <trace.etl> "SharpEmu startup VirtualAllocation attribution"
+wpr -status                         -> WPR is not recording
 ```
 
-The `VirtualAllocation` start failed in the available non-elevated session with
-`0x80070005 (Access is denied)`. No ETL was produced. No full heap dump or
-`dotnet-gcdump` was started: the existing GC segment/counter evidence was
-sufficient to choose a narrower next boundary, and a dump would add more
-intrusion under the 6 GiB limit. The WPR profile and VMMap sources are indexed
-in [SOURCES.md](SOURCES.md).
+The trace used WPR `10.0.26100.8875`, WPA `11.8.423.12582` (Store package
+`11.8.423.0`), and VMMap `3.4`. The WPR system collector reported
+`VirtualAllocation` and stack collection with `Events Lost: 0`. WPA's official
+exporter successfully produced the required `VirtualAlloc Commit LifeTimes`
+and `Total Commit` tables after loading Microsoft symbols and the local SharpEmu
+PDBs. The in-app WPA GUI control path was unavailable in this session; this
+exporter is the same WPA analysis engine and the exported tables contain the
+required columns and stacks. No full heap dump or `dotnet-gcdump` was started.
+The WPR profile and VMMap sources are indexed in [SOURCES.md](SOURCES.md).
 
 ## Controlled run matrix
 
@@ -259,17 +270,18 @@ The reconciliation is intentionally not a sum of every diagnostic counter:
 
 | Category | Treatment |
 | --- | --- |
-| Total VMMap `Private Data` working set | The measured parent category, 4,792.8–5,239.4 MiB in the correction matrix; the retained prior captures were 5,052.4–5,506.8 MiB. |
-| Exact guest `Private Data` | Subtracted once by exact guest interval and VMMap type, 2,736.7–3,078.0 MiB in the correction matrix. |
-| Exact guest `Thread Stack` | Reported separately, 130.3–132.7 MiB in the correction matrix; not subtracted from `Private Data` because it is a different VMMap class. |
+| Total VMMap `Private Data` working set | The control capture measured 5,195.641 MiB; the trace capture measured 5,407.508 MiB. These are capture frontiers, not owner totals. |
+| Exact guest `Private Data` | Subtracted once by exact guest interval and VMMap type: 3,009.254 MiB in control and 2,875.957 MiB in the trace. |
+| Exact guest `Thread Stack` | Reported separately: 131.344 MiB in control and 130.781 MiB in the trace; not subtracted from `Private Data` because it is a different VMMap class. |
 | Managed GC/runtime | GC committed and heap-used counters are overlapping evidence for the large reserved segment; they are not added to the remainder and do not prove object retention. |
 | CPU backend/generated code and data | Source audit found small stubs, TLS/control storage, context frames, and worker/abort stacks with matching frees. The largest identified worker stack reservation is 4 MiB; no source path explains the 512 MiB/1 GiB signatures. No separate large CPU-backend owner is claimed. |
 | Explicit Vulkan device memory | Tracked separately in `vulkan.device-memory`; excluded from process-private/resident-RAM totals. |
-| Vulkan mapped host-visible memory | Address-correlated separately; at most 28.5 MiB of matched working set in these scans and no overlap with a listed top region. |
+| Vulkan mapped host-visible memory | 81.908 MiB in the control sample and 53.081 MiB in the trace sample; 82 trace mappings had zero address overlap with the target regions. |
 | Vulkan instance/device `pfnAllocation` request ledger | At most 1,871,478 outstanding requested bytes in the correction matrix; zero bookkeeping failures, drops, duplicate releases, and untracked releases. This is a subset of callback requests, not an additive VMMap owner. |
 | Vulkan `pfnInternalAllocation` notifications | Zero allocation/free notifications and zero current/peak/largest/dropped/unmatched counters in all three diagnostic runs. These callbacks are informational and do not account for implementation allocations outside their coverage. |
 | Cache, staging, deferred destruction, queue | Cache image is device-local accounting; staging is 0.5 MiB; deferred is zero; late queue is zero. These counters are not added to the remainder. |
-| Remaining classification remainder | 1.675–2.173 GiB per correction-matrix matched capture, in addition to the retained prior 1.963–2.428 GiB range; dominated by the stable region signatures above and not assigned to a named owner. |
+| Target-region contribution | In the trace VMMap, the three primary regions contributed 2,139.164 MiB of private working set. The 44 visible related 64/32 MiB regions contributed another 235.523 MiB: 172.656 MiB WriteCombine and 62.867 MiB RW. The combined 2,374.688 MiB is a VMMap contribution, not an additional diagnostic counter. |
+| Remaining classification remainder | Control: 2,186.387 MiB (2.135 GiB); trace: 2,531.551 MiB (2.472 GiB). The control is within the established 1.675–2.173 GiB range; the trace was a different, WPR-instrumented frontier and is not averaged with prior runs. |
 
 The source audit also found no application `PAGE_WRITECOMBINE` request. The
 Windows host-memory wrapper strips that modifier from its generic protection
@@ -290,6 +302,27 @@ driver owner.
   frontiers while its address and reserved size stay fixed within a process.
 * The top regions are outside exact guest intervals and tracked host-map
   intervals. VMMap gives them no `Details` owner.
+* The trace child was PID `20204`. The WPR CSV contained a separate
+  `SharpEmu.exe (1836)` process, but all attribution below was filtered to the
+  exact VMMap child instance `SharpEmu.exe (20204)`.
+* The 32,437.25 MiB VMMap row had base `0x000001F687CD0000`. WPR's commit
+  lifetime view had no reservation row at that base, but all 5,864 recorded
+  commits whose addresses fell inside the VMMap interval had .NET GC segment
+  frames. The interval was 1,562.352 MiB committed and 1,558.805 MiB private
+  working set in the paired VMMap capture.
+* The 512 MiB row at `0x000001FEFF190000` matched one WPR commit lifetime of
+  512 MiB. Its stack reached `VulkanMemoryDiagnostics::Allocate`,
+  `Silk.NET.Vulkan.Vk::AllocateMemory`, `vulkan-1.dll`, and
+  `nvoglv64.dll`.
+* The 1 GiB row at `0x000001FE95370000` matched 427 smaller WPR commit
+  lifetimes totaling 90.502 MiB over their lifetimes. The VMMap row was
+  75.625 MiB committed and 68.359 MiB resident. Most stacks crossed SDL3,
+  the Vulkan loader, and NVIDIA graphics implementation; nine rows also
+  crossed the explicit SharpEmu Vulkan allocation seam.
+* Forty-four visible related 64/32 MiB rows had 304 matching WPR commit
+  lifetimes. Every row reached either the explicit SharpEmu Vulkan allocation
+  seam or the SDL/Vulkan/graphics implementation boundary. No target or
+  related row had a WPR lifetime without a recorded decommit.
 * The instance/device `pfnAllocation` request ledger had zero dropped records,
   zero duplicate releases, zero untracked releases, zero bookkeeping failures,
   and a maximum request of 133,120 bytes in each correction trial. The
@@ -301,77 +334,189 @@ driver owner.
 
 ### Inferred
 
-* The 32,437.25 MiB shape is most consistent with a managed GC/runtime virtual
-  segment. Its changing committed/resident portion and relationship to GC
-  counters support that interpretation, but VMMap does not classify it as
-  `.NET Managed Heap` and the evidence does not establish object ownership.
-* The 512 MiB WriteCombine shape is most consistent with an external
-  Windows/Vulkan implementation virtual-allocation boundary because the
-  application source has no matching request, the root `pfnAllocation` ledger
-  did not see it, and the informational internal-allocation callbacks were
-  silent. “External” is a boundary classification, not a claim that the
-  NVIDIA driver owns or leaked it.
-* The 1 GiB and smaller WriteCombine/RW shapes are related candidates, but
-  their owner remains unresolved.
+* The 32,437.25 MiB shape's recorded commit boundary is the .NET GC runtime:
+  representative stacks are `SharpEmu.exe!GCInterface_AllocateNewArray` ->
+  `WKS::gc_heap::grow_heap_segment` -> `GCToOSInterface::VirtualCommit` ->
+  `KernelBase.dll!VirtualAlloc`, and
+  `SharpEmu.exe!RhpNewVariableSizeObject` -> `WKS::GCHeap::Alloc`. This
+  identifies managed segment management for the commits, not retained-object
+  ownership and not the reservation call itself.
+* The 512 MiB shape is an explicit Vulkan `vkAllocateMemory` call boundary
+  from `SharpEmu.Libs.dll!SharpEmu.Libs.VideoOut.VulkanMemoryDiagnostics::Allocate`
+  through `Silk.NET.Vulkan.dll!Silk.NET.Vulkan.Vk::AllocateMemory`, the
+  `vulkan-1.dll` loader, and `nvoglv64.dll`. This is a process-private virtual
+  backing allocation associated with Vulkan device-memory work; it is not the
+  separate `vulkan.device-memory` counter domain. It does not prove NVIDIA
+  ownership or an incorrect driver lifetime.
+* The 1 GiB and visible 64/32 MiB shapes have the same Vulkan/graphics
+  implementation boundary. The 1 GiB interval is mostly implementation-side
+  commit activity reached through SDL3/loader/NVIDIA frames, with a smaller
+  set of explicit `vkAllocateMemory` frames. The related rows are predominantly
+  explicit Vulkan allocation frames.
 
 ### Uncertain
 
-* The root callback probe does not cover child Vulkan object calls that pass a
-  null allocator or implementation/driver allocations outside the supplied
-  `VkAllocationCallbacks` roots. The internal notification callbacks being
-  silent does not close that boundary.
-* The non-elevated WPR attempt did not produce allocation stacks. Without that
-  evidence, the external boundary cannot be named more precisely.
-* A .NET heap dump may be useful only if WPR or another lower-intrusion trace
-  first attributes the large RW segment to managed object retention. It was not
-  justified for this investigation.
+* WPR `VirtualAllocation Commit LifeTimes` attributes commits, not a
+  reservation-only call. The large row's reservation owner is therefore not
+  named by this trace even though every recorded commit inside it has a GC
+  segment stack.
+* `vulkan-1.dll` and `nvoglv64.dll` frames report `<PDB not found>`; SDL3
+  frames report `<Missing ImageId event>`. Public symbols resolved the Windows
+  and kernel frames, and local SharpEmu PDBs resolved the application frames.
+  No module-plus-offset was available for the NVIDIA implementation in this
+  trace.
+* WPR decommit at process termination establishes that the traced lifetimes
+  were not still live at ETL end. It does not prove that the corresponding
+  application or driver release happened during normal teardown, so it cannot
+  establish an incorrect lifetime.
+* A .NET EventPipe or GC experiment is warranted only later, and only to
+  distinguish normal segment management from retained objects after this WPR
+  boundary. It was not performed here.
 * The 6.499 GiB process-tree peak in correction diagnostic trial 3 prevents a
   claim that instrumentation has no effect on peak timing. It does not change
   the repeated region shapes, zero internal notifications, or balanced request
   ledger.
 
-## Ranked hypotheses and falsification
+## WPR result and next boundary
 
-1. **Managed GC/runtime virtual segment — likely shape, not a leak finding.**
-   Falsified if an address-aware trace attributes the 32,437.25 MiB reservation
-   to a non-managed caller, or if the reservation/commit movement does not
-   correlate with runtime segment activity across a matched frontier.
-2. **External Windows/Vulkan virtual-allocation boundary — strongest unresolved
-   owner boundary.** Falsified if WPR allocation stacks show SharpEmu or a
-   managed allocator requesting the 512 MiB WriteCombine region, or if a
-   synchronized child-object/implementation callback boundary observes the
-   same block. The zero internal notifications do not falsify this hypothesis
-   because those callbacks are informational and were not invoked here.
-3. **Related 1 GiB and 64/32 MiB regions from the same external or runtime
-   boundary.** Falsified if address/stack attribution separates them into
-   distinct known owners or if they disappear without a corresponding lifetime
-   event.
-4. **CPU backend, libc, or ordinary managed object retention as the dominant
-   explanation.** Currently unsupported by source scale, matching releases,
-   and the callback/GC evidence. Falsified in either direction by an address
-   ledger or allocation stack that accounts for most of the remainder.
+### Run and validity
 
-The investigation does not promote any hypothesis to “native leak,” “managed
-leak,” or “driver allocation.”
+The required minimum matrix used the same Release publish, target arguments,
+diagnostics placeholder, near-cutoff VMMap capture, and safety policy:
 
-## Recommended next boundary
+| Run | Run ID | Exact VMMap child | Result | Peak WS / private | VMMap |
+| --- | --- | ---: | --- | ---: | --- |
+| Normal control | `20260801T202928523Z-a899e62-trial-01` | `15436` | working-set limit; 47,236 ms | 6.330 / 11.535 GiB | exit 0, near-cutoff capture |
+| Elevated WPR trace | `20260801T203126586Z-a899e62-trial-01` | `20204` | working-set limit; 34,178 ms | 6.644 / 12.201 GiB | exit 0, near-cutoff capture |
 
-Run one controlled, elevated WPR `VirtualAllocation` trace with the existing
-target arguments and safety policy. The final PR already uses the ordinary
-Vulkan default allocator, so the trace observes the normal allocator boundary.
-Start the trace before the
-emulator, stop it after the working-set cutoff, and inspect the address and
-allocation stack for the 32,437.25 MiB, 512 MiB, 1 GiB, and related regions in
-WPA. Keep the ETL and WPA workspace outside Git. The correction trials did not
-expose any internal allocation notifications, so no narrower notification-led
-follow-up is justified.
+The trace ETL is valid: it was saved by `wpr -stop`, is 349,175,808 bytes, and
+the WPR status and active system collector both reported zero dropped/lost
+events. The exact WPR process filter was `SharpEmu.exe (20204)`; the trace also
+contained `SharpEmu.exe (1836)`, which was excluded. WPA exported both required
+tables for that exact child. No WPR session was active before start, and no
+SharpEmu, VMMap, or WPR process remained after cleanup. The control had no WPR
+session by design.
 
-If WPR attributes the large reserved region to the .NET runtime but does not
-answer whether objects are retained, use the smallest subsequent EventPipe or
-GC diagnostic that can answer that specific question. If it attributes the
-WriteCombine region to a Vulkan implementation boundary, repeat with the
-narrowest valid loader/driver diagnostic available. Do not add Vulkan callbacks
-for every child object until the trace shows that callback coverage is needed.
+The paired trace VMMap category arithmetic was 5,407.508 MiB `Private Data`
+working set minus 2,875.957 MiB of exact guest `Private Data`, or 2,531.551
+MiB (2.472 GiB) of classification remainder. The paired control was 5,195.641
+minus 3,009.254 = 2,186.387 MiB (2.135 GiB), within the established baseline
+range. The trace frontier is not averaged with the control or prior runs.
+
+### Address correlation and attribution
+
+The trace-side VMMap CSV and WPR `VirtualAlloc Commit LifeTimes` table were
+joined by exact child PID and address interval. WPR `Size` is a committed
+lifetime amount; it is not resident RAM. VMMap supplies the current committed
+and resident values.
+
+| VMMap region | VMMap reserved / committed / private WS | Protection | WPR interval result | Release at ETL end |
+| --- | ---: | --- | --- | --- |
+| `0x000001F687CD0000` | 32,437.250 / 1,562.352 / 1,558.805 MiB | RW | 5,864 commits inside the interval; 3,093.921 MiB lifetime sum; commit 1.193–34.904 s; decommit 2.595–35.326 s | All rows decommitted during process cleanup; reservation-only owner not present in this commit view |
+| `0x000001FEFF190000` | 512 / 512 / 512 MiB | RW/WriteCombine | One 512 MiB commit at 19.189 s; decommit 35.283 s | No live row at ETL end; process-cleanup decommit, not proof of normal `vkFreeMemory` timing |
+| `0x000001FE95370000` | 1,024 / 75.625 / 68.359 MiB | RW | 427 commits inside the interval; 90.502 MiB lifetime sum; commit 7.177–34.901 s; decommit 18.415–35.326 s | All rows decommitted during process cleanup |
+| 44 related 64/32 MiB rows, including `0x000001FF6B5D0000` (64 MiB) and `0x000001FF67610000` (63.75 MiB) | 1,471.500 / 1,460.148 / 235.523 MiB aggregate | 42 WC, 2 RW | 304 commits; 1,460.865 MiB lifetime sum; commit 7.380–22.317 s; decommit 7.380–35.326 s | No live row at ETL end |
+
+The large reservation itself had no exact WPR reservation row at its VMMap
+base. Its 5,864 address-contained commit rows all had a .NET GC boundary. A
+representative stack was:
+
+```text
+SharpEmu.exe!GCInterface_AllocateNewArray
+  -> SharpEmu.exe!WKS::GCHeap::Alloc
+  -> SharpEmu.exe!WKS::gc_heap::grow_heap_segment
+  -> SharpEmu.exe!WKS::gc_heap::virtual_commit
+  -> SharpEmu.exe!GCToOSInterface::VirtualCommit
+  -> KernelBase.dll!VirtualAlloc
+```
+
+Other rows reached `SharpEmu.exe!RhpNewVariableSizeObject` /
+`RhpGcAlloc` from AGC or presenter work before entering the same GC heap
+segment path. This is managed segment commitment evidence, not evidence that a
+particular object retained the pages.
+
+The exact 512 MiB stack was:
+
+```text
+SharpEmu.Libs.dll!SharpEmu.Libs.VideoOut.VulkanMemoryDiagnostics::Allocate
+  -> Silk.NET.Vulkan.dll!Silk.NET.Vulkan.Vk::AllocateMemory
+  -> vulkan-1.dll!<PDB not found>
+  -> nvoglv64.dll!<PDB not found>
+  -> DXCore.dll!D3DKMTCreateAllocation
+  -> dxgkrnl.sys!DxgkCreateAllocation
+  -> dxgmms2.sys!VIDMM_RECYCLE_HEAP_MGR::Allocate
+```
+
+The existing source seam calls `vkAllocateMemory` with a null allocator and
+only records explicit Vulkan device-memory objects when diagnostics are
+enabled. The VMMap 512 MiB private working set is therefore associated with a
+normal explicit Vulkan allocation path, while the paired diagnostics sample's
+`vulkan.device-memory` value (1.787 GiB) remains a separate device domain and
+is not added to process-private memory.
+
+The 1 GiB interval's exact base commit was 0.188 MiB and started in
+`VulkanVideoPresenter` / `SdlHostWindow::CreateWindow`, then crossed
+`SDL3.dll!<Missing ImageId event>`, `vulkan-1.dll!<PDB not found>`, and
+`nvoglv64.dll!<PDB not found>`. Nine of the 427 interval rows (1.004 MiB
+lifetime) also had the explicit `VulkanMemoryDiagnostics::Allocate` ->
+`Vk::AllocateMemory` stack. The remaining 418 rows (89.498 MiB lifetime) were
+at the SDL/Vulkan/NVIDIA graphics-implementation boundary. WPR therefore did
+not record a single 1 GiB Vulkan allocation; it recorded many smaller commits
+inside the VMMap reservation.
+
+The 44 related rows had the same two stack families: 234 rows / 1,417.966 MiB
+lifetime through `VulkanMemoryDiagnostics::Allocate` and 70 rows / 42.899 MiB
+lifetime through SDL/Vulkan/NVIDIA or graphics initialization. Examples
+include the 64 MiB `0x000001FF6B5D0000` row, which reached the explicit
+`vkAllocateMemory` seam through `VulkanDetilePass::CreateBuffer`, and the RW
+32 MiB `0x000001FED8580000` row, whose dominant 101 commits reached the same
+seam. No related row had a managed-GC or guest-host-memory stack.
+
+### `Total Commit` cross-check
+
+For `SharpEmu.exe (20204)`, WPA's `Memory > Total Commit` export contained only
+`Commit Type = Virtual Alloc`. Its largest rows were the known 4,093.563 MiB
+guest mapping through `KernelMapDirectMemory`, the 512 MiB Vulkan row above,
+the known 418 MiB guest stack mapping, and the known 352 MiB guest virtual
+range. This confirms the process/commit-stack view and separates the exact
+guest mappings from the Vulkan interval join; it does not turn commit size
+into resident size.
+
+### Observation, inference, uncertainty, and remaining questions
+
+Observed: the control and trace independently reproduce the same three size
+signatures and the trace's 44 visible related rows. The WPR interval joins
+name a .NET GC commit boundary for the large row and Vulkan/graphics
+implementation boundaries for all other target rows. The 82 trace host-visible
+mapping addresses have zero overlap with the target VMMap intervals.
+
+Inferred: the large row is normal-or-retained managed GC segment management;
+the 512 MiB row is an explicit Vulkan allocation reaching the NVIDIA/DXG
+implementation; the 1 GiB and related rows are implementation-side Vulkan
+virtual backing reached through the same graphics boundary. These are
+boundaries, not leak classifications.
+
+Uncertain: the WPR profile did not attribute the large reservation-only event;
+the NVIDIA and Vulkan loader frames have no public PDB/offset in this trace;
+and process-exit decommit does not prove the normal source lifetime. WPR also
+does not identify whether the Vulkan-backed pages are physically resident in
+system RAM or device-local memory; VMMap only reports the process working set.
+
+Remaining questions: the current attribution would be undermined only if the
+exact PID/address join, exported WPR stack data, or VMMap correlation were
+shown to be invalid. A reservation-aware trace can identify the owner of the
+large reservation without changing the observed GC commit attribution.
+EventPipe or GC analysis can answer object-retention questions; it does not
+rewrite the commit stack. Normal-teardown tracing can answer Vulkan release
+timing; it does not change the allocation origin. A repeat trace may reveal
+additional allocation paths without invalidating the paths observed here.
+
+Next boundary: if the large region remains operationally concerning, run the
+smallest later EventPipe or GC segment/object experiment needed to distinguish
+normal segment management from retained objects. Do not perform it as part of
+this WPR finding. For the Vulkan shapes, preserve the existing normal allocator
+and use a narrower loader/driver diagnostic only if a future question requires
+physical placement or normal-destruction proof. No correction is justified.
 
 ## Correction decision
 
@@ -395,16 +540,18 @@ injection, internal-notification counters, and partial-root lifetime order.
 Its self-contained Windows publish and four-run target matrix completed. Those
 results are historical experiment evidence only.
 
-### Final PR head after probe removal
+### Current branch after probe removal
 
 The final cleanup head removes the probe source and focused tests, restores
 null Vulkan allocation callbacks, and restores the pre-probe lifecycle path.
-Revision `5776346a012171b5f67d89c31405948aa71d971b` passed the Fast lane with
-801/801 tests, 0 errors, and the repository's 3 pre-existing compiler
-warnings; the stable-argument and VMMap-capture cleanup regressions also
-passed. No dedicated probe-focused tests remain. Final-head `git diff --check`
-passed after the documentation update. No target run or WPR trace is part of
-this cleanup.
+The investigation source revision is `a899e62d55f5e5ec7f690f897867e9c6df29123c`.
+The published Release build had
+the SHA-256 recorded above and the symbol-only portable-PDB build did not
+change production behavior. The required Fast lane produced 801/801 tests,
+0 errors, and 0 warnings; no dedicated probe-focused tests remain. The control
+and trace runs and WPR validity are recorded in the result section above.
+`git diff --check` passed; no shader lane is applicable
+because shader and GPU behavior were unchanged.
 
 Raw VMMap CSVs, JSONL diagnostics, manifests, logs, WPR output, and any target-
 derived data remain outside Git under the investigation artifact root.
