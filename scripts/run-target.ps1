@@ -23,6 +23,7 @@ Set-StrictMode -Version Latest
 
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 . (Join-Path $PSScriptRoot "vmmap-capture-lifecycle.ps1")
+. (Join-Path $PSScriptRoot "target-memory-safety.ps1")
 
 function Resolve-RepositoryPath {
     param(
@@ -392,6 +393,7 @@ $limits = Get-RequiredProperty -Object $config -Name "limits"
 $wallTimeSeconds = [int](Get-RequiredProperty -Object $limits -Name "wallTimeSeconds")
 $workingSetGiB = [double](Get-RequiredProperty -Object $limits -Name "workingSetGiB")
 $sampleIntervalMilliseconds = [int](Get-RequiredProperty -Object $limits -Name "sampleIntervalMilliseconds")
+$hostMemoryThresholds = Get-HostMemoryThresholds -Limits $limits
 
 if ($wallTimeSeconds -lt 1 -or $workingSetGiB -le 0 -or $sampleIntervalMilliseconds -lt 250) {
     throw "Target limits must use a positive wall time and working-set limit, with a sampling interval of at least 250 ms."
@@ -425,7 +427,7 @@ if ($vmMapEnabled) {
     [System.IO.Directory]::CreateDirectory($resolvedVmMapOutputRoot) | Out-Null
     $vmMapNearCutoffBytes = [long]($VmMapNearCutoffGiB * 1GB)
     if ($vmMapNearCutoffBytes -ge $workingSetLimitBytes) {
-        throw "VMMap near-cutoff threshold must remain below the configured 6 GiB safety limit."
+        throw "VMMap near-cutoff threshold must remain below the configured $workingSetGiB GiB working-set safety limit."
     }
 }
 $repositoryCommit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
@@ -456,12 +458,22 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $manifestPath = Join-Path $runDirectory "manifest.json"
     $metricsPath = Join-Path $runDirectory "metrics.jsonl"
     $logPath = Join-Path $runDirectory "sharpemu.log"
+    $startupHostMemory = Get-HostMemorySnapshot
+    $lastHostMemory = $startupHostMemory
+    $minimumPhysicalAvailableBytes = [UInt64]$startupHostMemory.physicalAvailableBytes
+    $minimumCommitHeadroomBytes = [UInt64]$startupHostMemory.commitHeadroomBytes
     $terminationReason = "process-exited"
+    $terminationBoundary = $null
     $peakWorkingSetBytes = 0L
     $peakPrivateBytes = 0L
     $sampleCount = 0
     $exitCode = $null
     $processStarted = $false
+    $processTreeStopState = @{ stopRequested = $false }
+    $stopProcessTreeAction = {
+        param([int]$RootProcessId)
+        Stop-ProcessTree -RootProcessId $RootProcessId
+    }
     $emulationProcessIds = [System.Collections.Generic.HashSet[int]]::new()
     $comparisonArguments = @($arguments + $AdditionalArguments)
     $launchAdditionalArguments = @($AdditionalArguments | ForEach-Object {
@@ -519,9 +531,20 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         }
         limits = [ordered]@{
             wallTimeSeconds = $wallTimeSeconds
+            workingSetGiB = $workingSetGiB
             workingSetBytes = $workingSetLimitBytes
+            minimumAvailablePhysicalGiB = $hostMemoryThresholds.minimumAvailablePhysicalGiB
+            minimumAvailablePhysicalBytes = $hostMemoryThresholds.minimumAvailablePhysicalBytes
+            minimumCommitHeadroomGiB = $hostMemoryThresholds.minimumCommitHeadroomGiB
+            minimumCommitHeadroomBytes = $hostMemoryThresholds.minimumCommitHeadroomBytes
             sampleIntervalMilliseconds = $sampleIntervalMilliseconds
         }
+        hostMemory = New-HostMemoryManifestSection `
+            -StartupSample $startupHostMemory `
+            -MinimumPhysicalAvailableBytes $hostMemoryThresholds.minimumAvailablePhysicalBytes `
+            -MinimumCommitHeadroomBytes $hostMemoryThresholds.minimumCommitHeadroomBytes `
+            -FinalSample $startupHostMemory `
+            -TerminationBoundary $null
         diagnostics = [ordered]@{
             path = $diagnosticsPath
             enabled = $null -ne $diagnosticsPath
@@ -579,6 +602,19 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             $processTree = @(Get-ProcessTree -RootProcessId $process.Id)
             $workingSetBytes = [long](($processTree | Measure-Object -Property WorkingSet64 -Sum).Sum)
             $privateBytes = [long](($processTree | Measure-Object -Property PrivateMemorySize64 -Sum).Sum)
+            $hostMemory = Get-HostMemorySnapshot
+            $lastHostMemory = $hostMemory
+            if ([UInt64]$hostMemory.physicalAvailableBytes -lt $minimumPhysicalAvailableBytes) {
+                $minimumPhysicalAvailableBytes = [UInt64]$hostMemory.physicalAvailableBytes
+            }
+            if ([UInt64]$hostMemory.commitHeadroomBytes -lt $minimumCommitHeadroomBytes) {
+                $minimumCommitHeadroomBytes = [UInt64]$hostMemory.commitHeadroomBytes
+            }
+            $hostBoundary = Get-TargetTerminationBoundary `
+                -WorkingSetBytes ([UInt64]$workingSetBytes) `
+                -WorkingSetLimitBytes ([UInt64]$workingSetLimitBytes) `
+                -HostMemorySample $hostMemory `
+                -HostMemoryThresholds $hostMemoryThresholds
             $emulationProcessId = $null
             $emulationProcess = Get-ActualEmulationProcess -ProcessTree $processTree
             if ($null -ne $emulationProcess) {
@@ -596,6 +632,12 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 emulationProcessId = $emulationProcessId
                 workingSetBytes = $workingSetBytes
                 privateBytes = $privateBytes
+                pageSizeBytes = [UInt64]$hostMemory.pageSizeBytes
+                physicalTotalBytes = [UInt64]$hostMemory.physicalTotalBytes
+                physicalAvailableBytes = [UInt64]$hostMemory.physicalAvailableBytes
+                commitTotalBytes = [UInt64]$hostMemory.commitTotalBytes
+                commitLimitBytes = [UInt64]$hostMemory.commitLimitBytes
+                commitHeadroomBytes = [UInt64]$hostMemory.commitHeadroomBytes
             }
             Add-Content -LiteralPath $metricsPath -Value ($sample | ConvertTo-Json -Compress) -Encoding utf8
 
@@ -714,15 +756,28 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 }
             }
 
-            if ($workingSetBytes -ge $workingSetLimitBytes) {
-                $terminationReason = "working-set-limit"
-                Stop-ProcessTree -RootProcessId $process.Id
+            if ($null -ne $hostBoundary) {
+                $terminationReason = [string]$hostBoundary.reason
+                $terminationBoundary = $hostBoundary
+                [void](Invoke-TargetProcessTreeStopOnce `
+                    -State $processTreeStopState `
+                    -RootProcessId $process.Id `
+                    -StopAction $stopProcessTreeAction)
                 break
             }
 
             if ($stopwatch.Elapsed.TotalSeconds -ge $wallTimeSeconds) {
                 $terminationReason = "wall-time-limit"
-                Stop-ProcessTree -RootProcessId $process.Id
+                $terminationBoundary = [ordered]@{
+                    reason = "wall-time-limit"
+                    boundary = "wall-time"
+                    thresholdSeconds = $wallTimeSeconds
+                    sampledElapsedMilliseconds = [long]$stopwatch.Elapsed.TotalMilliseconds
+                }
+                [void](Invoke-TargetProcessTreeStopOnce `
+                    -State $processTreeStopState `
+                    -RootProcessId $process.Id `
+                    -StopAction $stopProcessTreeAction)
                 break
             }
 
@@ -734,6 +789,12 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             throw "SharpEmu did not report exit within five seconds after its process tree stopped."
         }
         $exitCode = $process.ExitCode
+        if ($null -eq $terminationBoundary) {
+            $terminationBoundary = [ordered]@{
+                reason = "process-exited"
+                boundary = "process-exit"
+            }
+        }
 
         if ($vmMapEnabled) {
             $vmMapDeadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
@@ -777,7 +838,10 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
 
         try {
             if ($processStarted -and -not $process.HasExited) {
-                Stop-ProcessTree -RootProcessId $process.Id
+                [void](Invoke-TargetProcessTreeStopOnce `
+                    -State $processTreeStopState `
+                    -RootProcessId $process.Id `
+                    -StopAction $stopProcessTreeAction)
                 if (-not $process.WaitForExit(5000)) {
                     throw "SharpEmu did not report exit within five seconds after forced termination."
                 }
@@ -795,8 +859,15 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             "failed"
         }
         $manifest.completedAtUtc = $completedAt.ToString("O")
+        $manifest.hostMemory = New-HostMemoryManifestSection `
+            -StartupSample $startupHostMemory `
+            -MinimumPhysicalAvailableBytes $minimumPhysicalAvailableBytes `
+            -MinimumCommitHeadroomBytes $minimumCommitHeadroomBytes `
+            -FinalSample $lastHostMemory `
+            -TerminationBoundary $terminationBoundary
         $manifest.result = [ordered]@{
             terminationReason = $terminationReason
+            terminationBoundary = $terminationBoundary
             exitCode = $exitCode
             durationMilliseconds = [long]($completedAt - $startedAt).TotalMilliseconds
             sampleCount = $sampleCount

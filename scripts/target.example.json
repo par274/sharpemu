@@ -22,6 +22,8 @@
   "limits": {
     "wallTimeSeconds": 900,
     "workingSetGiB": 24,
+    "minimumAvailablePhysicalGiB": null,
+    "minimumCommitHeadroomGiB": null,
     "sampleIntervalMilliseconds": 2000
   }
 }
