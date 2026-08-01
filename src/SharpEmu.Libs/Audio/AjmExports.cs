@@ -21,7 +21,12 @@ public static class AjmExports
     private const int OrbisAjmErrorJobCreation = unchecked((int)0x80930012);
     private const ulong MaxSilentPcmBytes = 1 << 20;
     private const uint Atrac9CodecType = 1;
-    private const uint MaxCodecType = 25;
+    // Registration is pure bookkeeping (a HashSet.Add), so the only real
+    // constraint is that codecType << 14 must not overflow the 32-bit
+    // instanceId it gets packed into (see AjmInstanceCreate) -- not any
+    // hardcoded list of known Sony codec ids, which a retail title's Gen5
+    // codec type (e.g. 24) can legitimately fall outside of.
+    private const uint MaxCodecType = 1u << 18;
     private const int MaxInstanceIndex = 0x2FFF;
     private const int MaxDecodeBufferBytes = 64 * 1024 * 1024;
 
@@ -119,9 +124,12 @@ public static class AjmExports
         LibraryName = "libSceAjm")]
     public static int AjmFinalize(CpuContext ctx)
     {
-        Contexts.TryRemove(unchecked((uint)ctx[CpuRegister.Rdi]), out _);
-        ctx[CpuRegister.Rax] = 0;
-        return 0;
+        if (!Contexts.TryRemove(unchecked((uint)ctx[CpuRegister.Rdi]), out _))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -334,8 +342,20 @@ public static class AjmExports
         LibraryName = "libSceAjm")]
     public static int AjmModuleUnregister(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
-        return 0;
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var codecType = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (!Contexts.TryGetValue(contextId, out var state))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        lock (state.Gate)
+        {
+            state.RegisteredCodecs.Remove(codecType);
+        }
+
+        Trace($"module_unregister context={contextId} codec={codecType}");
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
