@@ -1214,7 +1214,7 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
-    private sealed record VulkanGuestImageWrite(
+    internal sealed record VulkanGuestImageWrite(
         ulong Address,
         byte[]? Pixels,
         uint FillValue,
@@ -2463,9 +2463,10 @@ internal static unsafe class VulkanVideoPresenter
                 // when that single item exceeds the configured budget. This
                 // avoids an impossible wait while still bounding the normal
                 // multi-item backlog.
-                (_pendingGuestWorkBytes != 0 &&
-                 payloadBytes > _maxPendingGuestWorkBytes -
-                     Math.Min(_pendingGuestWorkBytes, _maxPendingGuestWorkBytes))))
+                WouldExceedGuestWorkByteBudget(
+                    _pendingGuestWorkBytes,
+                    payloadBytes,
+                    _maxPendingGuestWorkBytes)))
         {
             if (!backpressureLogged)
             {
@@ -2485,7 +2486,6 @@ internal static unsafe class VulkanVideoPresenter
                         $"incoming_mb={payloadBytes / (1024 * 1024)} " +
                         $"budget_mb={_maxPendingGuestWorkBytes / (1024 * 1024)} " +
                         $"work={work.GetType().Name}" +
-                        GetGuestWorkPayloadBreakdown(work) +
                         FormatGuestQueueBacklogLocked());
                 }
 
@@ -2573,7 +2573,7 @@ internal static unsafe class VulkanVideoPresenter
             _pendingSyncGuestWorkCount++;
         }
 
-        _pendingGuestWorkBytes = SaturatingAdd(_pendingGuestWorkBytes, payloadBytes);
+        _pendingGuestWorkBytes = checked(_pendingGuestWorkBytes + payloadBytes);
         MemoryDiagnostics.Adjust(
             "managed.guest-queue-retained",
             checked((long)payloadBytes),
@@ -2582,18 +2582,6 @@ internal static unsafe class VulkanVideoPresenter
             "managed.guest-queue-enqueued",
             checked((long)payloadBytes),
             countDelta: 1);
-        if (MemoryDiagnostics.IsEnabled)
-        {
-            var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(work);
-            MemoryDiagnostics.Adjust(
-                "managed.guest-queue-actual-retained",
-                checked((long)diagnosticPayloadBytes),
-                countDelta: 1);
-            MemoryDiagnostics.Adjust(
-                "managed.guest-queue-actual-enqueued",
-                checked((long)diagnosticPayloadBytes),
-                countDelta: 1);
-        }
         // Wake any thread waiting for guest work completion or queue space.
         System.Threading.Monitor.PulseAll(_gate);
         return sequence;
@@ -2918,24 +2906,12 @@ internal static unsafe class VulkanVideoPresenter
                     $"contiguous_completed={_completedGuestWorkSequence} " +
                     $"out_of_order={_completedGuestWorkOutOfOrder.Count}");
             }
-            var releasedPayloadBytes = Math.Min(
-                pending.PayloadBytes,
-                _pendingGuestWorkBytes);
-            _pendingGuestWorkBytes = pending.PayloadBytes >= _pendingGuestWorkBytes
-                ? 0
-                : _pendingGuestWorkBytes - pending.PayloadBytes;
+            _pendingGuestWorkBytes = checked(
+                _pendingGuestWorkBytes - pending.PayloadBytes);
             MemoryDiagnostics.Adjust(
                 "managed.guest-queue-retained",
-                -checked((long)releasedPayloadBytes),
+                -checked((long)pending.PayloadBytes),
                 countDelta: -1);
-            if (MemoryDiagnostics.IsEnabled)
-            {
-                var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(pending.Work);
-                MemoryDiagnostics.Adjust(
-                    "managed.guest-queue-actual-retained",
-                    -checked((long)diagnosticPayloadBytes),
-                    countDelta: -1);
-            }
             ReleasePendingGuestImageUploadsLocked(pending.Work);
             if (pending.Sequence == _completedGuestWorkSequence + 1)
             {
@@ -2969,125 +2945,89 @@ internal static unsafe class VulkanVideoPresenter
         }
     }
 
-    private static ulong GetGuestWorkPayloadBytes(object work) => work switch
+    // A pending work record owns every array reachable from its guest payload.
+    // Count each array once within that record so aliases do not inflate the
+    // budget, while retaining one stored total for admission and completion.
+    internal static ulong GetGuestWorkPayloadBytes(object work)
     {
-        VulkanComputeGuestDispatch compute => SaturatingAdd(
-            GetTexturePayloadBytes(compute.Textures),
-            GetGlobalBufferPayloadBytes(compute.GlobalMemoryBuffers)),
-        VulkanOffscreenGuestDraw offscreen => GetDrawPayloadBytes(offscreen.Draw),
-        VulkanGuestImageWrite { Pixels: { } pixels } => (ulong)pixels.LongLength,
-        _ => 0,
-    };
-
-    // Diagnostic-only accounting. GPU-detile submissions intentionally carry
-    // raw bytes in TiledSource while leaving RgbaPixels empty. The production
-    // queue budget currently measures only RgbaPixels; keep that behavior
-    // unchanged here and expose the complete guest-work ownership separately.
-    private static ulong GetGuestWorkDiagnosticPayloadBytes(object work) => work switch
-    {
-        VulkanComputeGuestDispatch compute => SaturatingAdd(
-            GetTexturePayloadBytesIncludingTiled(compute.Textures),
-            GetGlobalBufferPayloadBytes(compute.GlobalMemoryBuffers)),
-        VulkanOffscreenGuestDraw offscreen => SaturatingAdd(
-            GetDrawPayloadBytes(offscreen.Draw),
-            GetTiledTexturePayloadBytes(offscreen.Draw.Textures)),
-        VulkanGuestImageWrite { Pixels: { } pixels } => (ulong)pixels.LongLength,
-        _ => 0,
-    };
-
-    private static string GetGuestWorkPayloadBreakdown(object work)
-    {
-        static ulong SumTextures(IReadOnlyList<GuestDrawTexture> textures) =>
-            GetTexturePayloadBytes(textures) / (1024 * 1024);
-        static ulong SumGlobals(IReadOnlyList<GuestMemoryBuffer> buffers) =>
-            GetGlobalBufferPayloadBytes(buffers) / (1024 * 1024);
-
-        return work switch
+        if (work is not VulkanComputeGuestDispatch and
+            not VulkanOffscreenGuestDraw and
+            not VulkanGuestImageWrite)
         {
-            VulkanOffscreenGuestDraw offscreen =>
-                $" textures_mb={SumTextures(offscreen.Draw.Textures)}" +
-                $" globals_mb={SumGlobals(offscreen.Draw.GlobalMemoryBuffers)}" +
-                $" vertex_mb={offscreen.Draw.VertexBuffers.Aggregate(0UL, static (sum, buffer) => SaturatingAdd(sum, (ulong)buffer.Data.LongLength)) / (1024 * 1024)}" +
-                $" index_mb={(ulong)(offscreen.Draw.IndexBuffer?.Data.LongLength ?? 0) / (1024 * 1024)}" +
-                $" vertex_lengths=[{string.Join(',', offscreen.Draw.VertexBuffers.Select(static buffer => $"{buffer.Length}/{buffer.Data.LongLength}:s{buffer.Stride}:o{buffer.OffsetBytes}"))}]" +
-                $" global_lengths=[{string.Join(',', offscreen.Draw.GlobalMemoryBuffers.Select(static buffer => buffer.Length))}]",
-            VulkanComputeGuestDispatch compute =>
-                $" textures_mb={SumTextures(compute.Textures)}" +
-                $" globals_mb={SumGlobals(compute.GlobalMemoryBuffers)}" +
-                $" global_lengths=[{string.Join(',', compute.GlobalMemoryBuffers.Select(static buffer => buffer.Length))}]",
-            _ => string.Empty,
-        };
-    }
+            return 0;
+        }
 
-    private static ulong GetDrawPayloadBytes(VulkanTranslatedGuestDraw draw)
-    {
-        var bytes = GetTexturePayloadBytes(draw.Textures);
-        bytes = SaturatingAdd(bytes, GetGlobalBufferPayloadBytes(draw.GlobalMemoryBuffers));
-        var uniqueVertexData = new HashSet<byte[]>(
+        if (work is VulkanGuestImageWrite { Pixels: null })
+        {
+            return 0;
+        }
+
+        var ownedArrays = new HashSet<byte[]>(
             System.Collections.Generic.ReferenceEqualityComparer.Instance);
-        foreach (var vertex in draw.VertexBuffers)
+        var bytes = 0UL;
+
+        void Add(byte[]? data)
         {
-            if (uniqueVertexData.Add(vertex.Data))
+            if (data is not null && ownedArrays.Add(data))
             {
-                bytes = SaturatingAdd(bytes, (ulong)vertex.Data.LongLength);
+                bytes = checked(bytes + (ulong)data.LongLength);
             }
         }
 
-        if (draw.IndexBuffer is { } index)
+        void AddTextures(IReadOnlyList<GuestDrawTexture> textures)
         {
-            bytes = SaturatingAdd(bytes, (ulong)index.Data.LongLength);
-        }
-
-        return bytes;
-    }
-
-    private static ulong GetTexturePayloadBytes(
-        IReadOnlyList<GuestDrawTexture> textures)
-    {
-        var bytes = 0UL;
-        foreach (var texture in textures)
-        {
-            bytes = SaturatingAdd(bytes, (ulong)texture.RgbaPixels.LongLength);
-        }
-
-        return bytes;
-    }
-
-    private static ulong GetTexturePayloadBytesIncludingTiled(
-        IReadOnlyList<GuestDrawTexture> textures) =>
-        SaturatingAdd(
-            GetTexturePayloadBytes(textures),
-            GetTiledTexturePayloadBytes(textures));
-
-    private static ulong GetTiledTexturePayloadBytes(
-        IReadOnlyList<GuestDrawTexture> textures)
-    {
-        var bytes = 0UL;
-        foreach (var texture in textures)
-        {
-            if (texture.TiledSource is { } tiledSource)
+            foreach (var texture in textures)
             {
-                bytes = SaturatingAdd(bytes, (ulong)tiledSource.LongLength);
+                Add(texture.RgbaPixels);
+                Add(texture.TiledSource);
             }
         }
 
-        return bytes;
-    }
-
-    private static ulong GetGlobalBufferPayloadBytes(
-        IReadOnlyList<GuestMemoryBuffer> buffers)
-    {
-        var bytes = 0UL;
-        foreach (var buffer in buffers)
+        void AddGlobalBuffers(IReadOnlyList<GuestMemoryBuffer> buffers)
         {
-            bytes = SaturatingAdd(bytes, (ulong)buffer.Data.LongLength);
+            foreach (var buffer in buffers)
+            {
+                Add(buffer.Data);
+            }
+        }
+
+        switch (work)
+        {
+            case VulkanComputeGuestDispatch compute:
+                Add(compute.ComputeSpirv);
+                AddTextures(compute.Textures);
+                AddGlobalBuffers(compute.GlobalMemoryBuffers);
+                break;
+            case VulkanOffscreenGuestDraw offscreen:
+                Add(offscreen.Draw.VertexSpirv);
+                Add(offscreen.Draw.PixelSpirv);
+                AddTextures(offscreen.Draw.Textures);
+                AddGlobalBuffers(offscreen.Draw.GlobalMemoryBuffers);
+                foreach (var vertex in offscreen.Draw.VertexBuffers)
+                {
+                    Add(vertex.Data);
+                }
+
+                if (offscreen.Draw.IndexBuffer is { } index)
+                {
+                    Add(index.Data);
+                }
+
+                break;
+            case VulkanGuestImageWrite imageWrite:
+                Add(imageWrite.Pixels);
+                break;
         }
 
         return bytes;
     }
 
-    private static ulong SaturatingAdd(ulong left, ulong right) =>
-        ulong.MaxValue - left < right ? ulong.MaxValue : left + right;
+    internal static bool WouldExceedGuestWorkByteBudget(
+        ulong pendingBytes,
+        ulong incomingBytes,
+        ulong budgetBytes) =>
+        pendingBytes != 0 &&
+        incomingBytes > budgetBytes - Math.Min(pendingBytes, budgetBytes);
 
     private static void ReleasePendingGuestImageUploadsLocked(object work)
     {
