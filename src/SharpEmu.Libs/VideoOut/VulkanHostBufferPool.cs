@@ -16,6 +16,11 @@ internal readonly record struct VulkanHostBufferAllocation(
     VulkanHostBufferPoolKey Key,
     nint Mapped);
 
+internal readonly record struct VulkanHostBufferPoolDiagnostics(
+    ulong CachedBytes,
+    int CachedAllocations,
+    int RegisteredAllocations);
+
 internal sealed class VulkanHostBufferPool : IDisposable
 {
     private readonly object _gate = new();
@@ -36,6 +41,17 @@ internal sealed class VulkanHostBufferPool : IDisposable
     public ulong MaximumCachedBytes { get; }
 
     public ulong CachedBytes { get; private set; }
+
+    public VulkanHostBufferPoolDiagnostics GetDiagnosticsSnapshot()
+    {
+        lock (_gate)
+        {
+            return new VulkanHostBufferPoolDiagnostics(
+                CachedBytes,
+                _cachedHandles.Count,
+                _allocations.Count);
+        }
+    }
 
     public bool TryRent(
         VulkanHostBufferPoolKey key,

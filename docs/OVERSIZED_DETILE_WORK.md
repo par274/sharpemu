@@ -359,6 +359,10 @@ the unchanged working-set safety cutoff after this dispatch; the next frontier
 is later startup execution and its remaining memory/wait behavior, not this
 snapshot-ownership correction.
 
+The post-correction startup frontier is measured separately in
+`docs/POST_SNAPSHOT_STARTUP_FRONTIER.md`; this document remains the historical
+record of the resolved dispatch-local snapshot boundary.
+
 ## Verification
 
 The focused snapshot-sharing and guest-work lifecycle filter passed 15/15

@@ -15,8 +15,11 @@ namespace SharpEmu.Libs.VideoOut;
 internal static unsafe class VulkanMemoryDiagnostics
 {
     private static readonly object Gate = new();
-    private static readonly Dictionary<ulong, ulong> DeviceAllocations = new();
-    private static readonly Dictionary<ulong, ulong> MappedAllocations = new();
+    private readonly record struct AllocationInfo(ulong Size, string Label);
+    private readonly record struct MappedAllocationInfo(ulong Size, string Label);
+
+    private static readonly Dictionary<ulong, AllocationInfo> DeviceAllocations = new();
+    private static readonly Dictionary<ulong, MappedAllocationInfo> MappedAllocations = new();
 
     public static Result Allocate(
         Vk vk,
@@ -25,7 +28,6 @@ internal static unsafe class VulkanMemoryDiagnostics
         out DeviceMemory memory,
         string label)
     {
-        _ = label;
         if (!MemoryDiagnostics.IsEnabled)
         {
             return vk.AllocateMemory(device, allocationInfo, null, out memory);
@@ -40,10 +42,10 @@ internal static unsafe class VulkanMemoryDiagnostics
         var size = allocationInfo->AllocationSize;
         lock (Gate)
         {
-            DeviceAllocations[memory.Handle] = size;
+            DeviceAllocations[memory.Handle] = new AllocationInfo(size, NormalizeLabel(label));
         }
 
-        MemoryDiagnostics.Adjust("vulkan.device-memory", checked((long)size), countDelta: 1);
+        AdjustDeviceMemory(label, size, countDelta: 1);
         return result;
     }
 
@@ -57,16 +59,16 @@ internal static unsafe class VulkanMemoryDiagnostics
 
         vk.FreeMemory(device, memory, null);
 
-        ulong size = 0;
+        AllocationInfo allocation = default;
         var found = false;
         lock (Gate)
         {
-            found = DeviceAllocations.Remove(memory.Handle, out size);
+            found = DeviceAllocations.Remove(memory.Handle, out allocation);
         }
 
         if (found)
         {
-            MemoryDiagnostics.Adjust("vulkan.device-memory", -checked((long)size), countDelta: -1);
+            AdjustDeviceMemory(allocation.Label, allocation.Size, countDelta: -1);
         }
     }
 
@@ -80,7 +82,6 @@ internal static unsafe class VulkanMemoryDiagnostics
         void** data,
         string label)
     {
-        _ = label;
         if (!MemoryDiagnostics.IsEnabled)
         {
             return vk.MapMemory(device, memory, offset, size, flags, data);
@@ -97,19 +98,31 @@ internal static unsafe class VulkanMemoryDiagnostics
         {
             lock (Gate)
             {
-                if (DeviceAllocations.TryGetValue(memory.Handle, out var allocationSize) && offset < allocationSize)
+                if (DeviceAllocations.TryGetValue(memory.Handle, out var allocation) && offset < allocation.Size)
                 {
-                    mappedSize = allocationSize - offset;
+                    mappedSize = allocation.Size - offset;
                 }
             }
         }
 
+        MappedAllocationInfo? previous = null;
         lock (Gate)
         {
-            MappedAllocations[memory.Handle] = mappedSize;
+            if (MappedAllocations.TryGetValue(memory.Handle, out var existing))
+            {
+                previous = existing;
+            }
+
+            MappedAllocations[memory.Handle] =
+                new MappedAllocationInfo(mappedSize, NormalizeLabel(label));
         }
 
-        MemoryDiagnostics.Adjust("vulkan.mapped-host-visible", checked((long)mappedSize), countDelta: 1);
+        if (previous is { } old)
+        {
+            AdjustMappedMemory(old.Label, old.Size, countDelta: -1);
+        }
+
+        AdjustMappedMemory(label, mappedSize, countDelta: 1);
         return result;
     }
 
@@ -123,16 +136,79 @@ internal static unsafe class VulkanMemoryDiagnostics
 
         vk.UnmapMemory(device, memory);
 
-        ulong size = 0;
+        MappedAllocationInfo mapping = default;
         var found = false;
         lock (Gate)
         {
-            found = MappedAllocations.Remove(memory.Handle, out size);
+            found = MappedAllocations.Remove(memory.Handle, out mapping);
         }
 
         if (found)
         {
-            MemoryDiagnostics.Adjust("vulkan.mapped-host-visible", -checked((long)size), countDelta: -1);
+            AdjustMappedMemory(mapping.Label, mapping.Size, countDelta: -1);
         }
+    }
+
+    public static ulong GetAllocationSize(DeviceMemory memory)
+    {
+        lock (Gate)
+        {
+            return DeviceAllocations.TryGetValue(memory.Handle, out var allocation)
+                ? allocation.Size
+                : 0;
+        }
+    }
+
+    private static void AdjustDeviceMemory(string label, ulong size, long countDelta)
+    {
+        var bytes = checked((long)size);
+        MemoryDiagnostics.Adjust("vulkan.device-memory", bytes * Math.Sign(countDelta), countDelta);
+        MemoryDiagnostics.Adjust(
+            $"vulkan.device-memory.{NormalizeLabel(label)}",
+            bytes * Math.Sign(countDelta),
+            countDelta);
+    }
+
+    private static void AdjustMappedMemory(string label, ulong size, long countDelta)
+    {
+        var bytes = checked((long)size);
+        MemoryDiagnostics.Adjust(
+            "vulkan.mapped-host-visible",
+            bytes * Math.Sign(countDelta),
+            countDelta);
+        MemoryDiagnostics.Adjust(
+            $"vulkan.mapped-host-visible.{NormalizeLabel(label)}",
+            bytes * Math.Sign(countDelta),
+            countDelta);
+    }
+
+    private static string NormalizeLabel(string label)
+    {
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return "unknown";
+        }
+
+        var builder = new System.Text.StringBuilder(label.Length);
+        var needsSeparator = false;
+        foreach (var character in label)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                if (needsSeparator && builder.Length > 0)
+                {
+                    builder.Append('-');
+                }
+
+                builder.Append(char.ToLowerInvariant(character));
+                needsSeparator = false;
+            }
+            else
+            {
+                needsSeparator = true;
+            }
+        }
+
+        return builder.Length == 0 ? "unknown" : builder.ToString();
     }
 }

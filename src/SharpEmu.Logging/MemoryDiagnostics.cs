@@ -179,6 +179,7 @@ public sealed class MemoryDiagnosticsSession : IDisposable
                 JsonSerializer.Serialize(
                     new MemoryDiagnosticsEvent
                     {
+                        ElapsedMilliseconds = (long)_clock.Elapsed.TotalMilliseconds,
                         Event = eventName,
                         Data = data,
                     },
@@ -241,6 +242,12 @@ public sealed class MemoryDiagnosticsSession : IDisposable
             };
         }
 
+        // Providers are deliberately sampled outside the write gate. A provider
+        // may need to take a subsystem lock, while a producer may hold that lock
+        // while recording an event. Keeping the provider out of _writeGate avoids
+        // turning a bounded diagnostic snapshot into a lock-ordering hazard.
+        var diagnostics = MemoryDiagnostics.GetSampleProviderSnapshot();
+
         lock (_writeGate)
         {
             WriteRecord(new MemoryDiagnosticsSample
@@ -262,6 +269,7 @@ public sealed class MemoryDiagnosticsSession : IDisposable
                 GcCollectionCount2 = GC.CollectionCount(2),
                 GcFragmentedBytes = gcInfo.FragmentedBytes,
                 Categories = categorySamples,
+                Diagnostics = diagnostics,
             });
         }
 
@@ -318,6 +326,7 @@ public sealed class MemoryDiagnosticsSession : IDisposable
 public static class MemoryDiagnostics
 {
     internal static MemoryDiagnosticsSession? ActiveSession;
+    private static Func<object?>? _sampleProvider;
 
     public static bool IsEnabled => Volatile.Read(ref ActiveSession) is not null;
 
@@ -330,6 +339,67 @@ public static class MemoryDiagnostics
     {
         ArgumentNullException.ThrowIfNull(data);
         Volatile.Read(ref ActiveSession)?.RecordEvent(eventName, data);
+    }
+
+    /// <summary>
+    /// Registers one bounded, current-state provider for the opt-in sample
+    /// stream. The provider must return scalar/structural state only; it must
+    /// not retain guest payloads or perform blocking work.
+    /// </summary>
+    public static IDisposable RegisterSampleProvider(Func<object?> provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (Interlocked.CompareExchange(ref _sampleProvider, provider, null) is not null)
+        {
+            throw new InvalidOperationException(
+                "A memory diagnostics sample provider is already active.");
+        }
+
+        return new SampleProviderRegistration(provider);
+    }
+
+    internal static object? GetSampleProviderSnapshot()
+    {
+        var provider = Volatile.Read(ref _sampleProvider);
+        if (provider is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return provider();
+        }
+        catch (Exception exception)
+        {
+            // A diagnostics provider must never take down the timer or the
+            // emulator. Keep the error bounded and content-free.
+            return new
+            {
+                providerError = exception.GetType().Name,
+            };
+        }
+    }
+
+    private sealed class SampleProviderRegistration : IDisposable
+    {
+        private readonly Func<object?> _provider;
+        private int _disposed;
+
+        public SampleProviderRegistration(Func<object?> provider)
+        {
+            _provider = provider;
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            _ = Interlocked.CompareExchange(ref _sampleProvider, null, _provider);
+        }
     }
 }
 
@@ -365,11 +435,13 @@ internal sealed class MemoryDiagnosticsSample
     public int GcCollectionCount2 { get; init; }
     public long GcFragmentedBytes { get; init; }
     public SortedDictionary<string, CategorySample> Categories { get; init; } = new(StringComparer.Ordinal);
+    public object? Diagnostics { get; init; }
 }
 
 internal sealed class MemoryDiagnosticsEvent
 {
     public string Kind => "event";
+    public long ElapsedMilliseconds { get; init; }
     public string Event { get; init; } = string.Empty;
     public object Data { get; init; } = default!;
 }
