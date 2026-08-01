@@ -16,7 +16,10 @@ internal static unsafe class VulkanMemoryDiagnostics
 {
     private static readonly object Gate = new();
     private readonly record struct AllocationInfo(ulong Size, string Label);
-    private readonly record struct MappedAllocationInfo(ulong Size, string Label);
+    private readonly record struct MappedAllocationInfo(
+        ulong Size,
+        string Label,
+        nint Address);
 
     private static readonly Dictionary<ulong, AllocationInfo> DeviceAllocations = new();
     private static readonly Dictionary<ulong, MappedAllocationInfo> MappedAllocations = new();
@@ -106,6 +109,7 @@ internal static unsafe class VulkanMemoryDiagnostics
         }
 
         MappedAllocationInfo? previous = null;
+        var mappedAddress = (nint)(*data);
         lock (Gate)
         {
             if (MappedAllocations.TryGetValue(memory.Handle, out var existing))
@@ -114,7 +118,10 @@ internal static unsafe class VulkanMemoryDiagnostics
             }
 
             MappedAllocations[memory.Handle] =
-                new MappedAllocationInfo(mappedSize, NormalizeLabel(label));
+                new MappedAllocationInfo(
+                    mappedSize,
+                    NormalizeLabel(label),
+                    mappedAddress);
         }
 
         if (previous is { } old)
@@ -123,6 +130,16 @@ internal static unsafe class VulkanMemoryDiagnostics
         }
 
         AdjustMappedMemory(label, mappedSize, countDelta: 1);
+        MemoryDiagnostics.RecordEvent(
+            "vulkan-host-memory-map",
+            new
+            {
+                action = "map",
+                address = unchecked((ulong)mappedAddress.ToInt64()),
+                size = mappedSize,
+                label = NormalizeLabel(label),
+                memoryHandle = memory.Handle,
+            });
         return result;
     }
 
@@ -146,6 +163,16 @@ internal static unsafe class VulkanMemoryDiagnostics
         if (found)
         {
             AdjustMappedMemory(mapping.Label, mapping.Size, countDelta: -1);
+            MemoryDiagnostics.RecordEvent(
+                "vulkan-host-memory-map",
+                new
+                {
+                    action = "unmap",
+                    address = unchecked((ulong)mapping.Address.ToInt64()),
+                    size = mapping.Size,
+                    label = mapping.Label,
+                    memoryHandle = memory.Handle,
+                });
         }
     }
 

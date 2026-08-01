@@ -9,7 +9,13 @@ param(
     [ValidateRange(1, 20)]
     [int]$Runs = 1,
     [string]$OutputRoot = "artifacts-local/runs",
-    [string[]]$AdditionalArguments = @()
+    [string[]]$AdditionalArguments = @(),
+    [string]$VmMapPath = "",
+    [string]$VmMapOutputRoot = "C:\sharpemu-investigation\vmmap-captures",
+    [ValidateRange(1.0, 5.9)]
+    [double]$VmMapNearCutoffGiB = 5.0,
+    [ValidateSet("all", "near-cutoff")]
+    [string]$VmMapCheckpointMode = "all"
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,6 +76,236 @@ function Get-ProcessTree {
     }
 
     return @($running)
+}
+
+function Get-ActualEmulationProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$ProcessTree
+    )
+
+    $treeIds = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($treeProcess in $ProcessTree) {
+        [void]$treeIds.Add([int]$treeProcess.Id)
+    }
+
+    $processes = @(Get-CimInstance Win32_Process -Property ProcessId, Name, CommandLine)
+    $child = $processes |
+        Where-Object {
+            $treeIds.Contains([int]$_.ProcessId) -and
+            $_.Name -eq "SharpEmu.exe" -and
+            $_.CommandLine -like "*--sharpemu-mitigated-child*"
+        } |
+        Select-Object -First 1
+    if ($null -ne $child) {
+        return $child
+    }
+
+    # A directly launched Release executable is already the emulation process;
+    # this fallback still excludes the PowerShell runner and any dotnet host.
+    return $processes |
+        Where-Object {
+            $treeIds.Contains([int]$_.ProcessId) -and $_.Name -eq "SharpEmu.exe"
+        } |
+        Select-Object -First 1
+}
+
+function Get-DiagnosticState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $latestSample = $null
+    $correctedDispatchObserved = $false
+    $guestMappings = @{}
+    $vulkanHostMappings = @{}
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        foreach ($line in @(Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue)) {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+
+            try {
+                $record = $line | ConvertFrom-Json -Depth 64
+            }
+            catch {
+                # The diagnostics writer may be between two JSONL writes.
+                continue
+            }
+
+            if ($record.kind -eq "sample") {
+                $latestSample = $record
+                continue
+            }
+
+            if ($record.kind -ne "event") {
+                continue
+            }
+
+            if ($record.event -eq "guest-work-frontier" -and
+                $record.data.phase -eq "corrected-dispatch-complete") {
+                $correctedDispatchObserved = $true
+                continue
+            }
+
+            if ($record.event -eq "guest-host-mapping") {
+                $data = $record.data
+                $key = "{0:X16}:{1:X}" -f
+                    [uint64]$data.baseAddress,
+                    [uint64]$data.reservedBytes
+                if ($data.action -eq "release") {
+                    [void]$guestMappings.Remove($key)
+                }
+                else {
+                    $guestMappings[$key] = [ordered]@{
+                        baseAddress = [uint64]$data.baseAddress
+                        reservedBytes = [uint64]$data.reservedBytes
+                        committedBytes = [uint64]$data.committedBytes
+                        executable = [bool]$data.executable
+                        reservedOnly = [bool]$data.reservedOnly
+                    }
+                }
+            }
+
+            if ($record.event -eq "vulkan-host-memory-map") {
+                $data = $record.data
+                $key = [string]$data.memoryHandle
+                if ($data.action -eq "unmap") {
+                    [void]$vulkanHostMappings.Remove($key)
+                }
+                else {
+                    $vulkanHostMappings[$key] = [ordered]@{
+                        memoryHandle = [uint64]$data.memoryHandle
+                        address = [uint64]$data.address
+                        size = [uint64]$data.size
+                        label = [string]$data.label
+                    }
+                }
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        LatestSample = $latestSample
+        CorrectedDispatchObserved = $correctedDispatchObserved
+        GuestMappings = @($guestMappings.Values | Sort-Object baseAddress)
+        VulkanHostMappings = @($vulkanHostMappings.Values | Sort-Object address)
+    }
+}
+
+function Get-ProcessCounters {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$ProcessId
+    )
+
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return $null
+    }
+
+    $process.Refresh()
+    return [ordered]@{
+        processId = $ProcessId
+        workingSetBytes = [long]$process.WorkingSet64
+        privateBytes = [long]$process.PrivateMemorySize64
+    }
+}
+
+function Start-VmMapCapture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ToolPath,
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+        [Parameter(Mandatory = $true)]
+        [int]$ProcessId,
+        [Parameter(Mandatory = $true)]
+        [string]$Reason,
+        [Parameter(Mandatory = $true)]
+        [string]$RunId,
+        [Parameter(Mandatory = $true)]
+        [string]$RepositoryCommit,
+        [Parameter(Mandatory = $true)]
+        [string]$TargetHash,
+        [Parameter(Mandatory = $true)]
+        [object]$TargetArguments,
+        [Parameter(Mandatory = $true)]
+        [object]$DiagnosticState,
+        [object]$ProcessCounters,
+        [long]$TriggerThresholdBytes
+    )
+
+    $outputDirectory = [System.IO.Path]::GetDirectoryName($OutputPath)
+    [System.IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
+    $startedAt = [DateTimeOffset]::UtcNow
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $ToolPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    # VMMap 3.4's verified command line is:
+    #   vmmap64.exe -p <pid> <output.csv>
+    [void]$startInfo.ArgumentList.Add("-p")
+    [void]$startInfo.ArgumentList.Add($ProcessId.ToString())
+    [void]$startInfo.ArgumentList.Add($OutputPath)
+
+    $vmMapProcess = [System.Diagnostics.Process]::new()
+    $vmMapProcess.StartInfo = $startInfo
+    if (-not $vmMapProcess.Start()) {
+        throw "VMMap did not start for PID $ProcessId."
+    }
+
+    return [pscustomobject]@{
+        process = $vmMapProcess
+        processId = $ProcessId
+        runId = $RunId
+        repositoryCommit = $RepositoryCommit
+        targetEbootSha256 = $TargetHash
+        targetArguments = @($TargetArguments)
+        reason = $Reason
+        outputPath = $OutputPath
+        command = @("-p", $ProcessId.ToString(), $OutputPath)
+        captureStartedAtUtc = $startedAt.ToString("O")
+        captureCompletedAtUtc = $null
+        captureDurationMilliseconds = $null
+        exitCode = $null
+        outputExists = $false
+        nearestDiagnosticsSample = $DiagnosticState.LatestSample
+        guestMappingsAtStart = @($DiagnosticState.GuestMappings)
+        vulkanHostMappingsAtStart = @($DiagnosticState.VulkanHostMappings)
+        processCountersAtStart = $ProcessCounters
+        triggerThresholdBytes = $TriggerThresholdBytes
+    }
+}
+
+function Complete-VmMapCaptures {
+    param(
+        [AllowEmptyCollection()]
+        [Parameter(Mandatory = $true)]
+        [System.Collections.ArrayList]$Pending,
+        [AllowEmptyCollection()]
+        [Parameter(Mandatory = $true)]
+        [System.Collections.ArrayList]$Completed
+    )
+
+    foreach ($capture in @($Pending.ToArray())) {
+        if (-not $capture.process.HasExited) {
+            continue
+        }
+
+        [void]$capture.process.WaitForExit()
+        $completedAt = [DateTimeOffset]::UtcNow
+        $capture.captureCompletedAtUtc = $completedAt.ToString("O")
+        $capture.captureDurationMilliseconds = [long](
+            $completedAt - [DateTimeOffset]::Parse($capture.captureStartedAtUtc)).TotalMilliseconds
+        $capture.exitCode = $capture.process.ExitCode
+        $capture.outputExists = Test-Path -LiteralPath $capture.outputPath -PathType Leaf
+        $capture.process.Dispose()
+        $capture.process = $null
+        [void]$Pending.Remove($capture)
+        [void]$Completed.Add($capture)
+    }
 }
 
 function Stop-ProcessTree {
@@ -162,9 +398,32 @@ if ($null -ne $config.PSObject.Properties["arguments"]) {
 
 $resolvedOutputRoot = Resolve-RepositoryPath -Path $OutputRoot
 [System.IO.Directory]::CreateDirectory($resolvedOutputRoot) | Out-Null
+$workingSetLimitBytes = [long]($workingSetGiB * 1GB)
+$vmMapEnabled = -not [string]::IsNullOrWhiteSpace($VmMapPath)
+$resolvedVmMapPath = $null
+$vmMapVersion = $null
+$resolvedVmMapOutputRoot = $null
+$vmMapNearCutoffBytes = $null
+if ($vmMapEnabled) {
+    $resolvedVmMapPath = Resolve-RepositoryPath -Path $VmMapPath
+    if (-not (Test-Path -LiteralPath $resolvedVmMapPath -PathType Leaf)) {
+        throw "VMMap was not found at '$resolvedVmMapPath'. Use the official Microsoft Sysinternals VMMap download."
+    }
+
+    $vmMapVersion = [string](Get-Item -LiteralPath $resolvedVmMapPath).VersionInfo.FileVersion
+    if ([string]::IsNullOrWhiteSpace($vmMapVersion)) {
+        throw "VMMap file version could not be read from '$resolvedVmMapPath'."
+    }
+
+    $resolvedVmMapOutputRoot = Resolve-RepositoryPath -Path $VmMapOutputRoot
+    [System.IO.Directory]::CreateDirectory($resolvedVmMapOutputRoot) | Out-Null
+    $vmMapNearCutoffBytes = [long]($VmMapNearCutoffGiB * 1GB)
+    if ($vmMapNearCutoffBytes -ge $workingSetLimitBytes) {
+        throw "VMMap near-cutoff threshold must remain below the configured 6 GiB safety limit."
+    }
+}
 $repositoryCommit = (& git -C $repositoryRoot rev-parse HEAD).Trim()
 $repositoryDirty = -not [string]::IsNullOrWhiteSpace((& git -C $repositoryRoot status --porcelain) -join "`n")
-$workingSetLimitBytes = [long]($workingSetGiB * 1GB)
 $cpuNames = @(Get-CimInstance Win32_Processor -Property Name | ForEach-Object { $_.Name.Trim() } | Sort-Object -Unique)
 $operatingSystem = Get-CimInstance Win32_OperatingSystem -Property Caption, Version, BuildNumber
 if ($cpuNames.Count -eq 0 -or $null -eq $operatingSystem) {
@@ -202,6 +461,34 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $launchAdditionalArguments = @($AdditionalArguments | ForEach-Object {
         ([string]$_).Replace("{runDirectory}", $runDirectory).Replace("{runId}", $runId)
     })
+    $diagnosticsPath = $null
+    foreach ($argument in $launchAdditionalArguments) {
+        if ($argument -like "--memory-diagnostics=*") {
+            $diagnosticsPath = $argument.Substring("--memory-diagnostics=".Length)
+            break
+        }
+    }
+    if ($vmMapEnabled -and [string]::IsNullOrWhiteSpace($diagnosticsPath)) {
+        throw "VMMap-assisted runs require the opt-in --memory-diagnostics={runDirectory}\\memory-diagnostics.jsonl argument."
+    }
+    $vmMapPending = [System.Collections.ArrayList]::new()
+    $vmMapCompleted = [System.Collections.ArrayList]::new()
+    $vmMapRunDirectory = $null
+    if ($vmMapEnabled) {
+        $vmMapRunDirectory = Join-Path $resolvedVmMapOutputRoot $runId
+        [System.IO.Directory]::CreateDirectory($vmMapRunDirectory) | Out-Null
+    }
+    $latestDiagnosticState = [pscustomobject]@{
+        LatestSample = $null
+        CorrectedDispatchObserved = $false
+        GuestMappings = @()
+        VulkanHostMappings = @()
+    }
+    $correctedCaptureRequested = $false
+    $plateauCaptureRequested = $false
+    $nearCutoffCaptureRequested = $false
+    $texturePlateauSignature = $null
+    $texturePlateauSamples = 0
 
     $manifest = [ordered]@{
         schemaVersion = 1
@@ -228,6 +515,29 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             wallTimeSeconds = $wallTimeSeconds
             workingSetBytes = $workingSetLimitBytes
             sampleIntervalMilliseconds = $sampleIntervalMilliseconds
+        }
+        diagnostics = [ordered]@{
+            path = $diagnosticsPath
+            enabled = $null -ne $diagnosticsPath
+        }
+        vmmap = if ($vmMapEnabled) {
+            [ordered]@{
+                enabled = $true
+                toolPath = $resolvedVmMapPath
+                toolVersion = $vmMapVersion
+                outputDirectory = $vmMapRunDirectory
+                command = "vmmap64.exe -p <actual SharpEmu child PID> <output.csv>"
+                nearCutoffThresholdBytes = $vmMapNearCutoffBytes
+                safetyWorkingSetLimitBytes = $workingSetLimitBytes
+                checkpointMode = $VmMapCheckpointMode
+                captures = @()
+            }
+        }
+        else {
+            [ordered]@{
+                enabled = $false
+                captures = @()
+            }
         }
         machine = $machine
         result = $null
@@ -263,23 +573,10 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             $workingSetBytes = [long](($processTree | Measure-Object -Property WorkingSet64 -Sum).Sum)
             $privateBytes = [long](($processTree | Measure-Object -Property PrivateMemorySize64 -Sum).Sum)
             $emulationProcessId = $null
-            if ($AdditionalArguments.Count -gt 0) {
-                $treeIds = [System.Collections.Generic.HashSet[int]]::new()
-                foreach ($treeProcess in $processTree) {
-                    [void]$treeIds.Add([int]$treeProcess.Id)
-                }
-
-                $emulationProcess = Get-CimInstance Win32_Process -Property ProcessId, Name, CommandLine |
-                    Where-Object {
-                        $treeIds.Contains([int]$_.ProcessId) -and
-                        $_.Name -eq "SharpEmu.exe" -and
-                        $_.CommandLine -like "*--sharpemu-mitigated-child*"
-                    } |
-                    Select-Object -First 1
-                if ($null -ne $emulationProcess) {
-                    $emulationProcessId = [int]$emulationProcess.ProcessId
-                    [void]$emulationProcessIds.Add($emulationProcessId)
-                }
+            $emulationProcess = Get-ActualEmulationProcess -ProcessTree $processTree
+            if ($null -ne $emulationProcess) {
+                $emulationProcessId = [int]$emulationProcess.ProcessId
+                [void]$emulationProcessIds.Add($emulationProcessId)
             }
             $peakWorkingSetBytes = [Math]::Max($peakWorkingSetBytes, $workingSetBytes)
             $peakPrivateBytes = [Math]::Max($peakPrivateBytes, $privateBytes)
@@ -294,6 +591,121 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 privateBytes = $privateBytes
             }
             Add-Content -LiteralPath $metricsPath -Value ($sample | ConvertTo-Json -Compress) -Encoding utf8
+
+            if ($vmMapEnabled) {
+                if ($null -ne $diagnosticsPath) {
+                    $latestDiagnosticState = Get-DiagnosticState -Path $diagnosticsPath
+                }
+
+                [void](Complete-VmMapCaptures -Pending $vmMapPending -Completed $vmMapCompleted)
+                $actualCounters = if ($null -ne $emulationProcessId) {
+                    Get-ProcessCounters -ProcessId $emulationProcessId
+                }
+                else {
+                    $null
+                }
+
+                if ($null -ne $emulationProcessId -and $null -ne $vmMapRunDirectory) {
+                    $captureStartedThisSample = $false
+                    if ($VmMapCheckpointMode -eq "all" -and
+                        $null -ne $actualCounters -and
+                        $latestDiagnosticState.CorrectedDispatchObserved -and
+                        -not $correctedCaptureRequested -and
+                        -not $captureStartedThisSample -and
+                        $vmMapPending.Count -eq 0) {
+                        $capture = Start-VmMapCapture `
+                            -ToolPath $resolvedVmMapPath `
+                            -OutputPath (Join-Path $vmMapRunDirectory "vmmap-corrected-dispatch.csv") `
+                            -ProcessId $emulationProcessId `
+                            -Reason "corrected-dispatch" `
+                            -RunId $runId `
+                            -RepositoryCommit $repositoryCommit `
+                            -TargetHash $actualEbootHash `
+                            -TargetArguments @($arguments + $launchAdditionalArguments) `
+                            -DiagnosticState $latestDiagnosticState `
+                            -ProcessCounters $actualCounters `
+                            -TriggerThresholdBytes ([long]$actualCounters.workingSetBytes)
+                        [void]$vmMapPending.Add($capture)
+                        $correctedCaptureRequested = $true
+                        $captureStartedThisSample = $true
+                    }
+
+                    $resources = $null
+                    if ($null -ne $latestDiagnosticState.LatestSample) {
+                        $diagnosticsProperty =
+                            $latestDiagnosticState.LatestSample.PSObject.Properties["Diagnostics"]
+                        if ($null -ne $diagnosticsProperty -and
+                            $null -ne $diagnosticsProperty.Value) {
+                            $resources = $diagnosticsProperty.Value.resources
+                        }
+                    }
+                    if ($VmMapCheckpointMode -eq "all" -and
+                        $null -ne $actualCounters -and
+                        $latestDiagnosticState.CorrectedDispatchObserved -and
+                        $null -ne $resources) {
+                        $cacheCount = [int]$resources.textureCacheCount
+                        $cacheImageBytes = [long]$resources.textureCacheImageBytes
+                        $cacheStagingBytes = [long]$resources.textureCacheStagingBytes
+                        $signature = "{0}:{1}:{2}" -f $cacheCount, $cacheImageBytes, $cacheStagingBytes
+                        if ($cacheCount -gt 0 -and $signature -eq $texturePlateauSignature) {
+                            $texturePlateauSamples++
+                        }
+                        elseif ($cacheCount -gt 0) {
+                            $texturePlateauSignature = $signature
+                            $texturePlateauSamples = 1
+                        }
+                        else {
+                            $texturePlateauSignature = $null
+                            $texturePlateauSamples = 0
+                        }
+
+                        if ($texturePlateauSamples -ge 4 -and
+                            -not $plateauCaptureRequested -and
+                            -not $captureStartedThisSample -and
+                            $vmMapPending.Count -eq 0 -and
+                            -not ($null -ne $actualCounters -and
+                                [long]$actualCounters.workingSetBytes -ge $vmMapNearCutoffBytes)) {
+                            $capture = Start-VmMapCapture `
+                                -ToolPath $resolvedVmMapPath `
+                                -OutputPath (Join-Path $vmMapRunDirectory "vmmap-cache-plateau.csv") `
+                                -ProcessId $emulationProcessId `
+                                -Reason "cache-plateau" `
+                                -RunId $runId `
+                                -RepositoryCommit $repositoryCommit `
+                                -TargetHash $actualEbootHash `
+                                -TargetArguments @($arguments + $launchAdditionalArguments) `
+                                -DiagnosticState $latestDiagnosticState `
+                                -ProcessCounters $actualCounters `
+                                -TriggerThresholdBytes ([long]$actualCounters.workingSetBytes)
+                            [void]$vmMapPending.Add($capture)
+                            $plateauCaptureRequested = $true
+                            $captureStartedThisSample = $true
+                        }
+                    }
+
+                    if ($null -ne $actualCounters -and
+                        [long]$actualCounters.workingSetBytes -ge $vmMapNearCutoffBytes -and
+                        -not $nearCutoffCaptureRequested -and
+                        -not $captureStartedThisSample -and
+                        $vmMapPending.Count -eq 0) {
+                        $capture = Start-VmMapCapture `
+                            -ToolPath $resolvedVmMapPath `
+                            -OutputPath (Join-Path $vmMapRunDirectory "vmmap-near-cutoff.csv") `
+                            -ProcessId $emulationProcessId `
+                            -Reason "near-cutoff" `
+                            -RunId $runId `
+                            -RepositoryCommit $repositoryCommit `
+                            -TargetHash $actualEbootHash `
+                            -TargetArguments @($arguments + $launchAdditionalArguments) `
+                            -DiagnosticState $latestDiagnosticState `
+                            -ProcessCounters $actualCounters `
+                            -TriggerThresholdBytes $vmMapNearCutoffBytes
+                        [void]$vmMapPending.Add($capture)
+                        $nearCutoffCaptureRequested = $true
+                        $captureStartedThisSample = $true
+                    }
+                }
+            }
 
             if ($workingSetBytes -ge $workingSetLimitBytes) {
                 $terminationReason = "working-set-limit"
@@ -315,6 +727,28 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             throw "SharpEmu did not report exit within five seconds after its process tree stopped."
         }
         $exitCode = $process.ExitCode
+
+        if ($vmMapEnabled) {
+            $vmMapDeadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
+            do {
+                [void](Complete-VmMapCaptures -Pending $vmMapPending -Completed $vmMapCompleted)
+                if ($vmMapPending.Count -eq 0) {
+                    break
+                }
+
+                Start-Sleep -Milliseconds 250
+            } while ([DateTimeOffset]::UtcNow -lt $vmMapDeadline)
+
+            if ($vmMapPending.Count -gt 0) {
+                foreach ($capture in @($vmMapPending.ToArray())) {
+                    if ($null -ne $capture.process -and -not $capture.process.HasExited) {
+                        Stop-Process -Id $capture.process.Id -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                Start-Sleep -Milliseconds 250
+                [void](Complete-VmMapCaptures -Pending $vmMapPending -Completed $vmMapCompleted)
+            }
+        }
     }
     finally {
         if ($processStarted -and -not $process.HasExited) {
@@ -337,6 +771,30 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             emulationProcessIds = @($emulationProcessIds | Sort-Object)
             checkpointObserved = $null
             notes = "Record the observed checkpoint after reviewing the run. Do not infer it from process exit."
+        }
+        if ($vmMapEnabled) {
+            $manifest.vmmap.captures = @($vmMapCompleted | ForEach-Object {
+                [ordered]@{
+                    processId = $_.processId
+                    runId = $_.runId
+                    repositoryCommit = $_.repositoryCommit
+                    targetEbootSha256 = $_.targetEbootSha256
+                    targetArguments = @($_.targetArguments)
+                    reason = $_.reason
+                    outputPath = $_.outputPath
+                    command = @($_.command)
+                    captureStartedAtUtc = $_.captureStartedAtUtc
+                    captureCompletedAtUtc = $_.captureCompletedAtUtc
+                    captureDurationMilliseconds = $_.captureDurationMilliseconds
+                    exitCode = $_.exitCode
+                    outputExists = $_.outputExists
+                    nearestDiagnosticsSample = $_.nearestDiagnosticsSample
+                    guestMappingsAtStart = @($_.guestMappingsAtStart)
+                    vulkanHostMappingsAtStart = @($_.vulkanHostMappingsAtStart)
+                    processCountersAtStart = $_.processCountersAtStart
+                    triggerThresholdBytes = $_.triggerThresholdBytes
+                }
+            })
         }
         $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8
         if ($null -ne $process) {
