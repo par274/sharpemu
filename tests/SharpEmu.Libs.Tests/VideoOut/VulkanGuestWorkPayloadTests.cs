@@ -5,11 +5,13 @@ using System.Reflection;
 using System.Text.Json;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Libs.Tests.Diagnostics;
 using SharpEmu.Logging;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
+[Collection(MemoryDiagnosticsStateCollection.Name)]
 public sealed class VulkanGuestWorkPayloadTests
 {
     [Fact]
@@ -133,9 +135,9 @@ public sealed class VulkanGuestWorkPayloadTests
         var work = ComputeWork(new byte[31], new byte[37]);
         var expectedPayload = VulkanVideoPresenter.GetGuestWorkPayloadBytes(work);
 
-        PrepareQueue();
         try
         {
+            PrepareQueue();
             using (MemoryDiagnosticsSession.Start(path, TimeSpan.FromHours(1)))
             {
                 var sequence = Enqueue(work);

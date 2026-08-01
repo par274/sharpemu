@@ -7,6 +7,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Diagnostics;
 
+[Collection(MemoryDiagnosticsStateCollection.Name)]
 public sealed class MemoryDiagnosticsTests
 {
     [Fact]
@@ -62,21 +63,23 @@ public sealed class MemoryDiagnosticsTests
         using var sampleEntered = new ManualResetEventSlim(false);
         using var releaseSample = new ManualResetEventSlim(false);
         using var timerDrainStarted = new ManualResetEventSlim(false);
-        var session = MemoryDiagnosticsSession.StartForTests(
-            path,
-            TimeSpan.FromMilliseconds(1),
-            beforeSampleWrite: () =>
-            {
-                sampleEntered.Set();
-                releaseSample.Wait();
-            },
-            timerDrainStarted: () => timerDrainStarted.Set());
+        MemoryDiagnosticsSession? session = null;
 
         try
         {
+            session = MemoryDiagnosticsSession.StartForTests(
+                path,
+                TimeSpan.FromMilliseconds(1),
+                beforeSampleWrite: () =>
+                {
+                    sampleEntered.Set();
+                    releaseSample.Wait();
+                },
+                timerDrainStarted: () => timerDrainStarted.Set());
+
             Assert.True(sampleEntered.Wait(TimeSpan.FromSeconds(5)));
 
-            var disposeTask = Task.Run(session.Dispose);
+            var disposeTask = Task.Run(session!.Dispose);
             Assert.True(timerDrainStarted.Wait(TimeSpan.FromSeconds(5)));
             var earlyCompletion = await Task.WhenAny(
                 disposeTask,
@@ -103,7 +106,7 @@ public sealed class MemoryDiagnosticsTests
         finally
         {
             releaseSample.Set();
-            session.Dispose();
+            session?.Dispose();
             if (File.Exists(path))
             {
                 File.Delete(path);
