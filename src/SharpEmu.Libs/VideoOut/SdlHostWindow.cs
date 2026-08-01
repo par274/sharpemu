@@ -340,11 +340,11 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         Action closing,
         Action? idle = null)
     {
+        initialize();
         var timer = Stopwatch.StartNew();
         var last = timer.Elapsed.TotalSeconds;
         try
         {
-            initialize();
             while (Volatile.Read(ref _closeRequested) == 0)
             {
                 PumpEvents();

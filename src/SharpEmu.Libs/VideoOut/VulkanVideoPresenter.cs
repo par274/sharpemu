@@ -3606,8 +3606,6 @@ internal static unsafe class VulkanVideoPresenter
         // the sample provider uses a volatile read to close the shutdown race.
         private bool _diagnosticsEnabled;
         private IDisposable? _memoryDiagnosticsProvider;
-        private VulkanHostAllocationDiagnostics? _vulkanHostAllocationDiagnostics;
-        private VulkanHostAllocationLifetime? _vulkanHostAllocationLifetime;
         private string _diagnosticPhase = "not-started";
         private string _diagnosticActiveWorkSummary = string.Empty;
         private string _diagnosticActiveQueueName = string.Empty;
@@ -4435,7 +4433,6 @@ internal static unsafe class VulkanVideoPresenter
                     hostBufferRegisteredAllocations = hostBuffers.RegisteredAllocations,
                     textureLifetime = _resourceLifetimeDiagnostics?.GetSnapshot(),
                 },
-                vulkanHostAllocations = _vulkanHostAllocationDiagnostics?.GetSnapshot(),
                 guestWait = new
                 {
                     outstanding = waits.Outstanding,
@@ -4459,16 +4456,6 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     _resourceLifetimeDiagnostics = new VulkanResourceLifetimeDiagnostics();
                     _diagnosticBatchTextureResourceIds = new List<long>(64);
-                    _vulkanHostAllocationDiagnostics = VulkanHostAllocationDiagnostics.Start();
-                    if (_vulkanHostAllocationDiagnostics is not null)
-                    {
-                        _vulkanHostAllocationLifetime = new VulkanHostAllocationLifetime(
-                            () =>
-                            {
-                                _vulkanHostAllocationDiagnostics?.Dispose();
-                                _vulkanHostAllocationDiagnostics = null;
-                            });
-                    }
                     _memoryDiagnosticsProvider =
                         MemoryDiagnostics.RegisterSampleProvider(GetDiagnosticSnapshot);
                 }
@@ -4491,21 +4478,14 @@ internal static unsafe class VulkanVideoPresenter
             {
                 try
                 {
-                    DisposeVulkan();
+                    _memoryDiagnosticsProvider?.Dispose();
                 }
                 finally
                 {
-                    try
-                    {
-                        _memoryDiagnosticsProvider?.Dispose();
-                    }
-                    finally
-                    {
-                        _memoryDiagnosticsProvider = null;
-                        _diagnosticBatchTextureResourceIds = null;
-                        _resourceLifetimeDiagnostics = null;
-                        Volatile.Write(ref _diagnosticsEnabled, false);
-                    }
+                    _memoryDiagnosticsProvider = null;
+                    _diagnosticBatchTextureResourceIds = null;
+                    _resourceLifetimeDiagnostics = null;
+                    Volatile.Write(ref _diagnosticsEnabled, false);
                 }
             }
         }
@@ -4836,14 +4816,7 @@ internal static unsafe class VulkanVideoPresenter
 
                 try
                 {
-                    Check(
-                        _vk.CreateInstance(
-                            &createInfo,
-                            VulkanHostAllocationDiagnostics.CurrentCallbacks,
-                            out _instance),
-                        "vkCreateInstance");
-                    _vulkanHostAllocationLifetime?.RegisterInstance(
-                        DestroyVulkanInstanceRoot);
+                    Check(_vk.CreateInstance(&createInfo, null, out _instance), "vkCreateInstance");
                     if (!_vk.TryGetInstanceExtension(_instance, out _surfaceApi))
                     {
                         throw new InvalidOperationException("VK_KHR_surface is unavailable.");
@@ -5261,15 +5234,7 @@ internal static unsafe class VulkanVideoPresenter
                     PpEnabledExtensionNames = extensions,
                 };
 
-                Check(
-                    _vk.CreateDevice(
-                        _physicalDevice,
-                        &createInfo,
-                        VulkanHostAllocationDiagnostics.CurrentCallbacks,
-                        out _device),
-                    "vkCreateDevice");
-                _vulkanHostAllocationLifetime?.RegisterDevice(
-                    () => DestroyVulkanDeviceRoot());
+                Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
             }
             finally
             {
@@ -19327,86 +19292,17 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
-        private void DestroyDebugUtilsMessengerIfNeeded()
-        {
-            if (_debugUtils is not null &&
-                _debugMessenger.Handle != 0 &&
-                _instance.Handle != 0)
-            {
-                _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);
-                _debugMessenger = default;
-            }
-        }
-
-        private void DestroyVulkanDeviceRoot(bool waitForIdle = true)
-        {
-            if (_device.Handle == 0)
-            {
-                return;
-            }
-
-            if (waitForIdle)
-            {
-                _vk.DeviceWaitIdle(_device);
-            }
-            _vk.DestroyDevice(
-                _device,
-                VulkanHostAllocationDiagnostics.CurrentCallbacks);
-            _device = default;
-        }
-
-        private void DestroyVulkanInstanceRoot()
-        {
-            if (_surface.Handle != 0 && _instance.Handle != 0)
-            {
-                _surfaceApi.DestroySurface(_instance, _surface, null);
-                _surface = default;
-            }
-
-            if (_instance.Handle != 0)
-            {
-                _vk.DestroyInstance(
-                    _instance,
-                    VulkanHostAllocationDiagnostics.CurrentCallbacks);
-                _instance = default;
-            }
-        }
-
-        private void DisposePartialVulkan()
-        {
-            _vulkanReady = false;
-            DestroyDebugUtilsMessengerIfNeeded();
-            if (_vulkanHostAllocationLifetime is not null)
-            {
-                _vulkanHostAllocationLifetime.Dispose();
-                _vulkanHostAllocationLifetime = null;
-            }
-            else
-            {
-                DestroyVulkanDeviceRoot();
-                DestroyVulkanInstanceRoot();
-                _vulkanHostAllocationDiagnostics?.Dispose();
-                _vulkanHostAllocationDiagnostics = null;
-            }
-        }
-
         private void DisposeVulkan()
         {
             if (!_vulkanReady)
             {
-                if (_vulkanHostAllocationLifetime is not null ||
-                    _vulkanHostAllocationDiagnostics is not null ||
-                    _device.Handle != 0 ||
-                    _surface.Handle != 0 ||
-                    _instance.Handle != 0)
-                {
-                    DisposePartialVulkan();
-                }
-
                 return;
             }
 
-            DestroyDebugUtilsMessengerIfNeeded();
+            if (_debugUtils is not null && _debugMessenger.Handle != 0)
+            {
+                _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);
+            }
             _vulkanReady = false;
             _vk.DeviceWaitIdle(_device);
             SavePipelineCache(force: true);
@@ -19496,19 +19392,18 @@ internal static unsafe class VulkanVideoPresenter
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);
                     _pipelineCache = default;
                 }
+                _vk.DestroyDevice(_device, null);
+                _device = default;
             }
-
-            if (_vulkanHostAllocationLifetime is not null)
+            if (_surface.Handle != 0)
             {
-                _vulkanHostAllocationLifetime.Dispose();
-                _vulkanHostAllocationLifetime = null;
+                _surfaceApi.DestroySurface(_instance, _surface, null);
+                _surface = default;
             }
-            else
+            if (_instance.Handle != 0)
             {
-                DestroyVulkanDeviceRoot(waitForIdle: false);
-                DestroyVulkanInstanceRoot();
-                _vulkanHostAllocationDiagnostics?.Dispose();
-                _vulkanHostAllocationDiagnostics = null;
+                _vk.DestroyInstance(_instance, null);
+                _instance = default;
             }
         }
 

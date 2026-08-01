@@ -8,12 +8,9 @@ namespace SharpEmu.Libs.VideoOut;
 
 /// <summary>
 /// Counts explicit Vulkan device-memory objects and currently mapped host
-/// ranges. The separate <see cref="VulkanHostAllocationDiagnostics"/> probe
-/// reports pfnAllocation/pfnReallocation/pfnFree requests and informational
-/// internal notifications supplied at the Vulkan instance/device roots. It is
-/// not complete coverage of child-object or implementation allocations, and
-/// those callbacks do not describe the explicit <see cref="Vk.AllocateMemory"/>
-/// objects tracked by this seam.
+/// ranges. Vulkan allocation callbacks are intentionally not used here: those
+/// callbacks describe implementation host allocations, not the explicit
+/// <see cref="Vk.AllocateMemory"/> objects tracked by this seam.
 /// </summary>
 internal static unsafe class VulkanMemoryDiagnostics
 {
