@@ -22,6 +22,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+. (Join-Path $PSScriptRoot "vmmap-capture-lifecycle.ps1")
 
 function Resolve-RepositoryPath {
     param(
@@ -233,6 +234,8 @@ function Start-VmMapCapture {
         [object]$TargetArguments,
         [Parameter(Mandatory = $true)]
         [object]$DiagnosticState,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.ArrayList]$Pending,
         [object]$ProcessCounters,
         [long]$TriggerThresholdBytes
     )
@@ -251,60 +254,62 @@ function Start-VmMapCapture {
     [void]$startInfo.ArgumentList.Add($OutputPath)
 
     $vmMapProcess = [System.Diagnostics.Process]::new()
-    $vmMapProcess.StartInfo = $startInfo
-    if (-not $vmMapProcess.Start()) {
-        throw "VMMap did not start for PID $ProcessId."
-    }
+    $vmMapStarted = $false
+    try {
+        $vmMapProcess.StartInfo = $startInfo
+        if (-not $vmMapProcess.Start()) {
+            throw "VMMap did not start for PID $ProcessId."
+        }
+        $vmMapStarted = $true
 
-    return [pscustomobject]@{
-        process = $vmMapProcess
-        processId = $ProcessId
-        runId = $RunId
-        repositoryCommit = $RepositoryCommit
-        targetEbootSha256 = $TargetHash
-        targetArguments = @($TargetArguments)
-        reason = $Reason
-        outputPath = $OutputPath
-        command = @("-p", $ProcessId.ToString(), $OutputPath)
-        captureStartedAtUtc = $startedAt.ToString("O")
-        captureCompletedAtUtc = $null
-        captureDurationMilliseconds = $null
-        exitCode = $null
-        outputExists = $false
-        nearestDiagnosticsSample = $DiagnosticState.LatestSample
-        guestMappingsAtStart = @($DiagnosticState.GuestMappings)
-        vulkanHostMappingsAtStart = @($DiagnosticState.VulkanHostMappings)
-        processCountersAtStart = $ProcessCounters
-        triggerThresholdBytes = $TriggerThresholdBytes
-    }
-}
-
-function Complete-VmMapCaptures {
-    param(
-        [AllowEmptyCollection()]
-        [Parameter(Mandatory = $true)]
-        [System.Collections.ArrayList]$Pending,
-        [AllowEmptyCollection()]
-        [Parameter(Mandatory = $true)]
-        [System.Collections.ArrayList]$Completed
-    )
-
-    foreach ($capture in @($Pending.ToArray())) {
-        if (-not $capture.process.HasExited) {
-            continue
+        $capture = [pscustomobject]@{
+            process = $vmMapProcess
+            processId = $ProcessId
+            runId = $RunId
+            repositoryCommit = $RepositoryCommit
+            targetEbootSha256 = $TargetHash
+            targetArguments = @($TargetArguments)
+            reason = $Reason
+            outputPath = $OutputPath
+            command = @("-p", $ProcessId.ToString(), $OutputPath)
+            captureStartedAtUtc = $startedAt.ToString("O")
+            captureCompletedAtUtc = $null
+            captureDurationMilliseconds = $null
+            exitCode = $null
+            outputExists = $false
+            cleanupError = $null
+            nearestDiagnosticsSample = $DiagnosticState.LatestSample
+            guestMappingsAtStart = @($DiagnosticState.GuestMappings)
+            vulkanHostMappingsAtStart = @($DiagnosticState.VulkanHostMappings)
+            processCountersAtStart = $ProcessCounters
+            triggerThresholdBytes = $TriggerThresholdBytes
         }
 
-        [void]$capture.process.WaitForExit()
-        $completedAt = [DateTimeOffset]::UtcNow
-        $capture.captureCompletedAtUtc = $completedAt.ToString("O")
-        $capture.captureDurationMilliseconds = [long](
-            $completedAt - [DateTimeOffset]::Parse($capture.captureStartedAtUtc)).TotalMilliseconds
-        $capture.exitCode = $capture.process.ExitCode
-        $capture.outputExists = Test-Path -LiteralPath $capture.outputPath -PathType Leaf
-        $capture.process.Dispose()
-        $capture.process = $null
-        [void]$Pending.Remove($capture)
-        [void]$Completed.Add($capture)
+        # Register before returning so an exception in the caller cannot leave
+        # a successfully started VMMap process outside the guaranteed cleanup.
+        [void]$Pending.Add($capture)
+        return $capture
+    }
+    catch {
+        try {
+            # Also probe after a Start() exception: the native process may have
+            # been created before the wrapper reported the exception.
+            if ($vmMapStarted -or $vmMapProcess.HasExited -eq $false) {
+                Stop-Process -Id $vmMapProcess.Id -Force -ErrorAction SilentlyContinue
+                [void]$vmMapProcess.WaitForExit(1000)
+            }
+        }
+        catch {
+            # Preserve the start/registration failure.
+        }
+
+        try {
+            $vmMapProcess.Dispose()
+        }
+        catch {
+            # Preserve the start/registration failure.
+        }
+        throw
     }
 }
 
@@ -560,6 +565,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     Write-Host "Starting trial $trial of ${Runs}: $runId"
+    $primaryFailure = $null
 
     try {
         if (-not $process.Start()) {
@@ -623,9 +629,9 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                             -TargetHash $actualEbootHash `
                             -TargetArguments @($arguments + $launchAdditionalArguments) `
                             -DiagnosticState $latestDiagnosticState `
+                            -Pending $vmMapPending `
                             -ProcessCounters $actualCounters `
                             -TriggerThresholdBytes ([long]$actualCounters.workingSetBytes)
-                        [void]$vmMapPending.Add($capture)
                         $correctedCaptureRequested = $true
                         $captureStartedThisSample = $true
                     }
@@ -675,9 +681,9 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                                 -TargetHash $actualEbootHash `
                                 -TargetArguments @($arguments + $launchAdditionalArguments) `
                                 -DiagnosticState $latestDiagnosticState `
+                                -Pending $vmMapPending `
                                 -ProcessCounters $actualCounters `
                                 -TriggerThresholdBytes ([long]$actualCounters.workingSetBytes)
-                            [void]$vmMapPending.Add($capture)
                             $plateauCaptureRequested = $true
                             $captureStartedThisSample = $true
                         }
@@ -698,9 +704,9 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                             -TargetHash $actualEbootHash `
                             -TargetArguments @($arguments + $launchAdditionalArguments) `
                             -DiagnosticState $latestDiagnosticState `
+                            -Pending $vmMapPending `
                             -ProcessCounters $actualCounters `
                             -TriggerThresholdBytes $vmMapNearCutoffBytes
-                        [void]$vmMapPending.Add($capture)
                         $nearCutoffCaptureRequested = $true
                         $captureStartedThisSample = $true
                     }
@@ -740,26 +746,53 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             } while ([DateTimeOffset]::UtcNow -lt $vmMapDeadline)
 
             if ($vmMapPending.Count -gt 0) {
-                foreach ($capture in @($vmMapPending.ToArray())) {
-                    if ($null -ne $capture.process -and -not $capture.process.HasExited) {
-                        Stop-Process -Id $capture.process.Id -Force -ErrorAction SilentlyContinue
-                    }
-                }
-                Start-Sleep -Milliseconds 250
-                [void](Complete-VmMapCaptures -Pending $vmMapPending -Completed $vmMapCompleted)
+                Stop-AndDispose-VmMapCaptures `
+                    -Pending $vmMapPending `
+                    -Completed $vmMapCompleted `
+                    -TimeoutSeconds 10
             }
         }
     }
+    catch {
+        $primaryFailure = $_
+        throw
+    }
     finally {
-        if ($processStarted -and -not $process.HasExited) {
-            Stop-ProcessTree -RootProcessId $process.Id
-            if (-not $process.WaitForExit(5000)) {
-                throw "SharpEmu did not report exit within five seconds after forced termination."
+        $cleanupFailures = [System.Collections.Generic.List[object]]::new()
+
+        # This is deliberately in finally: capture handling must run even when
+        # diagnostics, process-tree termination, or manifest work fails.
+        if ($vmMapEnabled) {
+            try {
+                Stop-AndDispose-VmMapCaptures `
+                    -Pending $vmMapPending `
+                    -Completed $vmMapCompleted `
+                    -TimeoutSeconds 10
+            }
+            catch {
+                [void]$cleanupFailures.Add($_)
             }
         }
 
+        try {
+            if ($processStarted -and -not $process.HasExited) {
+                Stop-ProcessTree -RootProcessId $process.Id
+                if (-not $process.WaitForExit(5000)) {
+                    throw "SharpEmu did not report exit within five seconds after forced termination."
+                }
+            }
+        }
+        catch {
+            [void]$cleanupFailures.Add($_)
+        }
+
         $completedAt = [DateTimeOffset]::UtcNow
-        $manifest.status = "completed"
+        $manifest.status = if ($null -eq $primaryFailure -and $cleanupFailures.Count -eq 0) {
+            "completed"
+        }
+        else {
+            "failed"
+        }
         $manifest.completedAtUtc = $completedAt.ToString("O")
         $manifest.result = [ordered]@{
             terminationReason = $terminationReason
@@ -771,6 +804,11 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             emulationProcessIds = @($emulationProcessIds | Sort-Object)
             checkpointObserved = $null
             notes = "Record the observed checkpoint after reviewing the run. Do not infer it from process exit."
+        }
+        if ($cleanupFailures.Count -gt 0) {
+            $manifest.result.cleanupErrors = @($cleanupFailures | ForEach-Object {
+                $_.Exception.Message
+            })
         }
         if ($vmMapEnabled) {
             $manifest.vmmap.captures = @($vmMapCompleted | ForEach-Object {
@@ -788,6 +826,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                     captureDurationMilliseconds = $_.captureDurationMilliseconds
                     exitCode = $_.exitCode
                     outputExists = $_.outputExists
+                    cleanupError = $_.cleanupError
                     nearestDiagnosticsSample = $_.nearestDiagnosticsSample
                     guestMappingsAtStart = @($_.guestMappingsAtStart)
                     vulkanHostMappingsAtStart = @($_.vulkanHostMappingsAtStart)
@@ -796,9 +835,28 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 }
             })
         }
-        $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8
-        if ($null -ne $process) {
-            $process.Dispose()
+        try {
+            $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+        }
+        catch {
+            [void]$cleanupFailures.Add($_)
+        }
+        finally {
+            if ($null -ne $process) {
+                try {
+                    $process.Dispose()
+                }
+                catch {
+                    [void]$cleanupFailures.Add($_)
+                }
+            }
+        }
+
+        # A cleanup failure is useful when it is the only failure, but it must
+        # never replace a failure raised by the target or diagnostics body.
+        if ($null -eq $primaryFailure -and $cleanupFailures.Count -gt 0) {
+            $messages = @($cleanupFailures | ForEach-Object { $_.Exception.Message })
+            throw "Target-run cleanup failed: $($messages -join ' | ')"
         }
     }
 
