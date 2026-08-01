@@ -5,9 +5,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Oversized detile work
 
-Status: investigation complete on 2026-08-01. This is the focused finding
-after the TiledSource accounting correction; it does not implement a memory
-or scheduling correction.
+Status: implementation and target validation complete on 2026-08-01. Commit
+`c129d0f` implements the dispatch-local source-snapshot table described by the
+investigation and the matched target trials below measure its effect.
 
 ## Conclusion
 
@@ -19,22 +19,62 @@ rejected by the 256 MiB queue budget. The safety cutoff occurs before
 CompleteGuestWork, so the retained-byte counter still includes the active
 work even though the pending linked list no longer does.
 
-The payload is 5,378,410,360 bytes (5,129.251823 MiB, 5.009034984 GiB).
-Sixteen distinct 335,544,320-byte TiledSource arrays account for 5,120 MiB.
-They are repeated compatible captures of one 320 MiB guest source range at
-sixteen image bindings. Ten distinct 524,288-byte RgbaPixels arrays are
-repeated compatible captures of a second guest source range and account for
-another 5 MiB. The estimated removable capture overhead is 5,037,883,392
-bytes (4,804.5 MiB) if the captures are the same compatible source snapshots.
-The observed payload would then be 340,526,968 bytes (324.751823 MiB).
+Before the change, the payload was 5,378,410,360 bytes (5,129.251823 MiB,
+5.009034984 GiB). Sixteen distinct 335,544,320-byte TiledSource arrays
+accounted for 5,120 MiB. They were repeated compatible captures of one 320
+MiB guest source range at sixteen image bindings. Ten distinct 524,288-byte
+RgbaPixels arrays were repeated compatible captures of a second guest source
+range and accounted for another 5 MiB.
 
-The narrowest correct next change is in the producer path that materializes
-the image bindings: use a dispatch-local snapshot table in
-AgcExports.CreateGuestDrawTextures/TryCreateGuestDrawTexture. Reuse only an
-immutable source array whose complete guest range, selected view/mip,
-descriptor, layout, storage semantics, and guest write generation match.
-Keep a GuestDrawTexture per binding so view and sampler semantics remain
-unchanged. This investigation does not make that change.
+The producer now keeps one dispatch-local table of immutable source snapshots
+while `AgcExports.CreateGuestDrawTextures` constructs the bindings. The same
+target work now retains one 335,544,320-byte TiledSource and one 524,288-byte
+RgbaPixels array for those groups. The measured payload is 340,526,968 bytes
+(324.751823 MiB), a reduction of 5,037,883,392 bytes (4,804.5 MiB). Each
+binding still has its own descriptor, view metadata, and sampler state.
+
+The dispatch completes through the existing queue lifecycle with exact payload
+accounting. The remaining target blocker is later startup execution: all three
+new trials reached the same first-frame checkpoint (and logged a guest frame),
+but the unchanged 6 GiB working-set safety limit still terminated the process
+before any nickname or character-creation evidence.
+
+## Implemented invariant and compatibility key
+
+The table is ownership of immutable source snapshots for one
+`CreateGuestDrawTextures` invocation only. It is not a global cache and is not
+retained after construction. A complete successful guest read or materialized
+detile populates an entry; cache-hit, upload-known, fallback, and failed-read
+paths do not. The consumer does not mutate the shared source arrays, so every
+binding made from an entry observes the same captured bytes. A later binding
+gets its own `GuestDrawTexture` and sampler conversion while reusing only the
+immutable `RgbaPixels` or `TiledSource` array and snapshot metadata.
+
+The actual `GuestTextureSnapshotKey` contains:
+
+- the complete decoded `TextureDescriptor` (address, logical dimensions,
+  physical size, format, number type, tile mode, type, mip range, pitch,
+  destination selects, depth, array pitch/base, LOD, BC swizzle, metadata
+  address, and descriptor flags);
+- selected mip, storage and arrayed-view flags, normalized texture depth,
+  source width, output layer count, base-mip byte offset, source address, and
+  covered byte range;
+- logical and physical source byte counts, per-slice byte count, slice stride,
+  source layer count, base-mip-tail state and tail coordinates;
+- representation (`RgbaPixels` or `TiledSource`), exact detile parameters when
+  GPU detile is used, and the nullable tracked guest write generation.
+
+Sampler state is deliberately not a key field because it is binding-specific.
+Different ranges, views, mips, dimensions, formats, layouts, storage
+semantics, layer behavior, detile interpretations, or known write generations
+therefore cannot share. A tracked generation difference produces different
+keys. On Windows the write tracker is normally unavailable. In that case the
+nullable generation is part of the exact dispatch-local key: the first
+complete read is authoritative for later compatible bindings in that one
+construction. This is safe for exact aliases because sequential copies are an
+implementation artifact, not separate guest-visible observations; the table
+never crosses an invocation and uncertain/incompatible captures are not
+generalized.
 
 ## Scope and evidence
 
@@ -49,6 +89,7 @@ Target identity was verified before the runs:
 | Host | Windows, RTX 3070 Ti, NVIDIA 610.74 |
 | Safety policy | 6 GiB working-set limit, unchanged page-file policy |
 | Diagnostic commit | b67b143d7b90dcf72eb979246bd3d0afa547fd2e |
+| Implementation commit | c129d0f |
 | Route | startup to first rendered frame |
 
 The diagnostic event is opt-in and bounded. It records scalar work and
@@ -56,7 +97,7 @@ descriptor metadata, reference-identity array accounting, and all 43 array
 owners in this item. It does not retain source arrays, hash or compare
 contents, record guest write generations, or dump texture contents.
 
-## Work identity and lifecycle state
+## Work identity and lifecycle state before implementation
 
 | Field | Observation |
 | --- | --- |
@@ -87,7 +128,7 @@ wait, or another operation inside the execution path. The evidence does
 establish that the presenter had consumed the work and had not reached
 completion; related wait messages are not sufficient to claim a shader hang.
 
-## Complete payload composition
+## Complete payload composition before implementation
 
 Payload accounting counts each reachable byte array once by reference. The
 reference count is the number of field references, so it exposes the shared
@@ -118,7 +159,7 @@ is the 1,824,536-byte compute shader, followed by the 1,048,576-byte
 globalBuffer[10]. The ten 524,288-byte RgbaPixels arrays are the next repeated
 owners.
 
-## Texture-array metadata
+## Texture-array metadata before implementation
 
 The event records one metadata row per image binding. The following groups
 share a guest range and compatible recorded texture metadata/content-key
@@ -140,7 +181,7 @@ source array in this work. They reference the shared zero-length RgbaPixels
 array (ID 2) where applicable. They do not add payload bytes. No texture
 content was dumped.
 
-## Duplicate and overlap analysis
+## Duplicate and overlap analysis before implementation
 
 The 16 TiledSource arrays in the first group have the same recorded guest
 range, compatible descriptor fields, and content-key metadata. They are
@@ -180,7 +221,7 @@ texture-content cache is not
 an already available source-array cache at this point, and it is populated on
 the consumer side after host resource creation.
 
-## Allocation and retention path
+## Allocation and retention path before implementation
 
 The observed path is:
 
@@ -223,7 +264,7 @@ This separates the hypotheses:
 | Scheduling/dependency block | Rejected as the reason for non-consumption; required sequence is complete and the item is taken at the queue head. |
 | Exact inner execution blocker | Unresolved; the state only proves execution has not returned by cutoff. |
 
-## Controlled trials
+## Controlled trials before implementation
 
 The following three clean, comparable trials used the final diagnostic commit,
 the exact target identity and eboot hash, the unchanged target configuration,
@@ -233,9 +274,9 @@ state sequence in all three.
 
 | Run | Child PID | Duration | Oversized sequence | Sampled peak WS/private | Last retained count | Visible checkpoint |
 | --- | ---: | ---: | ---: | --- | ---: | --- |
-| 20260801T033052405Z-b67b143-trial-01 | 14496 | 18,891 ms | 765 | 9.157 / 14.094 GiB | 6 | first rendered frame after splash; nickname prompt not reached |
-| 20260801T033111309Z-b67b143-trial-02 | 21496 | 16,163 ms | 767 | 9.353 / 14.276 GiB | 5 | first rendered frame after splash; nickname prompt not reached |
-| 20260801T033148289Z-b67b143-trial-04 | 22256 | 16,764 ms | 768 | 9.366 / 14.284 GiB | 5 | first rendered frame after splash; nickname prompt not reached |
+| 20260801T033052405Z-b67b143-trial-01 | 14496 | 18,891 ms | 765 | 9.019 / 13.616 GiB | 6 | first rendered frame after splash; nickname prompt not reached |
+| 20260801T033111309Z-b67b143-trial-02 | 21496 | 16,163 ms | 767 | 8.709 / 13.034 GiB | 5 | first rendered frame after splash; nickname prompt not reached |
+| 20260801T033148289Z-b67b143-trial-04 | 22256 | 16,764 ms | 768 | 9.003 / 13.049 GiB | 5 | first rendered frame after splash; nickname prompt not reached |
 
 All three logs contain the splash presentation, splash hide, and first-frame
 presentation messages. None reached the character-creation nickname prompt.
@@ -245,60 +286,85 @@ file gathering. Those runs are reported as timing variance, not combined with
 the three event-bearing samples: the payload finding reproduces in all three
 comparable event-bearing trials.
 
-## Implementation-ready recommendation
+## Implemented producer boundary and regression coverage
 
-Change only the producer boundary that builds the image-binding snapshots:
-AgcExports.CreateGuestDrawTextures and its TryCreateGuestDrawTexture helper.
-Introduce a table scoped to one dispatch or one work construction. Its key
-must include the exact source guest address and covered range, selected
-view/mip and base mip, dimensions, depth, pitch, format, number type, tile
-mode, texture type, array layout/layers, storage/write semantics, and a guest
-write or dirty generation. Sharing is safe only when that key and the
-dispatch's memory/write-generation semantics establish the same compatible
-source snapshot. On an exact match, construct the new binding record with the
-binding's own descriptor and sampler fields but reuse the immutable RgbaPixels
-or TiledSource reference. Do not make the table global or retain it after work
-construction.
+`AgcExports.CreateGuestDrawTextures` now creates one
+`GuestTextureSnapshotTable` and passes it through every
+`TryCreateGuestDrawTexture` call. The table is populated only after a complete
+read/materialization and is discarded when the invocation returns. GPU-detile
+bindings reuse `TiledSource`; compatible CPU-materialized bindings reuse
+`RgbaPixels`. Storage and array paths use the same key discipline, while
+cache/upload-known behavior, fallback behavior, queue ordering, and sequence
+completion remain unchanged.
 
-If that source-snapshot condition holds, the expected target reduction is
-4,804.5 MiB for this item, from 5,129.251823 MiB to about 324.751823 MiB.
-That reduction is an estimate, not a byte-for-byte result established by this
-investigation. The change must preserve:
+The complete post-change payload composition for the dominant dispatch is:
 
-- guest queue order and sequence completion;
-- resource visibility and write-generation semantics;
-- selected texture-view, mip, array-layer, sampler, and storage behavior;
-- immutable ownership of shared source arrays;
-- no sharing across different source ranges or incompatible descriptors; and
-- render-thread follow-up and deadlock safety.
+| Category | Unique arrays | References | Unique bytes | Referenced bytes |
+| --- | ---: | ---: | ---: | ---: |
+| Compute shaders | 1 | 1 | 1,824,536 | 1,824,536 |
+| RgbaPixels | 5 | 40 | 665,600 | 5,384,192 |
+| TiledSource | 1 | 16 | 335,544,320 | 5,368,709,120 |
+| Global buffers | 12 | 12 | 2,492,512 | 2,492,512 |
+| **Total** | **19** | **69** | **340,526,968** | **5,378,410,360** |
 
-Required synthetic regressions are repeated compatible bindings sharing one
-source array and being counted once, mismatched ranges/views/mips/storage
-states refusing to share, array-layer TiledSource sizing, and queue
-take/complete accounting with shared references. If target write-generation
-semantics satisfy the sharing condition, target validation should show one
-320 MiB TiledSource owner instead of sixteen, one 512 KiB RgbaPixels owner
-instead of ten, unchanged descriptor metadata, and an unchanged or improved
-visible checkpoint.
+Complete guest-work accounting uses reference identity, so the retained
+payload is the unique-byte total, not the referenced-byte total. The table
+therefore removes 5,037,883,392 bytes (4,804.5 MiB) from this work, measured
+from the before and after diagnostics. The dominant dispatch still has the
+same shader, `27 x 15 x 72` groups, `40` textures, `12` global buffers, and
+`acb.compute[64]` queue identity. Its state sequence is
+`ready-head,taken,executing,completed`; after completion its pending bytes are
+zero.
 
-Other candidates are not the narrowest supported change. A global content
-cache would broaden lifetime and invalidation rules. Deferring all capture
-could alter guest visibility timing. Incremental detile or chunking would
-need proof that queue order, resource views, and render-thread follow-up
-remain valid. Reordering production cannot fix this instance because the
-item was already ready and consumed.
+The focused regressions cover production-boundary sharing of GPU-detile
+`TiledSource` and CPU-materialized `RgbaPixels`, sampler preservation per
+binding, reference-identity payload counting through take/complete, different
+ranges, mip/view/format/layout/storage/layer/detile mismatches, known write
+generation differences, the Windows untracked-generation exact-alias
+invariant, failed-read fallback isolation, and per-invocation table lifetime.
 
-The recommendation is falsified if controlled memory/write-generation tests
-show that same-key bindings can observe different source snapshots, a guest
-write occurs between captures and sharing produces stale data, the backend
-mutates a supposedly immutable source array, or conditional sharing leaves
-the same payload and execution state. The exact post-take execution phase
-remains the next separate investigation if the reduced payload still fails to
-complete.
+## Matched target evidence after implementation
+
+The following clean trials use the same target identity, eboot hash, host,
+unchanged 6 GiB working-set policy, unchanged page-file policy, and the same
+diagnostic route as the historical three event-bearing trials. The measured
+payload is identical in all three. Runner-manifest peak values are shown in
+GiB; timing is reported separately because it varies with startup scheduling.
+
+| Run | Oversized sequence | Payload | Queue result | Peak WS / private | Duration | Checkpoint |
+| --- | ---: | ---: | --- | --- | ---: | --- |
+| 20260801T061920689Z-c129d0f-trial-01 | 768 | 340,526,968 bytes | completed; pending bytes 0 | 6.149 / 11.422 GiB | 50,619 ms | splash, first frame, and guest-frame logs; no nickname prompt |
+| 20260801T062011318Z-c129d0f-trial-02 | 767 | 340,526,968 bytes | completed; pending bytes 0 | 6.274 / 11.653 GiB | 19,213 ms | splash, first frame, and guest-frame logs; no nickname prompt |
+| 20260801T062030533Z-c129d0f-trial-03 | 768 | 340,526,968 bytes | completed; pending bytes 0 | 6.837 / 12.220 GiB | 20,069 ms | splash, first frame, and guest-frame logs; no nickname prompt |
+
+Before implementation, the matched payload was 5,378,410,360 bytes
+(5,129.251823 MiB), with peak WS/private values of 9.019/13.616,
+8.709/13.034, and 9.003/13.049 GiB in the three event-bearing trials listed
+above. Thus the payload reduction is measured, not predicted. The after
+trials retain one 335,544,320-byte TiledSource referenced by sixteen bindings
+and one 524,288-byte RgbaPixels array referenced by ten bindings, rather than
+sixteen and ten separately allocated arrays.
+
+At the sample immediately before the oversized event, managed GC heap/
+committed memory was 807.5/820.7, 577.6/650.7, and 604.6/760.0 MiB after the
+change. The corresponding before-implementation samples were 5,261.4/5,552.8,
+5,278.5/5,620.7, and 5,168.1/5,380.1 MiB. These are event-adjacent memory
+measurements, not timing-neutral performance benchmarks.
+
+All three after trials reached the same first rendered frame after splash as
+the before trials. They additionally logged a guest-frame presentation, but
+there is no screenshot or log evidence of the nickname prompt or character
+creation, so `docs/BASELINE.md` remains unchanged. The process still ends at
+the unchanged working-set safety cutoff after this dispatch; the next frontier
+is later startup execution and its remaining memory/wait behavior, not this
+snapshot-ownership correction.
 
 ## Verification
 
-Focused diagnostics/accounting tests passed: 9/9. The shader lane was not run:
-this commit changes only opt-in diagnostics and documentation, not shader
-translation or GPU execution semantics. The required Fast lane and
-git diff --check are recorded with the investigation change.
+The focused snapshot-sharing and guest-work lifecycle filter passed 15/15
+tests, including the production `CreateGuestDrawTextures` boundary. The Fast
+lane passed all 791 tests, and `git diff --check` passed. Three comparable
+target trials reproduced the same dispatch identity, exact reduced payload,
+queue completion, and first-frame checkpoint shown above. The shader lane was
+not run because this change reuses already-produced byte arrays; it does not
+change shader translation, SPIR-V, or GPU-detile shader semantics.

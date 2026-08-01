@@ -379,7 +379,7 @@ public static partial class AgcExports
         new(2, 2, 0x929FD95D, [new(0x250, 0)]),
     ];
 
-    private readonly record struct TextureDescriptor(
+    internal readonly record struct TextureDescriptor(
         ulong Address,
         uint Width,
         uint Height,
@@ -504,12 +504,75 @@ public static partial class AgcExports
         float ClearBlue = 0f,
         float ClearAlpha = 1f);
 
-    private sealed record TranslatedImageBinding(
+    internal sealed record TranslatedImageBinding(
         TextureDescriptor Descriptor,
         bool IsStorage,
         uint MipLevel,
         IReadOnlyList<uint> SamplerDescriptor,
         bool IsArrayed = false);
+
+    internal enum GuestTextureSnapshotRepresentation
+    {
+        RgbaPixels,
+        TiledSource,
+    }
+
+    /// <summary>
+    /// Complete identity of the immutable guest bytes captured for one binding.
+    /// Sampler state is deliberately absent: it belongs to each binding, while
+    /// the source arrays are safe to share only when every capture and
+    /// interpretation field agrees.
+    /// </summary>
+    internal readonly record struct GuestTextureSnapshotKey(
+        TextureDescriptor Descriptor,
+        uint MipLevel,
+        bool IsStorage,
+        bool IsArrayed,
+        uint TextureDepth,
+        uint SourceWidth,
+        uint OutputArrayLayers,
+        ulong BaseMipByteOffset,
+        ulong SourceAddress,
+        ulong SourceCoveredByteCount,
+        ulong LogicalSourceByteCount,
+        ulong PhysicalSourceByteCount,
+        ulong SourceSliceByteCount,
+        ulong SourceSliceStride,
+        uint SourceLayerCount,
+        bool BaseMipInTail,
+        int MipTailElementX,
+        int MipTailElementY,
+        GuestTextureSnapshotRepresentation Representation,
+        DetileParams? Detile,
+        long? WriteGeneration);
+
+    internal readonly record struct GuestTextureSnapshot(
+        byte[] RgbaPixels,
+        byte[]? TiledSource,
+        DetileParams? Detile,
+        GuestTextureSnapshotInfo SnapshotInfo,
+        long WriteGeneration);
+
+    /// <summary>
+    /// Dispatch-local ownership of immutable source snapshots. It is never
+    /// retained after image bindings have been constructed and is populated
+    /// only after a complete, successful guest read. In particular, fallback,
+    /// cache-hit, and failed-read paths cannot poison the table.
+    /// </summary>
+    internal sealed class GuestTextureSnapshotTable
+    {
+        private readonly Dictionary<GuestTextureSnapshotKey, GuestTextureSnapshot> _entries = new();
+
+        internal bool TryGet(
+            in GuestTextureSnapshotKey key,
+            out GuestTextureSnapshot snapshot) =>
+            _entries.TryGetValue(key, out snapshot);
+
+        internal void Add(
+            in GuestTextureSnapshotKey key,
+            in GuestTextureSnapshot snapshot) =>
+            _entries.Add(key, snapshot);
+    }
 
     private readonly record struct RenderTargetWriter(
         ulong Sequence,
@@ -9081,12 +9144,13 @@ public static partial class AgcExports
             $"buffers=[{buffers}] vertex=[{vertexInputs}] indices=[{indices}]");
     }
 
-    private static IReadOnlyList<GuestDrawTexture> CreateGuestDrawTextures(
+    internal static IReadOnlyList<GuestDrawTexture> CreateGuestDrawTextures(
         CpuContext ctx,
         IReadOnlyList<TranslatedImageBinding> bindings,
         out int fallbackTextureCount)
     {
         var textures = new List<GuestDrawTexture>(bindings.Count);
+        var snapshots = new GuestTextureSnapshotTable();
         fallbackTextureCount = 0;
         foreach (var binding in bindings)
         {
@@ -9097,6 +9161,7 @@ public static partial class AgcExports
                     binding.MipLevel,
                     binding.SamplerDescriptor,
                     binding.IsArrayed,
+                    snapshots,
                     out var texture))
             {
                 textures.Add(texture);
@@ -9641,6 +9706,93 @@ public static partial class AgcExports
             System.Diagnostics.Stopwatch.GetTimestamp());
     }
 
+    private static GuestTextureSnapshotKey CreateGuestTextureSnapshotKey(
+        TextureDescriptor descriptor,
+        uint mipLevel,
+        bool isStorage,
+        bool isArrayed,
+        uint textureDepth,
+        uint sourceWidth,
+        uint outputArrayLayers,
+        ulong baseMipByteOffset,
+        ulong logicalSourceByteCount,
+        ulong physicalSourceByteCount,
+        ulong sourceSliceByteCount,
+        ulong sourceSliceStride,
+        uint sourceLayerCount,
+        bool baseMipInTail,
+        int mipTailElementX,
+        int mipTailElementY,
+        GuestTextureSnapshotRepresentation representation,
+        DetileParams? detile,
+        long? writeGeneration)
+    {
+        var sourceAddress = checked(descriptor.Address + baseMipByteOffset);
+        var sourceCoveredByteCount = sourceLayerCount == 0
+            ? 0UL
+            : checked(
+                (ulong)(sourceLayerCount - 1) * sourceSliceStride +
+                sourceSliceByteCount);
+        return new GuestTextureSnapshotKey(
+            descriptor,
+            mipLevel,
+            isStorage,
+            isArrayed,
+            textureDepth,
+            sourceWidth,
+            outputArrayLayers,
+            baseMipByteOffset,
+            sourceAddress,
+            sourceCoveredByteCount,
+            logicalSourceByteCount,
+            physicalSourceByteCount,
+            sourceSliceByteCount,
+            sourceSliceStride,
+            sourceLayerCount,
+            baseMipInTail,
+            mipTailElementX,
+            mipTailElementY,
+            representation,
+            detile,
+            writeGeneration);
+    }
+
+    private static GuestDrawTexture CreateGuestDrawTextureFromSnapshot(
+        TextureDescriptor descriptor,
+        bool isStorage,
+        uint mipLevel,
+        IReadOnlyList<uint> samplerDescriptor,
+        bool isArrayed,
+        uint textureDepth,
+        uint sourceWidth,
+        uint outputArrayLayers,
+        in GuestTextureSnapshot snapshot) =>
+        new(
+            descriptor.Address,
+            descriptor.Width,
+            descriptor.Height,
+            descriptor.Format,
+            descriptor.NumberType,
+            snapshot.RgbaPixels,
+            IsFallback: false,
+            IsStorage: isStorage,
+            MipLevels: descriptor.MipLevels,
+            MipLevel: mipLevel,
+            BaseMipLevel: descriptor.ViewBaseLevel,
+            ResourceMipLevels: descriptor.ResourceMipLevels,
+            Pitch: sourceWidth,
+            TileMode: descriptor.TileMode,
+            DstSelect: descriptor.DstSelect,
+            Sampler: ToGuestSampler(samplerDescriptor),
+            WriteGeneration: snapshot.WriteGeneration,
+            ArrayedView: isArrayed,
+            ArrayLayers: outputArrayLayers,
+            Type: descriptor.Type,
+            Depth: textureDepth,
+            TiledSource: snapshot.TiledSource,
+            Detile: snapshot.Detile,
+            SnapshotInfo: snapshot.SnapshotInfo);
+
     private static void TraceTextureFallback(TextureDescriptor descriptor, string reason)
     {
         var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
@@ -9667,6 +9819,7 @@ public static partial class AgcExports
         uint mipLevel,
         IReadOnlyList<uint> samplerDescriptor,
         bool isArrayed,
+        GuestTextureSnapshotTable snapshots,
         out GuestDrawTexture texture)
     {
         texture = default!;
@@ -9809,6 +9962,21 @@ public static partial class AgcExports
             descriptor.Depth > 1 &&
             !_arrayUploadUnsupported.ContainsKey(descriptor.Address);
         var arrayUploadLayers = wantsArrayUpload ? descriptor.Depth : 1u;
+        var sampler = ToGuestSampler(samplerDescriptor);
+        var hasWriteGeneration =
+            GuestImageWriteTracker.TryGetWriteGeneration(
+                descriptor.Address,
+                out var writeGeneration);
+        long? snapshotWriteGeneration = hasWriteGeneration
+            ? writeGeneration
+            : null;
+
+        // Windows normally has no tracked generation. In that case the exact
+        // compatibility key is the dispatch-local coherence boundary: the
+        // first complete read is authoritative for every later compatible
+        // binding in this construction. The table never crosses an invocation
+        // and cache-hit, fallback, and failed-read paths never enter it, so a
+        // sequential copy cannot expose a partially mixed dispatch snapshot.
 
         // Upload-known (not plain availability): the presenter's answer goes
         // generation-stale when the guest CPU rewrites a CPU-backed image
@@ -9826,7 +9994,7 @@ public static partial class AgcExports
                 descriptor.NumberType))
         {
             NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-                        texture = new GuestDrawTexture(
+            texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -9852,6 +10020,8 @@ public static partial class AgcExports
         if (isStorage)
         {
             var initialPixels = Array.Empty<byte>();
+            var hasSnapshot = false;
+            var snapshot = default(GuestTextureSnapshot);
             var uploadKnown = descriptor.Address != 0 &&
                 GuestGpu.Current.IsGuestImageUploadKnown(
                     descriptor.Address,
@@ -9861,32 +10031,80 @@ public static partial class AgcExports
             var linearNonzero = false;
             if (descriptor.Address != 0 && !uploadKnown)
             {
+                var snapshotKey = CreateGuestTextureSnapshotKey(
+                    descriptor,
+                    mipLevel,
+                    true,
+                    isArrayed,
+                    textureDepth,
+                    sourceWidth,
+                    1,
+                    baseMipByteOffset,
+                    sourceByteCount,
+                    physicalSourceByteCount,
+                    physicalSourceByteCount,
+                    physicalSourceByteCount,
+                    1,
+                    baseMipInTail,
+                    mipTailElementX,
+                    mipTailElementY,
+                    GuestTextureSnapshotRepresentation.RgbaPixels,
+                    null,
+                    snapshotWriteGeneration);
+                if (snapshots.TryGet(snapshotKey, out snapshot))
+                {
+                    initialPixels = snapshot.RgbaPixels;
+                    hasSnapshot = true;
+                    readSucceeded = true;
+                    linearNonzero = true;
+                }
+
                 // Storage images can be pre-populated in tiled guest memory
                 // just like sampled images. Reading only the logical linear
                 // byte count both truncates 64 KiB swizzle blocks and uploads
                 // tiled bytes as scanlines. Read the full physical footprint
                 // and run the same AddrLib-derived detile path used below for
                 // sampled textures before seeding the Vulkan image.
-                var storageSource = AllocateDiagnosticBytes(
-                    checked((int)physicalSourceByteCount),
-                    "managed.agc-texture-source-allocated");
-                if (ctx.Memory.TryRead(descriptor.Address + baseMipByteOffset, storageSource))
+                if (!hasSnapshot)
                 {
-                    readSucceeded = true;
-                    var linearStorage = TryDetileTextureSource(
-                        descriptor,
-                        sourceWidth,
-                        checked((int)sourceByteCount),
-                        storageSource,
-                        baseMipInTail,
-                        mipTailElementX,
-                        mipTailElementY) ?? CopyDiagnosticBytes(
-                            storageSource.AsSpan(0, checked((int)sourceByteCount)),
-                            "managed.agc-texture-linear-allocated");
-                    if (linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
+                    var storageSource = AllocateDiagnosticBytes(
+                        checked((int)physicalSourceByteCount),
+                        "managed.agc-texture-source-allocated");
+                    if (ctx.Memory.TryRead(
+                            descriptor.Address + baseMipByteOffset,
+                            storageSource))
                     {
-                        linearNonzero = true;
-                        initialPixels = linearStorage;
+                        readSucceeded = true;
+                        var linearStorage = TryDetileTextureSource(
+                            descriptor,
+                            sourceWidth,
+                            checked((int)sourceByteCount),
+                            storageSource,
+                            baseMipInTail,
+                            mipTailElementX,
+                            mipTailElementY) ?? CopyDiagnosticBytes(
+                                storageSource.AsSpan(0, checked((int)sourceByteCount)),
+                                "managed.agc-texture-linear-allocated");
+                        if (linearStorage.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
+                        {
+                            linearNonzero = true;
+                            initialPixels = linearStorage;
+                            snapshot = new GuestTextureSnapshot(
+                                RgbaPixels: initialPixels,
+                                TiledSource: null,
+                                Detile: null,
+                                SnapshotInfo: CreateTextureSnapshotInfo(
+                                    descriptor,
+                                    baseMipByteOffset,
+                                    sourceByteCount,
+                                    physicalSourceByteCount,
+                                    physicalSourceByteCount,
+                                    physicalSourceByteCount,
+                                    sourceLayerCount: 1),
+                                WriteGeneration: snapshotWriteGeneration ?? -1);
+                            snapshots.Add(snapshotKey, snapshot);
+                            hasSnapshot = true;
+                        }
                     }
                 }
             }
@@ -9908,7 +10126,7 @@ public static partial class AgcExports
             }
 
             NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-                        texture = new GuestDrawTexture(
+            texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -9924,19 +10142,11 @@ public static partial class AgcExports
                 Pitch: sourceWidth,
                 TileMode: descriptor.TileMode,
                 DstSelect: descriptor.DstSelect,
-                Sampler: ToGuestSampler(samplerDescriptor),
+                Sampler: sampler,
+                WriteGeneration: hasSnapshot ? snapshot.WriteGeneration : -1,
                 Type: descriptor.Type,
                 Depth: textureDepth,
-                SnapshotInfo: initialPixels.Length == 0
-                    ? default
-                    : CreateTextureSnapshotInfo(
-                        descriptor,
-                        baseMipByteOffset,
-                        sourceByteCount,
-                        physicalSourceByteCount,
-                        physicalSourceByteCount,
-                        physicalSourceByteCount,
-                        1));
+                SnapshotInfo: hasSnapshot ? snapshot.SnapshotInfo : default);
             return true;
         }
 
@@ -9949,16 +10159,11 @@ public static partial class AgcExports
         // correct for static UI atlases. CPU-updated guest Bink planes are
         // handled by the upload-known gate above (forced copies when the
         // tracker cannot invalidate), not by disabling this cache skip.
-        var sampler = ToGuestSampler(samplerDescriptor);
         // Track the guest allocation before reading its texels so a CPU
         // rewrite landing after the copy still bumps the write generation.
         // The generation rides on the texture and is recorded by the
         // presenter after upload, where the upload-known skip compares it
         // against the tracker to force fresh texels for rewritten memory.
-        var hasWriteGeneration =
-            SharpEmu.HLE.GuestImageWriteTracker.TryGetWriteGeneration(
-                descriptor.Address,
-                out var writeGeneration);
         if (!_textureCopySkipDisabled &&
             descriptor.Address != 0 &&
             !SharpEmu.HLE.GuestImageWriteTracker.PeekDirty(descriptor.Address) &&
@@ -10003,6 +10208,45 @@ public static partial class AgcExports
             return true;
         }
 
+        DetileParams? gpuArrayParams = null;
+        if (wantsArrayUpload && _gpuDetileEnabled && hasElementLayout &&
+            !baseMipInTail &&
+            IsGpuDetileBytesPerElement(bytesPerElement) &&
+            IsGpuDetileTextureType(descriptor.Type) &&
+            (long)physicalSourceByteCount * arrayUploadLayers <= int.MaxValue)
+        {
+            var candidate = GnmTiling.GetDetileParams(
+                descriptor.TileMode,
+                bytesPerElement,
+                elementsWide,
+                elementsHigh);
+            if (IsGpuDetileEquation(candidate.Equation) &&
+                (long)elementsWide * elementsHigh * bytesPerElement <=
+                    (long)physicalSourceByteCount)
+            {
+                gpuArrayParams = candidate;
+            }
+        }
+
+        DetileParams? gpuDetileParams = null;
+        if (!isArrayed && _gpuDetileEnabled && hasElementLayout &&
+            !baseMipInTail &&
+            IsGpuDetileBytesPerElement(bytesPerElement) &&
+            IsGpuDetileTextureType(descriptor.Type))
+        {
+            var candidate = GnmTiling.GetDetileParams(
+                descriptor.TileMode,
+                bytesPerElement,
+                elementsWide,
+                elementsHigh);
+            if (IsGpuDetileEquation(candidate.Equation) &&
+                (long)elementsWide * elementsHigh * bytesPerElement <=
+                    (long)physicalSourceByteCount)
+            {
+                gpuDetileParams = candidate;
+            }
+        }
+
         if (wantsArrayUpload)
         {
             var arrayLayers = arrayUploadLayers;
@@ -10015,78 +10259,138 @@ public static partial class AgcExports
             // deswizzles every layer on the GPU; only unsupported cases fall to the
             // CPU per-layer detile below. Font/text atlases uploaded as 2D arrays
             // take this path.
-            if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
-                IsGpuDetileBytesPerElement(bytesPerElement) &&
-                IsGpuDetileTextureType(descriptor.Type) &&
-                (long)physicalSourceByteCount * arrayLayers <= int.MaxValue)
+            if (gpuArrayParams is { } arrayDetile)
             {
-                var gpuArrayParams = GnmTiling.GetDetileParams(
-                    descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh);
-                if (IsGpuDetileEquation(gpuArrayParams.Equation) &&
-                    (long)elementsWide * elementsHigh * bytesPerElement <= (long)physicalSourceByteCount)
+                var arrayTiledSnapshotKey = CreateGuestTextureSnapshotKey(
+                    descriptor,
+                    mipLevel,
+                    false,
+                    true,
+                    textureDepth,
+                    sourceWidth,
+                    arrayLayers,
+                    baseMipByteOffset,
+                    checked(sourceByteCount * arrayLayers),
+                    checked(physicalSourceByteCount * arrayLayers),
+                    physicalSourceByteCount,
+                    chainSliceBytes,
+                    arrayLayers,
+                    baseMipInTail,
+                    mipTailElementX,
+                    mipTailElementY,
+                    GuestTextureSnapshotRepresentation.TiledSource,
+                    arrayDetile,
+                    snapshotWriteGeneration);
+                if (snapshots.TryGet(arrayTiledSnapshotKey, out var sharedSnapshot))
                 {
-                    var sliceBytes = checked((int)physicalSourceByteCount);
-                    var tiledLayers = AllocateDiagnosticBytes(
-                        checked((int)((long)sliceBytes * arrayLayers)),
-                        "managed.agc-texture-source-allocated");
-                    var readAllLayers = true;
-                    for (var layer = 0u; layer < arrayLayers; layer++)
-                    {
-                        if (!ctx.Memory.TryRead(
-                                descriptor.Address + layer * chainSliceBytes + baseMipByteOffset,
-                                tiledLayers.AsSpan(checked((int)(layer * (uint)sliceBytes)), sliceBytes)))
-                        {
-                            readAllLayers = false;
-                            break;
-                        }
-                    }
+                    NoteSampledAddress(
+                        descriptor.Address,
+                        descriptor.Format,
+                        descriptor.NumberType);
+                    texture = CreateGuestDrawTextureFromSnapshot(
+                        descriptor,
+                        false,
+                        mipLevel,
+                        samplerDescriptor,
+                        true,
+                        textureDepth,
+                        sourceWidth,
+                        arrayLayers,
+                        sharedSnapshot);
+                    return true;
+                }
 
-                    if (readAllLayers)
+                var sliceBytes = checked((int)physicalSourceByteCount);
+                var tiledLayers = AllocateDiagnosticBytes(
+                    checked((int)((long)sliceBytes * arrayLayers)),
+                    "managed.agc-texture-source-allocated");
+                var readAllLayers = true;
+                for (var layer = 0u; layer < arrayLayers; layer++)
+                {
+                    if (!ctx.Memory.TryRead(
+                            descriptor.Address + layer * chainSliceBytes + baseMipByteOffset,
+                            tiledLayers.AsSpan(checked((int)(layer * (uint)sliceBytes)), sliceBytes)))
                     {
-                        NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-                        texture = new GuestDrawTexture(
-                            descriptor.Address,
-                            descriptor.Width,
-                            descriptor.Height,
-                            descriptor.Format,
-                            descriptor.NumberType,
-                            [],
-                            IsFallback: false,
-                            IsStorage: false,
-                            MipLevels: descriptor.MipLevels,
-                            MipLevel: mipLevel,
-                            BaseMipLevel: descriptor.ViewBaseLevel,
-                            ResourceMipLevels: descriptor.ResourceMipLevels,
-                            Pitch: sourceWidth,
-                            TileMode: descriptor.TileMode,
-                            DstSelect: descriptor.DstSelect,
-                            Sampler: sampler,
-                            WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
-                            ArrayedView: true,
-                            ArrayLayers: arrayLayers,
-                            // Must match the identity the CPU path below ships, or
-                            // the presenter caches this texture under a different
-                            // key than IsTextureContentCached queries above and the
-                            // texel-copy skip never hits for non-2D descriptors.
-                            Type: descriptor.Type,
-                            Depth: textureDepth,
-                            TiledSource: tiledLayers,
-                            Detile: gpuArrayParams,
-                            SnapshotInfo: CreateTextureSnapshotInfo(
-                                descriptor,
-                                baseMipByteOffset,
-                                checked(sourceByteCount * arrayLayers),
-                                checked((ulong)sliceBytes * arrayLayers),
-                                (ulong)sliceBytes,
-                                chainSliceBytes,
-                                arrayLayers));
-                        return true;
+                        readAllLayers = false;
+                        break;
                     }
+                }
+
+                if (readAllLayers)
+                {
+                    var snapshot = new GuestTextureSnapshot(
+                        RgbaPixels: [],
+                        TiledSource: tiledLayers,
+                        Detile: arrayDetile,
+                        SnapshotInfo: CreateTextureSnapshotInfo(
+                            descriptor,
+                            baseMipByteOffset,
+                            checked(sourceByteCount * arrayLayers),
+                            checked((ulong)sliceBytes * arrayLayers),
+                            (ulong)sliceBytes,
+                            chainSliceBytes,
+                            arrayLayers),
+                        WriteGeneration: snapshotWriteGeneration ?? -1);
+                    snapshots.Add(arrayTiledSnapshotKey, snapshot);
+                    NoteSampledAddress(
+                        descriptor.Address,
+                        descriptor.Format,
+                        descriptor.NumberType);
+                    texture = CreateGuestDrawTextureFromSnapshot(
+                        descriptor,
+                        false,
+                        mipLevel,
+                        samplerDescriptor,
+                        true,
+                        textureDepth,
+                        sourceWidth,
+                        arrayLayers,
+                        snapshot);
+                    return true;
                 }
             }
 
             if (totalBytes <= int.MaxValue)
             {
+                var arrayLinearSnapshotKey = CreateGuestTextureSnapshotKey(
+                    descriptor,
+                    mipLevel,
+                    false,
+                    true,
+                    textureDepth,
+                    sourceWidth,
+                    arrayLayers,
+                    baseMipByteOffset,
+                    checked((ulong)layerBytes * arrayLayers),
+                    checked(physicalSourceByteCount * arrayLayers),
+                    physicalSourceByteCount,
+                    chainSliceBytes,
+                    arrayLayers,
+                    baseMipInTail,
+                    mipTailElementX,
+                    mipTailElementY,
+                    GuestTextureSnapshotRepresentation.RgbaPixels,
+                    null,
+                    snapshotWriteGeneration);
+                if (snapshots.TryGet(arrayLinearSnapshotKey, out var sharedSnapshot))
+                {
+                    NoteSampledAddress(
+                        descriptor.Address,
+                        descriptor.Format,
+                        descriptor.NumberType);
+                    texture = CreateGuestDrawTextureFromSnapshot(
+                        descriptor,
+                        false,
+                        mipLevel,
+                        samplerDescriptor,
+                        true,
+                        textureDepth,
+                        sourceWidth,
+                        arrayLayers,
+                        sharedSnapshot);
+                    return true;
+                }
+
                 var layered = AllocateDiagnosticBytes(
                     checked((int)totalBytes),
                     "managed.agc-texture-linear-allocated");
@@ -10120,28 +10424,10 @@ public static partial class AgcExports
 
                 if (uploadedLayers == arrayLayers)
                 {
-                    NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-                    texture = new GuestDrawTexture(
-                        descriptor.Address,
-                        descriptor.Width,
-                        descriptor.Height,
-                        descriptor.Format,
-                        descriptor.NumberType,
-                        layered,
-                        IsFallback: false,
-                        IsStorage: false,
-                        MipLevels: descriptor.MipLevels,
-                        MipLevel: mipLevel,
-                        BaseMipLevel: descriptor.ViewBaseLevel,
-                        ResourceMipLevels: descriptor.ResourceMipLevels,
-                        Pitch: sourceWidth,
-                        TileMode: descriptor.TileMode,
-                        DstSelect: descriptor.DstSelect,
-                        Sampler: sampler,
-                        ArrayedView: true,
-                        ArrayLayers: arrayLayers,
-                        Type: descriptor.Type,
-                        Depth: textureDepth,
+                    var snapshot = new GuestTextureSnapshot(
+                        RgbaPixels: layered,
+                        TiledSource: null,
+                        Detile: null,
                         SnapshotInfo: CreateTextureSnapshotInfo(
                             descriptor,
                             baseMipByteOffset,
@@ -10149,12 +10435,111 @@ public static partial class AgcExports
                             checked(physicalSourceByteCount * arrayLayers),
                             physicalSourceByteCount,
                             chainSliceBytes,
-                            arrayLayers));
+                            arrayLayers),
+                        WriteGeneration: snapshotWriteGeneration ?? -1);
+                    snapshots.Add(arrayLinearSnapshotKey, snapshot);
+                    NoteSampledAddress(
+                        descriptor.Address,
+                        descriptor.Format,
+                        descriptor.NumberType);
+                    texture = CreateGuestDrawTextureFromSnapshot(
+                        descriptor,
+                        false,
+                        mipLevel,
+                        samplerDescriptor,
+                        true,
+                        textureDepth,
+                        sourceWidth,
+                        arrayLayers,
+                        snapshot);
                     return true;
                 }
             }
 
             _arrayUploadUnsupported.TryAdd(descriptor.Address, 0);
+        }
+
+        GuestTextureSnapshotKey? tiledSnapshotKey = null;
+        if (gpuDetileParams is not null)
+        {
+            tiledSnapshotKey = CreateGuestTextureSnapshotKey(
+                descriptor,
+                mipLevel,
+                false,
+                isArrayed,
+                textureDepth,
+                sourceWidth,
+                1,
+                baseMipByteOffset,
+                sourceByteCount,
+                physicalSourceByteCount,
+                physicalSourceByteCount,
+                physicalSourceByteCount,
+                1,
+                baseMipInTail,
+                mipTailElementX,
+                mipTailElementY,
+                GuestTextureSnapshotRepresentation.TiledSource,
+                gpuDetileParams.Value,
+                snapshotWriteGeneration);
+            if (snapshots.TryGet(tiledSnapshotKey.Value, out var tiledSnapshot))
+            {
+                NoteSampledAddress(
+                    descriptor.Address,
+                    descriptor.Format,
+                    descriptor.NumberType);
+                texture = CreateGuestDrawTextureFromSnapshot(
+                    descriptor,
+                    false,
+                    mipLevel,
+                    samplerDescriptor,
+                    isArrayed,
+                    textureDepth,
+                    sourceWidth,
+                    1,
+                    tiledSnapshot);
+                return true;
+            }
+        }
+
+        var linearSnapshotKey = CreateGuestTextureSnapshotKey(
+            descriptor,
+            mipLevel,
+            false,
+            isArrayed,
+            textureDepth,
+            sourceWidth,
+            1,
+            baseMipByteOffset,
+            sourceByteCount,
+            physicalSourceByteCount,
+            physicalSourceByteCount,
+            physicalSourceByteCount,
+            1,
+            baseMipInTail,
+            mipTailElementX,
+            mipTailElementY,
+            GuestTextureSnapshotRepresentation.RgbaPixels,
+            null,
+            snapshotWriteGeneration);
+        if (gpuDetileParams is null &&
+            snapshots.TryGet(linearSnapshotKey, out var sharedLinearSnapshot))
+        {
+            NoteSampledAddress(
+                descriptor.Address,
+                descriptor.Format,
+                descriptor.NumberType);
+            texture = CreateGuestDrawTextureFromSnapshot(
+                descriptor,
+                false,
+                mipLevel,
+                samplerDescriptor,
+                isArrayed,
+                textureDepth,
+                sourceWidth,
+                1,
+                sharedLinearSnapshot);
+            return true;
         }
 
         var source = AllocateDiagnosticBytes(
@@ -10225,39 +10610,14 @@ public static partial class AgcExports
         //
         // Arrayed textures are handled by the arrayed branch above (they package
         // every layer's tiled slice); this branch is the single-layer case.
-        if (_gpuDetileEnabled && hasElementLayout && !baseMipInTail &&
-            IsGpuDetileBytesPerElement(bytesPerElement) && !isArrayed &&
-            IsGpuDetileTextureType(descriptor.Type))
+        if (gpuDetileParams is not null)
         {
-            var gpuDetileParams = GnmTiling.GetDetileParams(
-                descriptor.TileMode, bytesPerElement, elementsWide, elementsHigh);
-            if (IsGpuDetileEquation(gpuDetileParams.Equation) &&
-                (long)elementsWide * elementsHigh * bytesPerElement <= source.Length)
+            if (tiledSnapshotKey is { } snapshotKey)
             {
-                NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-                texture = new GuestDrawTexture(
-                    descriptor.Address,
-                    descriptor.Width,
-                    descriptor.Height,
-                    descriptor.Format,
-                    descriptor.NumberType,
-                    [],
-                    IsFallback: false,
-                    IsStorage: isStorage,
-                    MipLevels: descriptor.MipLevels,
-                    MipLevel: mipLevel,
-                    BaseMipLevel: descriptor.ViewBaseLevel,
-                    ResourceMipLevels: descriptor.ResourceMipLevels,
-                    Pitch: sourceWidth,
-                    TileMode: descriptor.TileMode,
-                    DstSelect: descriptor.DstSelect,
-                    Sampler: ToGuestSampler(samplerDescriptor),
-                    WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
-                    ArrayedView: isArrayed,
-                    Type: descriptor.Type,
-                    Depth: textureDepth,
+                var snapshot = new GuestTextureSnapshot(
+                    RgbaPixels: [],
                     TiledSource: source,
-                    Detile: gpuDetileParams,
+                    Detile: gpuDetileParams.Value,
                     SnapshotInfo: CreateTextureSnapshotInfo(
                         descriptor,
                         baseMipByteOffset,
@@ -10265,7 +10625,23 @@ public static partial class AgcExports
                         physicalSourceByteCount,
                         physicalSourceByteCount,
                         physicalSourceByteCount,
-                        1));
+                        sourceLayerCount: 1),
+                    WriteGeneration: snapshotWriteGeneration ?? -1);
+                snapshots.Add(snapshotKey, snapshot);
+                NoteSampledAddress(
+                    descriptor.Address,
+                    descriptor.Format,
+                    descriptor.NumberType);
+                texture = CreateGuestDrawTextureFromSnapshot(
+                    descriptor,
+                    false,
+                    mipLevel,
+                    samplerDescriptor,
+                    isArrayed,
+                    textureDepth,
+                    sourceWidth,
+                    1,
+                    snapshot);
                 return true;
             }
         }
@@ -10278,30 +10654,13 @@ public static partial class AgcExports
             baseMipInTail,
             mipTailElementX,
             mipTailElementY) ?? CopyDiagnosticBytes(
-                source.AsSpan(0, checked((int)sourceByteCount)),
-                "managed.agc-texture-linear-allocated");
+            source.AsSpan(0, checked((int)sourceByteCount)),
+            "managed.agc-texture-linear-allocated");
         DumpLinearTextureIfRequested(descriptor, sourceWidth, rgba);
-        texture = new GuestDrawTexture(
-            descriptor.Address,
-            descriptor.Width,
-            descriptor.Height,
-            descriptor.Format,
-            descriptor.NumberType,
-            rgba,
-            IsFallback: false,
-            IsStorage: isStorage,
-            MipLevels: descriptor.MipLevels,
-            MipLevel: mipLevel,
-            BaseMipLevel: descriptor.ViewBaseLevel,
-            ResourceMipLevels: descriptor.ResourceMipLevels,
-            Pitch: sourceWidth,
-            TileMode: descriptor.TileMode,
-            DstSelect: descriptor.DstSelect,
-            Sampler: ToGuestSampler(samplerDescriptor),
-            WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
-            ArrayedView: isArrayed,
-            Type: descriptor.Type,
-            Depth: textureDepth,
+        var materializedSnapshot = new GuestTextureSnapshot(
+            RgbaPixels: rgba,
+            TiledSource: null,
+            Detile: null,
             SnapshotInfo: CreateTextureSnapshotInfo(
                 descriptor,
                 baseMipByteOffset,
@@ -10309,7 +10668,23 @@ public static partial class AgcExports
                 physicalSourceByteCount,
                 physicalSourceByteCount,
                 physicalSourceByteCount,
-                1));
+                sourceLayerCount: 1),
+            WriteGeneration: snapshotWriteGeneration ?? -1);
+        snapshots.Add(linearSnapshotKey, materializedSnapshot);
+        NoteSampledAddress(
+            descriptor.Address,
+            descriptor.Format,
+            descriptor.NumberType);
+        texture = CreateGuestDrawTextureFromSnapshot(
+            descriptor,
+            false,
+            mipLevel,
+            samplerDescriptor,
+            isArrayed,
+            textureDepth,
+            sourceWidth,
+            1,
+            materializedSnapshot);
         return true;
     }
 

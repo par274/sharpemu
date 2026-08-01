@@ -283,6 +283,35 @@ public sealed class VulkanGuestWorkPayloadTests
         }
     }
 
+    [Fact]
+    public void SharedTextureArraysUseOnePayloadThroughCompletion()
+    {
+        var rgba = new byte[31];
+        var tiled = new byte[37];
+        var work = ComputeWorkWithSharedTextures(rgba, tiled);
+        var expectedPayload = VulkanVideoPresenter.GetGuestWorkPayloadBytes(work);
+
+        try
+        {
+            PrepareQueue();
+            var sequence = Enqueue(work);
+            Assert.True(sequence > 0);
+            Assert.Equal(expectedPayload, PendingBytes());
+
+            Assert.True(Take(out var pending));
+            Assert.Equal(expectedPayload, StoredPayload(pending));
+            Complete(pending);
+
+            Assert.Equal(0UL, PendingBytes());
+            Assert.Equal(0, PendingCount());
+            Assert.Equal(0, PendingQueueCount());
+        }
+        finally
+        {
+            ResetQueue();
+        }
+    }
+
     private static GuestDrawTexture Texture(byte[] rgba, byte[] tiled) =>
         new(1, 1, 1, 1, 0, rgba, false, false, TiledSource: tiled);
 
@@ -299,6 +328,26 @@ public sealed class VulkanGuestWorkPayloadTests
             1,
             new byte[7],
             [Texture(rgba, tiled)],
+            [Buffer(new byte[5])],
+            1,
+            1,
+            1,
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            false,
+            false);
+
+    private static VulkanComputeGuestDispatch ComputeWorkWithSharedTextures(
+        byte[] rgba,
+        byte[] tiled) =>
+        new(
+            1,
+            new byte[7],
+            [Texture(rgba, tiled), Texture(rgba, tiled)],
             [Buffer(new byte[5])],
             1,
             1,
