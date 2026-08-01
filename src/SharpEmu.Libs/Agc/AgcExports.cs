@@ -99,6 +99,7 @@ public static partial class AgcExports
     // as an address yields a 58-bit value (observed live: 0x30004622C008300).
     private const uint SpiShaderPgmLoGs = 0x88;
     private const uint SpiShaderPgmHiGs = 0x89;
+    private const uint SpiShaderPgmRsrc1Gs = 0x8A;
     private const uint SpiShaderPgmChksumGs = 0x80;
     private const uint SpiPsInputEna = 0x1B3;
     private const uint SpiPsInputAddr = 0x1B4;
@@ -12538,13 +12539,16 @@ public static partial class AgcExports
             // GTA V Enhanced HS headers start at RSRC1/RSRC2 (0x10A/0x10B) and
             // omit PGM_LO/HI from the default table. Still succeed: the code VA
             // lives at ShaderCodeOffset and later binder paths republish it.
-            if (shaderType == HsFrontShaderType && firstLo is SpiShaderPgmRsrc1Hs or SpiShaderPgmLoHs)
+            // GS front headers can likewise start at RSRC1_GS (0x8A) instead of
+            // PGM_LO_GS (0x88) - same deal, skip the patch here.
+            if ((shaderType == HsFrontShaderType && firstLo is SpiShaderPgmRsrc1Hs or SpiShaderPgmLoHs) ||
+                (shaderType == GsFrontShaderType && firstLo is SpiShaderPgmRsrc1Gs or SpiShaderPgmLoGs))
             {
                 TraceCreateShader(
                     0,
                     headerAddress,
                     codeAddress,
-                    $"skip-pgm-patch type={HsFrontShaderType} first_lo=0x{firstLo:X8}");
+                    $"skip-pgm-patch type={shaderType} first_lo=0x{firstLo:X8}");
                 return true;
             }
 
