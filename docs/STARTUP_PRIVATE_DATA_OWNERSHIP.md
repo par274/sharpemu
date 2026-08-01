@@ -377,33 +377,6 @@ driver owner.
   the repeated region shapes, zero internal notifications, or balanced request
   ledger.
 
-## Ranked hypotheses and falsification
-
-1. **Managed GC/runtime segment management — supported commit boundary, not a
-   leak finding.** Falsified if a future reservation-aware trace places the
-   reservation call outside the runtime, or if an EventPipe/GC experiment shows
-   that the current segment bytes cannot be explained by normal segment
-   management.
-2. **Vulkan/graphics implementation virtual backing — supported boundary for
-   the 512 MiB, 1 GiB, and related rows, not a driver-leak finding.** Falsified
-   if a repeat trace attributes the same intervals to direct SharpEmu
-   `VirtualAlloc`, managed GC, or a different named owner, or if normal Vulkan
-   object destruction leaves the intervals live.
-3. **Explicit SharpEmu Vulkan allocation seam — narrow application-side source
-   boundary for the portions reached by `VulkanMemoryDiagnostics::Allocate`.
-   This seam calls `vkAllocateMemory` with the normal null allocator and does
-   not establish ownership of implementation-side allocations. Falsified if
-   the same VMMap intervals recur without the corresponding Vulkan allocation
-   stack or if the source lifetime is balanced while the implementation region
-   remains live.
-4. **CPU backend, libc, or ordinary managed object retention as the dominant
-   explanation.** Currently unsupported by source scale, matching releases,
-   and the callback/GC evidence. Falsified in either direction by an address
-   ledger or allocation stack that accounts for most of the remainder.
-
-The investigation does not promote any hypothesis to “native leak,” “managed
-leak,” or “driver allocation.”
-
 ## WPR result and next boundary
 
 ### Run and validity
@@ -509,7 +482,7 @@ range. This confirms the process/commit-stack view and separates the exact
 guest mappings from the Vulkan interval join; it does not turn commit size
 into resident size.
 
-### Observation, inference, uncertainty, and falsification
+### Observation, inference, uncertainty, and remaining questions
 
 Observed: the control and trace independently reproduce the same three size
 signatures and the trace's 44 visible related rows. The WPR interval joins
@@ -529,12 +502,14 @@ and process-exit decommit does not prove the normal source lifetime. WPR also
 does not identify whether the Vulkan-backed pages are physically resident in
 system RAM or device-local memory; VMMap only reports the process working set.
 
-Falsification conditions: a reservation-aware trace or later EventPipe/GC
-experiment that attributes the large base to a non-GC owner falsifies the
-managed-segment boundary; a repeat trace that shows direct SharpEmu
-`VirtualAlloc`, managed-GC, or a different owner for the 512 MiB/1 GiB/related
-intervals falsifies the Vulkan boundary; and a normal teardown that leaves any
-of these intervals live would be required before claiming a lifetime defect.
+Remaining questions: the current attribution would be undermined only if the
+exact PID/address join, exported WPR stack data, or VMMap correlation were
+shown to be invalid. A reservation-aware trace can identify the owner of the
+large reservation without changing the observed GC commit attribution.
+EventPipe or GC analysis can answer object-retention questions; it does not
+rewrite the commit stack. Normal-teardown tracing can answer Vulkan release
+timing; it does not change the allocation origin. A repeat trace may reveal
+additional allocation paths without invalidating the paths observed here.
 
 Next boundary: if the large region remains operationally concerning, run the
 smallest later EventPipe or GC segment/object experiment needed to distinguish
