@@ -1921,8 +1921,17 @@ internal static unsafe class VulkanVideoPresenter
         Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 1);
     }
 
-    internal static bool IsTextureContentCached(in TextureContentIdentity identity) =>
-        _cachedTextureIdentities.ContainsKey(identity);
+    internal static bool IsTextureContentCached(in TextureContentIdentity identity)
+    {
+        var cached = _cachedTextureIdentities.ContainsKey(identity);
+        MemoryDiagnostics.Adjust(
+            cached
+                ? "managed.vulkan-texture-cache-hit"
+                : "managed.vulkan-texture-cache-miss",
+            0,
+            countDelta: 1);
+        return cached;
+    }
 
     private static void MarkTextureContentCached(in TextureContentIdentity identity) =>
         _cachedTextureIdentities.TryAdd(identity, 0);
