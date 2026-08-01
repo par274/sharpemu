@@ -219,12 +219,14 @@ Ranked candidates:
 
 The scalar Vulkan host-allocation probe and its reconciliation are recorded in
 [startup private-data ownership](STARTUP_PRIVATE_DATA_OWNERSHIP.md). It is
-balanced and bounded, but its instance/device `VkAllocationCallbacks` ledger
-observed no request larger than 133,120 bytes across three trials. That rules
-out this callback boundary as the owner of the 512 MiB and 1 GiB unmatched
-regions; it does not cover implementation virtual allocations made outside
-those callbacks. The next boundary is an elevated Windows Performance Recorder
-`VirtualAllocation` trace that can provide allocation addresses and stacks.
+balanced and bounded: its instance/device `pfnAllocation` request ledger
+observed no request larger than 133,120 bytes across the correction trials,
+while `pfnInternalAllocation`/`pfnInternalFree` reported zero notifications.
+That rules out this supplied callback boundary as the owner of the 512 MiB and
+1 GiB unmatched regions; child-object allocators and implementation virtual
+allocations outside the instance/device callback roots remain unresolved. The
+next boundary is an elevated Windows Performance Recorder `VirtualAllocation`
+trace that can provide allocation addresses and stacks.
 Do not implement a cache, staging, or guest-memory correction from this finding
 alone.
 
