@@ -20,6 +20,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly Dictionary<(ulong DesiredAddress, ulong Alignment, bool Executable), ulong> _allocationSearchHints = new();
     private readonly Dictionary<ulong, ProgramHeaderFlags> _pageProtections = new();
     private bool _disposed;
+    private int _diagnosticMappingEventCount;
+    private int _diagnosticDroppedMappingEvents;
 
     [ThreadStatic]
     private static CommittedRangeCache? _committedRangeCache;
@@ -284,7 +286,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 IsReservedOnly = reservedOnly,
                 Protection = protection
             });
-            RecordRegionAllocation(alignedSize, committedBytes);
+            RecordRegionAllocation(
+                actualAddress,
+                alignedSize,
+                committedBytes,
+                executable,
+                reservedOnly);
         }
         finally
         {
@@ -392,7 +399,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 IsReservedOnly = reservedOnly,
                 Protection = protection
             });
-            RecordRegionAllocation(alignedSize, committedBytes);
+            RecordRegionAllocation(
+                actualAddress,
+                alignedSize,
+                committedBytes,
+                executable,
+                reservedOnly);
         }
         finally
         {
@@ -536,7 +548,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     IsReservedOnly = false,
                     Protection = protection
                 });
-                RecordRegionAllocation(gapSize, gapSize);
+                RecordRegionAllocation(
+                    gapAddress,
+                    gapSize,
+                    gapSize,
+                    executable,
+                    reservedOnly: false);
             }
         }
         finally
@@ -650,7 +667,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
         if (removedRegion is not null)
         {
-            RecordRegionRelease(removedRegion.Size, checked((ulong)removedRegion.CommittedBytes));
+            RecordRegionRelease(
+                removedRegion.VirtualAddress,
+                removedRegion.Size,
+                checked((ulong)removedRegion.CommittedBytes),
+                removedRegion.IsExecutable,
+                removedRegion.IsReservedOnly);
         }
 
         Interlocked.Increment(ref _mappingGeneration);
@@ -817,7 +839,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             {
                 foreach (var region in _regions)
                 {
-                    RecordRegionRelease(region.Size, checked((ulong)region.CommittedBytes));
+                    RecordRegionRelease(
+                        region.VirtualAddress,
+                        region.Size,
+                        checked((ulong)region.CommittedBytes),
+                        region.IsExecutable,
+                        region.IsReservedOnly);
                     _hostMemory.Free(region.VirtualAddress);
                 }
                 _regions.Clear();
@@ -1623,6 +1650,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             Interlocked.Add(ref region.CommittedBytes, checked((long)commitSize));
             MemoryDiagnostics.Adjust("guest.host-committed", checked((long)commitSize));
+            RecordGuestMappingEvent(
+                "commit",
+                region.VirtualAddress,
+                region.Size,
+                checked((ulong)Volatile.Read(ref region.CommittedBytes)),
+                region.IsExecutable,
+                region.IsReservedOnly,
+                commitSize);
             CacheCommittedRange(pageAddress, rangeEnd, mappingGeneration);
             pageAddress = rangeEnd;
         }
@@ -1700,16 +1735,92 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return DefaultLazyReservePrimeBytes;
     }
 
-    private static void RecordRegionAllocation(ulong reservedBytes, ulong committedBytes)
+    private void RecordRegionAllocation(
+        ulong address,
+        ulong reservedBytes,
+        ulong committedBytes,
+        bool executable,
+        bool reservedOnly)
     {
         MemoryDiagnostics.Adjust("guest.host-reserved", checked((long)reservedBytes), countDelta: 1);
         MemoryDiagnostics.Adjust("guest.host-committed", checked((long)committedBytes), countDelta: 1);
+        RecordGuestMappingEvent(
+            "allocate",
+            address,
+            reservedBytes,
+            committedBytes,
+            executable,
+            reservedOnly,
+            committedBytes);
     }
 
-    private static void RecordRegionRelease(ulong reservedBytes, ulong committedBytes)
+    private void RecordRegionRelease(
+        ulong address,
+        ulong reservedBytes,
+        ulong committedBytes,
+        bool executable,
+        bool reservedOnly)
     {
         MemoryDiagnostics.Adjust("guest.host-reserved", -checked((long)reservedBytes), countDelta: -1);
         MemoryDiagnostics.Adjust("guest.host-committed", -checked((long)committedBytes), countDelta: -1);
+        RecordGuestMappingEvent(
+            "release",
+            address,
+            reservedBytes,
+            committedBytes,
+            executable,
+            reservedOnly,
+            0);
+    }
+
+    private void RecordGuestMappingEvent(
+        string action,
+        ulong address,
+        ulong reservedBytes,
+        ulong committedBytes,
+        bool executable,
+        bool reservedOnly,
+        ulong committedDelta)
+    {
+        if (!MemoryDiagnostics.IsEnabled)
+        {
+            return;
+        }
+
+        var eventNumber = Interlocked.Increment(ref _diagnosticMappingEventCount);
+        if (eventNumber > 4096)
+        {
+            var dropped = Interlocked.Increment(ref _diagnosticDroppedMappingEvents);
+            MemoryDiagnostics.Adjust(
+                "guest.mapping-diagnostic-dropped",
+                0,
+                countDelta: 1);
+            if (dropped == 1)
+            {
+                MemoryDiagnostics.RecordEvent(
+                    "guest-host-mapping-trace-limit",
+                    new
+                    {
+                        maximumEvents = 4096,
+                        droppedEvents = 1,
+                    });
+            }
+
+            return;
+        }
+
+        MemoryDiagnostics.RecordEvent(
+            "guest-host-mapping",
+            new
+            {
+                action,
+                baseAddress = address,
+                reservedBytes,
+                committedBytes,
+                committedDelta,
+                executable,
+                reservedOnly,
+            });
     }
 
     private static void TraceVmem(string message)

@@ -3619,6 +3619,12 @@ internal static unsafe class VulkanVideoPresenter
         private int _diagnosticAbandonedGuestSubmissionCount;
         private int _diagnosticTextureCacheCount;
         private long _diagnosticTextureCacheBytes;
+        private long _diagnosticTextureCacheImageBytes;
+        private long _diagnosticTextureCacheStagingBytes;
+        private long _diagnosticDeferredTextureDestructionBytes;
+        private long _diagnosticDeferredTranslatedResourceDestructionBytes;
+        private VulkanResourceLifetimeDiagnostics? _resourceLifetimeDiagnostics;
+        private List<long>? _diagnosticBatchTextureResourceIds;
         private int _directPresentationCount;
         private readonly Dictionary<ulong, long> _presentedGuestImageTraceCounts = new();
         private readonly Dictionary<ulong, GuestImageResource> _guestImages = new();
@@ -3775,6 +3781,8 @@ internal static unsafe class VulkanVideoPresenter
             public string? VertexLayoutKey;
             public RenderPass TransientRenderPass;
             public Framebuffer TransientFramebuffer;
+            public long DiagnosticDeferredDeviceBytes;
+            public int DiagnosticDeferredOwnership;
         }
 
         private sealed class TextureResource
@@ -3798,7 +3806,13 @@ internal static unsafe class VulkanVideoPresenter
             public bool IsStorage;
             public bool Cached;
             public long DiagnosticCacheDeviceBytes;
+            public long DiagnosticCacheImageBytes;
+            public long DiagnosticCacheStagingBytes;
             public int DiagnosticCacheOwnership;
+            public long DiagnosticResourceId;
+            public bool DiagnosticUploadRecorded;
+            public long DiagnosticDeferredDeviceBytes;
+            public int DiagnosticDeferredOwnership;
             public bool IsHostMovie;
             public int HostMoviePlane = -1;
             public long HostMovieFrameSerial;
@@ -3933,7 +3947,8 @@ internal static unsafe class VulkanVideoPresenter
             ulong Timeline,
             string DebugName,
             VulkanGuestQueueIdentity Queue,
-            long WorkSequence);
+            long WorkSequence,
+            IReadOnlyList<long> DiagnosticTextureResourceIds);
 
         public Presenter(uint width, uint height)
         {
@@ -4055,6 +4070,252 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
+        private void RecordTextureDiagnosticUse(
+            TextureResource texture,
+            bool cacheHit)
+        {
+            if (!_diagnosticsEnabled ||
+                texture.DiagnosticResourceId == 0 ||
+                _resourceLifetimeDiagnostics is not { } lifetime)
+            {
+                return;
+            }
+
+            lifetime.RecordUse(
+                texture.DiagnosticResourceId,
+                cacheHit,
+                timeline: 0,
+                _activeGuestWorkSequence,
+                _activeGuestQueue.Name,
+                MemoryDiagnostics.GetElapsedMilliseconds());
+        }
+
+        private void RecordDiagnosticBatchTexture(TextureResource texture)
+        {
+            if (!_diagnosticsEnabled ||
+                texture.DiagnosticResourceId == 0 ||
+                _diagnosticBatchTextureResourceIds is not { } ids ||
+                ids.Contains(texture.DiagnosticResourceId))
+            {
+                return;
+            }
+
+            if (ids.Count < VulkanResourceLifetimeDiagnostics.DefaultMaximumEntries)
+            {
+                ids.Add(texture.DiagnosticResourceId);
+            }
+        }
+
+        private IReadOnlyList<long> GetDiagnosticResourceIds(
+            IReadOnlyList<TranslatedDrawResources> resources)
+        {
+            if (!_diagnosticsEnabled ||
+                _resourceLifetimeDiagnostics is null)
+            {
+                return [];
+            }
+
+            var ids = new List<long>();
+            foreach (var resource in resources)
+            {
+                foreach (var texture in resource.Textures)
+                {
+                    if (texture.DiagnosticResourceId != 0 &&
+                        !ids.Contains(texture.DiagnosticResourceId))
+                    {
+                        ids.Add(texture.DiagnosticResourceId);
+                    }
+                }
+            }
+
+            return ids;
+        }
+
+        private void TrackCachedTextureDiagnostics(
+            GuestDrawTexture descriptor,
+            TextureResource resource)
+        {
+            if (!_diagnosticsEnabled ||
+                _resourceLifetimeDiagnostics is not { } lifetime)
+            {
+                return;
+            }
+
+            var imageBytes = checked((long)VulkanMemoryDiagnostics.GetAllocationSize(
+                resource.ImageMemory));
+            var stagingBytes = checked((long)VulkanMemoryDiagnostics.GetAllocationSize(
+                resource.StagingMemory));
+            resource.DiagnosticCacheImageBytes = imageBytes;
+            resource.DiagnosticCacheStagingBytes = stagingBytes;
+            resource.DiagnosticCacheDeviceBytes = checked(imageBytes + stagingBytes);
+            resource.DiagnosticCacheOwnership = 1;
+            resource.DiagnosticResourceId = lifetime.TrackCacheInsertion(
+                new VulkanTextureDiagnosticDescriptor(
+                    descriptor.Address,
+                    descriptor.Width,
+                    descriptor.Height,
+                    resource.Depth,
+                    descriptor.Format,
+                    descriptor.NumberType,
+                    descriptor.DstSelect,
+                    descriptor.TileMode,
+                    descriptor.Pitch,
+                    descriptor.MipLevel,
+                    descriptor.BaseMipLevel,
+                    descriptor.ResourceMipLevels,
+                    resource.Layers,
+                    descriptor.Type,
+                    descriptor.ArrayedView,
+                    descriptor.IsStorage),
+                _activeGuestWorkSequence,
+                _activeGuestQueue.Name,
+                MemoryDiagnostics.GetElapsedMilliseconds(),
+                imageBytes,
+                stagingBytes,
+                stagingMapped: false,
+                uploadRecorded: resource.DiagnosticUploadRecorded);
+
+            if (resource.DiagnosticUploadRecorded)
+            {
+                RecordDiagnosticBatchTexture(resource);
+            }
+
+            if (resource.DiagnosticResourceId == 0)
+            {
+                resource.DiagnosticCacheOwnership = 0;
+                resource.DiagnosticCacheDeviceBytes = 0;
+                resource.DiagnosticCacheImageBytes = 0;
+                resource.DiagnosticCacheStagingBytes = 0;
+                return;
+            }
+
+            Interlocked.Increment(ref _diagnosticTextureCacheCount);
+            Interlocked.Add(ref _diagnosticTextureCacheBytes, resource.DiagnosticCacheDeviceBytes);
+            Interlocked.Add(ref _diagnosticTextureCacheImageBytes, imageBytes);
+            Interlocked.Add(ref _diagnosticTextureCacheStagingBytes, stagingBytes);
+            MemoryDiagnostics.Adjust(
+                "vulkan.texture-cache-retained",
+                resource.DiagnosticCacheDeviceBytes,
+                countDelta: 1);
+            MemoryDiagnostics.Adjust(
+                "vulkan.texture-cache-image",
+                imageBytes,
+                countDelta: 1);
+            MemoryDiagnostics.Adjust(
+                "vulkan.texture-cache-staging",
+                stagingBytes,
+                countDelta: stagingBytes == 0 ? 0 : 1);
+        }
+
+        private static long GetTranslatedResourceDiagnosticBytes(
+            TranslatedDrawResources resources)
+        {
+            var handles = new HashSet<ulong>();
+
+            foreach (var texture in resources.Textures)
+            {
+                if (texture.Cached || texture.GuestImage is not null)
+                {
+                    continue;
+                }
+
+                if (texture.ImageMemory.Handle != 0)
+                {
+                    handles.Add(texture.ImageMemory.Handle);
+                }
+
+                if (texture.StagingMemory.Handle != 0)
+                {
+                    handles.Add(texture.StagingMemory.Handle);
+                }
+            }
+
+            foreach (var vertex in resources.VertexBuffers)
+            {
+                if (vertex.OwnsBuffer && vertex.Memory.Handle != 0)
+                {
+                    handles.Add(vertex.Memory.Handle);
+                }
+            }
+
+            if (resources.IndexMemory.Handle != 0)
+            {
+                handles.Add(resources.IndexMemory.Handle);
+            }
+
+            foreach (var global in resources.GlobalMemoryBuffers)
+            {
+                if (global.Allocation is null && global.Memory.Handle != 0)
+                {
+                    handles.Add(global.Memory.Handle);
+                }
+            }
+
+            var bytes = 0L;
+            foreach (var handle in handles)
+            {
+                bytes = checked(bytes + (long)VulkanMemoryDiagnostics.GetAllocationSize(
+                    new DeviceMemory(handle)));
+            }
+
+            return bytes;
+        }
+
+        private void RecordDeferredTranslatedResource(
+            TranslatedDrawResources resources,
+            ulong retireTimeline)
+        {
+            if (!_diagnosticsEnabled ||
+                resources.DiagnosticDeferredOwnership != 0)
+            {
+                return;
+            }
+
+            var bytes = GetTranslatedResourceDiagnosticBytes(resources);
+            resources.DiagnosticDeferredDeviceBytes = bytes;
+            resources.DiagnosticDeferredOwnership = 1;
+            Interlocked.Add(ref _diagnosticDeferredTranslatedResourceDestructionBytes, bytes);
+            MemoryDiagnostics.Adjust(
+                "vulkan.deferred-translated-resource-destruction",
+                bytes);
+            MemoryDiagnostics.RecordEvent(
+                "vulkan-translated-resource-lifetime",
+                new
+                {
+                    action = "deferred",
+                    bytes,
+                    retireTimeline,
+                    guestWorkSequence = _activeGuestWorkSequence,
+                });
+        }
+
+        private void RecordActualTranslatedResourceDestroy(
+            TranslatedDrawResources resources,
+            ulong timeline)
+        {
+            if (!_diagnosticsEnabled ||
+                resources.DiagnosticDeferredOwnership == 0 ||
+                Interlocked.Exchange(ref resources.DiagnosticDeferredOwnership, 0) == 0)
+            {
+                return;
+            }
+
+            var bytes = resources.DiagnosticDeferredDeviceBytes;
+            resources.DiagnosticDeferredDeviceBytes = 0;
+            Interlocked.Add(ref _diagnosticDeferredTranslatedResourceDestructionBytes, -bytes);
+            MemoryDiagnostics.Adjust(
+                "vulkan.deferred-translated-resource-destruction",
+                -bytes);
+            MemoryDiagnostics.RecordEvent(
+                "vulkan-translated-resource-lifetime",
+                new
+                {
+                    action = "destroy",
+                    bytes,
+                    timeline,
+                });
+        }
+
         private static long DiagnosticAgeMilliseconds(long now, long started)
         {
             if (started <= 0 || now <= started)
@@ -4161,9 +4422,16 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     textureCacheCount = Volatile.Read(ref _diagnosticTextureCacheCount),
                     textureCacheDeviceBytes = Volatile.Read(ref _diagnosticTextureCacheBytes),
+                    textureCacheImageBytes = Volatile.Read(ref _diagnosticTextureCacheImageBytes),
+                    textureCacheStagingBytes = Volatile.Read(ref _diagnosticTextureCacheStagingBytes),
+                    deferredTextureDestructionBytes =
+                        Volatile.Read(ref _diagnosticDeferredTextureDestructionBytes),
+                    deferredTranslatedResourceDestructionBytes =
+                        Volatile.Read(ref _diagnosticDeferredTranslatedResourceDestructionBytes),
                     hostBufferCachedBytes = hostBuffers.CachedBytes,
                     hostBufferCachedAllocations = hostBuffers.CachedAllocations,
                     hostBufferRegisteredAllocations = hostBuffers.RegisteredAllocations,
+                    textureLifetime = _resourceLifetimeDiagnostics?.GetSnapshot(),
                 },
                 guestWait = new
                 {
@@ -4186,6 +4454,8 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (_diagnosticsEnabled)
                 {
+                    _resourceLifetimeDiagnostics = new VulkanResourceLifetimeDiagnostics();
+                    _diagnosticBatchTextureResourceIds = new List<long>(64);
                     _memoryDiagnosticsProvider =
                         MemoryDiagnostics.RegisterSampleProvider(GetDiagnosticSnapshot);
                 }
@@ -4213,6 +4483,8 @@ internal static unsafe class VulkanVideoPresenter
                 finally
                 {
                     _memoryDiagnosticsProvider = null;
+                    _diagnosticBatchTextureResourceIds = null;
+                    _resourceLifetimeDiagnostics = null;
                     Volatile.Write(ref _diagnosticsEnabled, false);
                 }
             }
@@ -5428,7 +5700,8 @@ internal static unsafe class VulkanVideoPresenter
                     overlayBytes,
                     BufferUsageFlags.TransferSrcBit,
                     MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                    out _overlayStagingMemory[slot]);
+                    out _overlayStagingMemory[slot],
+                    label: "overlay-staging");
                 void* mapped;
                 Check(
                     VulkanMemoryDiagnostics.Map(
@@ -5740,7 +6013,11 @@ internal static unsafe class VulkanVideoPresenter
                     _batchRetireBuffers.Count > 0 ? _batchRetireBuffers.ToArray() : [],
                     retireDetile: _batchRetireDetile.Count > 0
                         ? _batchRetireDetile.ToArray()
-                        : []);
+                        : [],
+                    diagnosticTextureResourceIds:
+                        _diagnosticBatchTextureResourceIds is { Count: > 0 } ids
+                            ? ids.ToArray()
+                            : []);
             }
             catch
             {
@@ -5772,6 +6049,7 @@ internal static unsafe class VulkanVideoPresenter
                 _batchTraceImages.Clear();
                 _batchRetireBuffers.Clear();
                 _batchRetireDetile.Clear();
+                _diagnosticBatchTextureResourceIds?.Clear();
                 _batchCommandBuffer = default;
             }
         }
@@ -5782,7 +6060,8 @@ internal static unsafe class VulkanVideoPresenter
             IReadOnlyList<GuestImageResource> traceImages,
             IReadOnlyList<(VkBuffer Buffer, DeviceMemory Memory)>? retireBuffers = null,
             IReadOnlyList<TranslatedDrawResources>? referencedResources = null,
-            IReadOnlyList<VulkanDetilePass.Transients>? retireDetile = null)
+            IReadOnlyList<VulkanDetilePass.Transients>? retireDetile = null,
+            IReadOnlyList<long>? diagnosticTextureResourceIds = null)
         {
             var fence = AcquireGuestFence();
             try
@@ -5812,6 +6091,40 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             _submitTimeline++;
+            IReadOnlyList<long> submittedDiagnosticTextureIds = [];
+            if (_diagnosticsEnabled && _resourceLifetimeDiagnostics is { } lifetime)
+            {
+                var ids = new List<long>();
+                foreach (var referenced in referencedResources ?? resources)
+                {
+                    foreach (var texture in referenced.Textures)
+                    {
+                        if (texture.DiagnosticResourceId != 0 &&
+                            !ids.Contains(texture.DiagnosticResourceId))
+                        {
+                            ids.Add(texture.DiagnosticResourceId);
+                        }
+                    }
+                }
+
+                if (diagnosticTextureResourceIds is not null)
+                {
+                    foreach (var resourceId in diagnosticTextureResourceIds)
+                    {
+                        if (resourceId != 0 && !ids.Contains(resourceId))
+                        {
+                            ids.Add(resourceId);
+                        }
+                    }
+                }
+
+                foreach (var resourceId in ids)
+                {
+                    lifetime.RecordSubmission(resourceId, _submitTimeline);
+                }
+
+                submittedDiagnosticTextureIds = ids.Count == 0 ? [] : ids.ToArray();
+            }
             foreach (var referenced in referencedResources ?? resources)
             {
                 foreach (var globalBuffer in referenced.GlobalMemoryBuffers)
@@ -5847,7 +6160,8 @@ internal static unsafe class VulkanVideoPresenter
                     _submitTimeline,
                     resources.Count > 0 ? resources[0].DebugName : "batch",
                     _activeGuestQueue,
-                    _activeGuestWorkSequence));
+                    _activeGuestWorkSequence,
+                    submittedDiagnosticTextureIds));
             IncrementDiagnosticPendingGuestSubmission();
             _lastSubmittedTimelineByGuestQueue[_activeGuestQueue.Name] =
                 _submitTimeline;
@@ -6109,6 +6423,14 @@ internal static unsafe class VulkanVideoPresenter
             foreach (var resources in submission.Resources)
             {
                 DestroyTranslatedDrawResources(resources);
+            }
+
+            if (_diagnosticsEnabled && _resourceLifetimeDiagnostics is { } lifetime)
+            {
+                foreach (var resourceId in submission.DiagnosticTextureResourceIds)
+                {
+                    lifetime.RecordUploadCompletion(resourceId, submission.Timeline);
+                }
             }
 
             foreach (var (buffer, memory) in submission.RetireBuffers)
@@ -6643,13 +6965,16 @@ internal static unsafe class VulkanVideoPresenter
                    entry.RetireTimeline <= _completedTimeline)
             {
                 _deferredTextureDestroys.Dequeue();
-                DestroyCachedTextureResource(entry.Texture);
+                DestroyCachedTextureResource(entry.Texture, entry.RetireTimeline);
             }
 
             while (_deferredResourceDestroys.TryPeek(out var resourceEntry) &&
                    resourceEntry.RetireTimeline <= _completedTimeline)
             {
                 _deferredResourceDestroys.Dequeue();
+                RecordActualTranslatedResourceDestroy(
+                    resourceEntry.Resources,
+                    resourceEntry.RetireTimeline);
                 DestroyTranslatedDrawResources(resourceEntry.Resources);
             }
 
@@ -9306,6 +9631,7 @@ internal static unsafe class VulkanVideoPresenter
                 Depth: GetGuestTextureDepth(texture.Type, texture.Depth));
             if (_textureCache.TryGetValue(key, out var cached))
             {
+                RecordTextureDiagnosticUse(cached, cacheHit: true);
                 return cached;
             }
 
@@ -9332,24 +9658,15 @@ internal static unsafe class VulkanVideoPresenter
                 _textureCache[key] = resource;
                 if (_diagnosticsEnabled)
                 {
-                    resource.DiagnosticCacheDeviceBytes = checked((long)(
-                        VulkanMemoryDiagnostics.GetAllocationSize(resource.ImageMemory) +
-                        VulkanMemoryDiagnostics.GetAllocationSize(resource.StagingMemory)));
-                    resource.DiagnosticCacheOwnership = 1;
-                    Interlocked.Increment(ref _diagnosticTextureCacheCount);
-                    Interlocked.Add(
-                        ref _diagnosticTextureCacheBytes,
-                        resource.DiagnosticCacheDeviceBytes);
-                    MemoryDiagnostics.Adjust(
-                        "vulkan.texture-cache-retained",
-                        resource.DiagnosticCacheDeviceBytes,
-                        countDelta: 1);
+                    TrackCachedTextureDiagnostics(texture, resource);
                 }
                 MarkTextureContentCached(key);
                 // Do not Track sampled textures here. Watch-only registration
                 // still poisoned NotifyManagedWrite when it shared the fault
                 // snapshot; protected RTs / CPU-backed images own dirtying.
             }
+
+            RecordTextureDiagnosticUse(resource, cacheHit: false);
 
             return resource;
         }
@@ -9491,6 +9808,8 @@ internal static unsafe class VulkanVideoPresenter
             {
                 foreach (var entry in _textureCache)
                 {
+                    RecordTextureCacheRemoval(entry.Value, "cache-size-limit", retireTimeline);
+                    EnqueueDeferredTextureDestroy(entry.Value, retireTimeline);
                     ReleaseTextureCacheDiagnosticOwnership(entry.Value);
                     _deferredTextureDestroys.Enqueue((entry.Value, retireTimeline));
                 }
@@ -9504,6 +9823,8 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     if (_textureCache.Remove(key, out var resource))
                     {
+                        RecordTextureCacheRemoval(resource, "guest-write", retireTimeline);
+                        EnqueueDeferredTextureDestroy(resource, retireTimeline);
                         ReleaseTextureCacheDiagnosticOwnership(resource);
                         UnmarkTextureContentCached(key);
                         _deferredTextureDestroys.Enqueue((resource, retireTimeline));
@@ -9520,7 +9841,79 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
-        private void DestroyCachedTextureResource(TextureResource texture)
+        private void RecordTextureCacheRemoval(
+            TextureResource texture,
+            string reason,
+            ulong retireTimeline)
+        {
+            if (!_diagnosticsEnabled ||
+                texture.DiagnosticResourceId == 0 ||
+                _resourceLifetimeDiagnostics is not { } lifetime)
+            {
+                return;
+            }
+
+            lifetime.RecordCacheRemoval(
+                texture.DiagnosticResourceId,
+                reason,
+                MemoryDiagnostics.GetElapsedMilliseconds(),
+                retireTimeline);
+        }
+
+        private void EnqueueDeferredTextureDestroy(
+            TextureResource texture,
+            ulong retireTimeline)
+        {
+            if (!_diagnosticsEnabled ||
+                texture.DiagnosticResourceId == 0 ||
+                _resourceLifetimeDiagnostics is not { } lifetime ||
+                Interlocked.Exchange(ref texture.DiagnosticDeferredOwnership, 1) != 0)
+            {
+                return;
+            }
+
+            var bytes = checked(
+                texture.DiagnosticCacheImageBytes +
+                texture.DiagnosticCacheStagingBytes);
+            texture.DiagnosticDeferredDeviceBytes = bytes;
+            Interlocked.Add(ref _diagnosticDeferredTextureDestructionBytes, bytes);
+            MemoryDiagnostics.Adjust(
+                "vulkan.deferred-texture-destruction",
+                bytes);
+            lifetime.RecordDeferredDestroy(
+                texture.DiagnosticResourceId,
+                retireTimeline,
+                MemoryDiagnostics.GetElapsedMilliseconds());
+        }
+
+        private void RecordActualTextureDestroy(
+            TextureResource texture,
+            ulong retireTimeline)
+        {
+            if (!_diagnosticsEnabled ||
+                texture.DiagnosticResourceId == 0 ||
+                _resourceLifetimeDiagnostics is not { } lifetime ||
+                Interlocked.Exchange(ref texture.DiagnosticDeferredOwnership, 0) == 0)
+            {
+                return;
+            }
+
+            var bytes = texture.DiagnosticDeferredDeviceBytes;
+            texture.DiagnosticDeferredDeviceBytes = 0;
+            Interlocked.Add(ref _diagnosticDeferredTextureDestructionBytes, -bytes);
+            MemoryDiagnostics.Adjust(
+                "vulkan.deferred-texture-destruction",
+                -bytes);
+            lifetime.RecordActualDestroy(
+                texture.DiagnosticResourceId,
+                retireTimeline,
+                MemoryDiagnostics.GetElapsedMilliseconds(),
+                "deferred-retire");
+        }
+
+        private void DestroyCachedTextureResource(
+            TextureResource texture,
+            ulong retireTimeline = 0)
         {
             ReleaseTextureCacheDiagnosticOwnership(texture);
             texture.Cached = false;
@@ -9547,6 +9940,8 @@ internal static unsafe class VulkanVideoPresenter
             {
                 VulkanMemoryDiagnostics.Free(_vk, _device, texture.StagingMemory);
             }
+
+            RecordActualTextureDestroy(texture, retireTimeline);
         }
 
         private void ReleaseTextureCacheDiagnosticOwnership(TextureResource texture)
@@ -9559,13 +9954,27 @@ internal static unsafe class VulkanVideoPresenter
 
             var bytes = texture.DiagnosticCacheDeviceBytes;
             texture.DiagnosticCacheDeviceBytes = 0;
+            var imageBytes = texture.DiagnosticCacheImageBytes;
+            var stagingBytes = texture.DiagnosticCacheStagingBytes;
+            texture.DiagnosticCacheImageBytes = 0;
+            texture.DiagnosticCacheStagingBytes = 0;
 
             Interlocked.Decrement(ref _diagnosticTextureCacheCount);
             Interlocked.Add(ref _diagnosticTextureCacheBytes, -bytes);
+            Interlocked.Add(ref _diagnosticTextureCacheImageBytes, -imageBytes);
+            Interlocked.Add(ref _diagnosticTextureCacheStagingBytes, -stagingBytes);
             MemoryDiagnostics.Adjust(
                 "vulkan.texture-cache-retained",
                 -bytes,
                 countDelta: -1);
+            MemoryDiagnostics.Adjust(
+                "vulkan.texture-cache-image",
+                -imageBytes,
+                countDelta: -1);
+            MemoryDiagnostics.Adjust(
+                "vulkan.texture-cache-staging",
+                -stagingBytes,
+                countDelta: stagingBytes == 0 ? 0 : -1);
         }
 
         private static bool IsCompatibleGuestImageAlias(
@@ -9667,7 +10076,8 @@ internal static unsafe class VulkanVideoPresenter
                         BufferUsageFlags.TransferSrcBit,
                         MemoryPropertyFlags.HostVisibleBit |
                         MemoryPropertyFlags.HostCoherentBit,
-                        out resource.StagingMemory);
+                        out resource.StagingMemory,
+                        label: "storage-texture-staging");
 
                     void* mapped;
                     Check(
@@ -10136,6 +10546,7 @@ internal static unsafe class VulkanVideoPresenter
                 Layers = layers,
                 NeedsUpload = !gpuDetiled,
                 OwnsStorage = true,
+                DiagnosticUploadRecorded = gpuDetiled,
                 SamplerState = texture.Sampler,
                 CpuContentFingerprint = contentFingerprint,
                 UpdatesCpuContent = texture.Address != 0,
@@ -10225,11 +10636,12 @@ internal static unsafe class VulkanVideoPresenter
                 size,
                 BufferUsageFlags.TransferSrcBit,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                out var memory);
+                out var memory,
+                label: "texture-staging");
             void* mapped;
             Check(
                 VulkanMemoryDiagnostics.Map(
-                    _vk, _device, memory, 0, size, 0, &mapped, "texture"),
+                    _vk, _device, memory, 0, size, 0, &mapped, "texture-staging"),
                 "vkMapMemory(texture)");
             fixed (byte* source = pixels)
             {
@@ -11080,7 +11492,8 @@ internal static unsafe class VulkanVideoPresenter
                 BufferUsageFlags.StorageBufferBit,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
                 out var memory,
-                preferredMemoryFlags: MemoryPropertyFlags.HostCachedBit);
+                preferredMemoryFlags: MemoryPropertyFlags.HostCachedBit,
+                label: "guest-buffer");
             void* mapped;
             Check(
                 VulkanMemoryDiagnostics.Map(
@@ -11235,7 +11648,8 @@ internal static unsafe class VulkanVideoPresenter
                     capacity,
                     usage,
                     MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                    out var allocatedMemory);
+                    out var allocatedMemory,
+                    label: "host-buffer");
                 // Persistently mapped: map/unmap per draw was a measurable
                 // share of the per-draw fixed cost, and HOST_COHERENT memory
                 // may legally stay mapped for its lifetime.
@@ -11952,7 +12366,8 @@ internal static unsafe class VulkanVideoPresenter
             BufferUsageFlags usage,
             MemoryPropertyFlags memoryFlags,
             out DeviceMemory memory,
-            MemoryPropertyFlags preferredMemoryFlags = 0)
+            MemoryPropertyFlags preferredMemoryFlags = 0,
+            string label = "buffer")
         {
             var bufferInfo = new BufferCreateInfo
             {
@@ -11975,7 +12390,7 @@ internal static unsafe class VulkanVideoPresenter
             };
             Check(
                 VulkanMemoryDiagnostics.Allocate(
-                    _vk, _device, &memoryInfo, out memory, "buffer"),
+                    _vk, _device, &memoryInfo, out memory, label),
                 "vkAllocateMemory");
             Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory");
             return buffer;
@@ -11987,7 +12402,8 @@ internal static unsafe class VulkanVideoPresenter
                 size,
                 BufferUsageFlags.TransferSrcBit | BufferUsageFlags.TransferDstBit,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                out _stagingMemory);
+                out _stagingMemory,
+                label: "presenter-staging");
             _stagingSize = size;
         }
 
@@ -12002,7 +12418,8 @@ internal static unsafe class VulkanVideoPresenter
                     size,
                     BufferUsageFlags.TransferSrcBit,
                     MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                    out _frameUploadMemory[slot]);
+                    out _frameUploadMemory[slot],
+                    label: "frame-upload");
                 void* mapped;
                 Check(
                     VulkanMemoryDiagnostics.Map(
@@ -12302,6 +12719,7 @@ internal static unsafe class VulkanVideoPresenter
                         // lists and may still execute against these
                         // pipelines/images; destroy only after every
                         // submission issued so far has completed.
+                        RecordDeferredTranslatedResource(resources, _submitTimeline);
                         _deferredResourceDestroys.Enqueue((resources, _submitTimeline));
                     }
                     else
@@ -13947,7 +14365,8 @@ internal static unsafe class VulkanVideoPresenter
                 byteCount,
                 BufferUsageFlags.TransferSrcBit,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                out var stagingMemory);
+                out var stagingMemory,
+                label: "guest-image-init");
             try
             {
                 void* mapped;
@@ -16058,7 +16477,8 @@ internal static unsafe class VulkanVideoPresenter
                 byteCount,
                 BufferUsageFlags.TransferDstBit,
                 MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit,
-                out var memory);
+                out var memory,
+                label: "guest-image-readback");
             try
             {
                 Check(
@@ -16416,6 +16836,14 @@ internal static unsafe class VulkanVideoPresenter
                 if (!texture.NeedsUpload)
                 {
                     continue;
+                }
+
+                if (_diagnosticsEnabled &&
+                    texture.DiagnosticResourceId != 0 &&
+                    _resourceLifetimeDiagnostics is { } lifetime)
+                {
+                    texture.DiagnosticUploadRecorded = true;
+                    lifetime.RecordUploadRecorded(texture.DiagnosticResourceId);
                 }
 
                 var hostMovieImageInitialized = texture.HostMoviePlane switch
@@ -18834,6 +19262,36 @@ internal static unsafe class VulkanVideoPresenter
             return destination;
         }
 
+        private void RecordTextureCacheDeviceTeardownDiagnostics()
+        {
+            if (!_diagnosticsEnabled ||
+                _resourceLifetimeDiagnostics is not { } lifetime)
+            {
+                return;
+            }
+
+            var timestamp = MemoryDiagnostics.GetElapsedMilliseconds();
+            foreach (var texture in _textureCache.Values)
+            {
+                if (texture.DiagnosticResourceId == 0)
+                {
+                    continue;
+                }
+
+                lifetime.RecordCacheRemoval(
+                    texture.DiagnosticResourceId,
+                    "device-teardown",
+                    timestamp,
+                    _submitTimeline);
+                ReleaseTextureCacheDiagnosticOwnership(texture);
+                lifetime.RecordActualDestroy(
+                    texture.DiagnosticResourceId,
+                    _submitTimeline,
+                    timestamp,
+                    "vulkan-device-teardown");
+            }
+        }
+
         private void DisposeVulkan()
         {
             if (!_vulkanReady)
@@ -18911,6 +19369,7 @@ internal static unsafe class VulkanVideoPresenter
             {
                 DestroyGuestImage(deferredVersion.Image);
             }
+            RecordTextureCacheDeviceTeardownDiagnostics();
             foreach (var guestDepth in _guestDepthImages.Values)
             {
                 DestroyGuestDepth(guestDepth);

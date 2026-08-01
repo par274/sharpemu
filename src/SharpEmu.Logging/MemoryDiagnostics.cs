@@ -159,6 +159,9 @@ public sealed class MemoryDiagnosticsSession : IDisposable
         }
     }
 
+    internal long ElapsedMilliseconds =>
+        (long)_clock.Elapsed.TotalMilliseconds;
+
     internal void RecordEvent(string eventName, object data)
     {
         if (string.IsNullOrWhiteSpace(eventName) || Volatile.Read(ref _disposed) != 0)
@@ -329,6 +332,14 @@ public static class MemoryDiagnostics
     private static Func<object?>? _sampleProvider;
 
     public static bool IsEnabled => Volatile.Read(ref ActiveSession) is not null;
+
+    /// <summary>
+    /// Returns the active session's monotonic elapsed time for scalar
+    /// diagnostics that need to share the JSONL timeline. Disabled callers
+    /// must check <see cref="IsEnabled"/> before requesting it.
+    /// </summary>
+    public static long GetElapsedMilliseconds() =>
+        Volatile.Read(ref ActiveSession)?.ElapsedMilliseconds ?? 0;
 
     public static void Adjust(string category, long byteDelta, long countDelta = 0)
     {
