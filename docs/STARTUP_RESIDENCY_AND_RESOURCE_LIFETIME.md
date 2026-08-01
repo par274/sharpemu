@@ -217,11 +217,16 @@ Ranked candidates:
 5. Correcting deferred destruction is not indicated by these runs because its
    measured retained total was zero.
 
-The single recommended next boundary is a scalar native/runtime private-data
-ledger that can be correlated with the VMMap `Private Data` classification
-remainder without double-counting guest mappings, managed segments, or Vulkan
-device-local memory. Do not implement a cache, staging, or guest-memory
-correction from this finding alone.
+The scalar Vulkan host-allocation probe and its reconciliation are recorded in
+[startup private-data ownership](STARTUP_PRIVATE_DATA_OWNERSHIP.md). It is
+balanced and bounded, but its instance/device `VkAllocationCallbacks` ledger
+observed no request larger than 133,120 bytes across three trials. That rules
+out this callback boundary as the owner of the 512 MiB and 1 GiB unmatched
+regions; it does not cover implementation virtual allocations made outside
+those callbacks. The next boundary is an elevated Windows Performance Recorder
+`VirtualAllocation` trace that can provide allocation addresses and stacks.
+Do not implement a cache, staging, or guest-memory correction from this finding
+alone.
 
 ## Falsification conditions
 
