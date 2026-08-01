@@ -1271,15 +1271,22 @@ public static class KernelPthreadCompatExports
             return CreateImplicitMutexState(ctx, mutexAddress, MutexTypeAdaptiveNp, out resolvedAddress, out state);
         }
 
+        // `mutexAddress` itself was never cached, but its content may still
+        // name a mutex registered under a different address (the handle is
+        // the identity; the slot is not — see the comment above). Falling
+        // through to "not found" here without checking the handle key drops
+        // every lock/unlock/cond-wait on that mutex once it is next reached
+        // through a fresh slot, which returned ORBIS_GEN2_ERROR_NOT_FOUND to
+        // the guest and wedged Scream's worker threads on Ghost of Yotei.
+        if (pointedHandle != 0 && pointedHandle != mutexAddress && _mutexStates.TryGetValue(pointedHandle, out state))
+        {
+            _mutexStates[mutexAddress] = state;
+            resolvedAddress = pointedHandle;
+            return true;
+        }
+
         if (pointedHandle != 0)
         {
-            if (_mutexStates.TryGetValue(pointedHandle, out state))
-            {
-                _mutexStates.TryAdd(mutexAddress, state);
-                resolvedAddress = pointedHandle;
-                return true;
-            }
-
             resolvedAddress = pointedHandle;
             return false;
         }
