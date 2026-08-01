@@ -21,12 +21,12 @@ work even though the pending linked list no longer does.
 
 The payload is 5,378,410,360 bytes (5,129.251823 MiB, 5.009034984 GiB).
 Sixteen distinct 335,544,320-byte TiledSource arrays account for 5,120 MiB.
-They are exact repeats of one 320 MiB guest array resource at sixteen image
-bindings. Ten distinct 524,288-byte RgbaPixels arrays repeat a second guest
-resource and account for another 5 MiB. The exact duplicate excess is
-5,037,883,392 bytes (4,804.5 MiB). The observed payload would be
-340,526,968 bytes (324.751823 MiB) if one immutable source snapshot were
-reused for each repeated resource.
+They are repeated compatible captures of one 320 MiB guest source range at
+sixteen image bindings. Ten distinct 524,288-byte RgbaPixels arrays are
+repeated compatible captures of a second guest source range and account for
+another 5 MiB. The estimated removable capture overhead is 5,037,883,392
+bytes (4,804.5 MiB) if the captures are the same compatible source snapshots.
+The observed payload would then be 340,526,968 bytes (324.751823 MiB).
 
 The narrowest correct next change is in the producer path that materializes
 the image bindings: use a dispatch-local snapshot table in
@@ -53,8 +53,8 @@ Target identity was verified before the runs:
 
 The diagnostic event is opt-in and bounded. It records scalar work and
 descriptor metadata, reference-identity array accounting, and all 43 array
-owners in this item. It does not retain source arrays, hash contents, or dump
-texture contents.
+owners in this item. It does not retain source arrays, hash or compare
+contents, record guest write generations, or dump texture contents.
 
 ## Work identity and lifecycle state
 
@@ -121,9 +121,11 @@ owners.
 ## Texture-array metadata
 
 The event records one metadata row per image binding. The following groups
-are equal by guest range and complete content identity; multiplicity is the
-number of binding rows and each nonzero row has a separate allocated array.
-Addresses are shown in hexadecimal. Source ranges use an exclusive end.
+share a guest range and compatible recorded texture metadata/content-key
+fields; byte identity and equal write generation were not established.
+Multiplicity is the number of binding rows and each nonzero row has a separate
+allocated array. Addresses are shown in hexadecimal. Source ranges use an
+exclusive end.
 
 | Binding indices | Count | Guest address and covered range | Descriptor fields | Mips/view/storage | Calculated source | Allocated arrays | Content identity |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
@@ -140,19 +142,27 @@ content was dumped.
 
 ## Duplicate and overlap analysis
 
-The 16 TiledSource arrays in the first group have the same exact guest range,
-all descriptor fields, and content identity. They are different managed
-objects, each with reference count one. Retaining one and reusing it for the
-other fifteen bindings would remove
+The 16 TiledSource arrays in the first group have the same recorded guest
+range, compatible descriptor fields, and content-key metadata. They are
+different managed objects, each with reference count one. If guest
+memory/write-generation semantics establish that they are the same source
+snapshot, retaining one and reusing it for the other fifteen bindings would
+avoid an estimated
 
     15 x 335,544,320 = 5,033,164,800 bytes.
 
 The ten 524,288-byte RgbaPixels arrays in the second group have the same
-exact guest range and content identity. Reusing one would remove
+recorded guest range and compatible content-key metadata. If they are the
+same source snapshot under the dispatch's memory/write-generation semantics,
+reusing one would avoid an estimated
 
     9 x 524,288 = 4,718,592 bytes.
 
-Together the exact duplicate excess is 5,037,883,392 bytes, or 4,804.5 MiB.
+Together, the repeated compatible captures represent an estimated removable
+capture overhead of 5,037,883,392 bytes, or 4,804.5 MiB, conditional on the
+source-snapshot equivalence described above. This is not a byte-for-byte
+deduplication result: contents were not hashed or compared, and write
+generation was not recorded.
 There are no partial overlaps among the nonzero guest ranges. The two 3D
 textures have physically padded source ranges, but their allocated RgbaPixels
 lengths equal their calculated logical byte counts and their dimensions,
@@ -163,9 +173,10 @@ layer, or mip-count decode error.
 
 The arrays are created together because one compute dispatch supplies a
 40-entry image-binding list. CreateGuestDrawTextures materializes each
-binding independently. Repeated bindings for the two exact resources carry
-the same decoded descriptor and source identity, but the current path has no
-dispatch-local source-snapshot table. The host texture-content cache is not
+binding independently. Repeated bindings for the two same-range resource
+descriptions carry compatible decoded descriptor and content-key metadata, but
+the current path has no dispatch-local source-snapshot table. The host
+texture-content cache is not
 an already available source-array cache at this point, and it is populated on
 the consumer side after host resource creation.
 
@@ -206,7 +217,7 @@ This separates the hypotheses:
 | --- | --- |
 | Accounting omission | Corrected before this investigation; the event reconciles the stored total exactly. |
 | Descriptor/source-size error | Rejected for the dominant owners: calculated and allocated lengths match; padded 3D cases are small and explainable. |
-| Duplicate capture | Proven for 16 TiledSource and 10 RgbaPixels arrays by exact range plus complete content identity. |
+| Repeated compatible capture | Established for 16 TiledSource and 10 RgbaPixels arrays by recorded range and compatible metadata; byte identity is unverified. |
 | Eager materialization | Proven; arrays exist before enqueue and range over about two seconds. |
 | Queue-budget block | Rejected; the item is admitted as the intentional single oversized item. |
 | Scheduling/dependency block | Rejected as the reason for non-consumption; required sequence is complete and the item is taken at the queue head. |
@@ -242,13 +253,17 @@ Introduce a table scoped to one dispatch or one work construction. Its key
 must include the exact source guest address and covered range, selected
 view/mip and base mip, dimensions, depth, pitch, format, number type, tile
 mode, texture type, array layout/layers, storage/write semantics, and a guest
-write or dirty generation. On an exact match, construct the new binding record
-with the binding's own descriptor and sampler fields but reuse the immutable
-RgbaPixels or TiledSource reference. Do not make the table global or retain it
-after work construction.
+write or dirty generation. Sharing is safe only when that key and the
+dispatch's memory/write-generation semantics establish the same compatible
+source snapshot. On an exact match, construct the new binding record with the
+binding's own descriptor and sampler fields but reuse the immutable RgbaPixels
+or TiledSource reference. Do not make the table global or retain it after work
+construction.
 
-Expected target reduction is 4,804.5 MiB for this item, from
-5,129.251823 MiB to about 324.751823 MiB. The change must preserve:
+If that source-snapshot condition holds, the expected target reduction is
+4,804.5 MiB for this item, from 5,129.251823 MiB to about 324.751823 MiB.
+That reduction is an estimate, not a byte-for-byte result established by this
+investigation. The change must preserve:
 
 - guest queue order and sequence completion;
 - resource visibility and write-generation semantics;
@@ -257,13 +272,14 @@ Expected target reduction is 4,804.5 MiB for this item, from
 - no sharing across different source ranges or incompatible descriptors; and
 - render-thread follow-up and deadlock safety.
 
-Required synthetic regressions are repeated identical bindings sharing one
+Required synthetic regressions are repeated compatible bindings sharing one
 source array and being counted once, mismatched ranges/views/mips/storage
 states refusing to share, array-layer TiledSource sizing, and queue
-take/complete accounting with shared references. Target validation requires
-at least three comparable runs with one 320 MiB TiledSource owner instead of
-sixteen, one 512 KiB duplicate RgbaPixels owner instead of ten, unchanged
-descriptor metadata, and an unchanged or improved visible checkpoint.
+take/complete accounting with shared references. If target write-generation
+semantics satisfy the sharing condition, target validation should show one
+320 MiB TiledSource owner instead of sixteen, one 512 KiB RgbaPixels owner
+instead of ten, unchanged descriptor metadata, and an unchanged or improved
+visible checkpoint.
 
 Other candidates are not the narrowest supported change. A global content
 cache would broaden lifetime and invalidation rules. Deferring all capture
@@ -272,12 +288,13 @@ need proof that queue order, resource views, and render-thread follow-up
 remain valid. Reordering production cannot fix this instance because the
 item was already ready and consumed.
 
-The recommendation is falsified if later controlled samples show different
-guest ranges or content for these bindings, a guest write occurs between
-captures and sharing produces stale data, the backend mutates a supposedly
-immutable source array, or deduplication leaves the same payload and
-execution state. The exact post-take execution phase remains the next
-separate investigation if the reduced payload still fails to complete.
+The recommendation is falsified if controlled memory/write-generation tests
+show that same-key bindings can observe different source snapshots, a guest
+write occurs between captures and sharing produces stale data, the backend
+mutates a supposedly immutable source array, or conditional sharing leaves
+the same payload and execution state. The exact post-take execution phase
+remains the next separate investigation if the reduced payload still fails to
+complete.
 
 ## Verification
 
