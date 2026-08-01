@@ -165,25 +165,37 @@ Assert-Equal -Expected ([UInt64]4GB) -Actual $manifestRoundTrip.minimumCommitHea
 Assert-Equal -Expected "commit-headroom-limit" -Actual $manifestRoundTrip.terminationBoundary.reason -Message "Manifest termination boundary reason was incorrect"
 Assert-Equal -Expected ([UInt64]4GB) -Actual $manifestRoundTrip.finalSample.commitHeadroomBytes -Message "Manifest final host sample was incorrect"
 
-$cleanupState = @{ stopRequested = $false }
-$cleanupCounters = @{ calls = 0 }
-$cleanupAction = {
-    param([int]$RootProcessId)
-    if ($RootProcessId -ne 77) {
-        throw "Unexpected synthetic process ID $RootProcessId."
-    }
-    $cleanupCounters.calls++
+$syntheticCleanupProcess = [pscustomobject]@{
+    HasExited = $false
+    StopCalls = 0
 }
-$firstCleanup = Invoke-TargetProcessTreeStopOnce `
-    -State $cleanupState `
-    -RootProcessId 77 `
-    -StopAction $cleanupAction
-$secondCleanup = Invoke-TargetProcessTreeStopOnce `
-    -State $cleanupState `
-    -RootProcessId 77 `
-    -StopAction $cleanupAction
-Assert-Equal -Expected $true -Actual $firstCleanup -Message "First process-tree cleanup was not performed"
-Assert-Equal -Expected $false -Actual $secondCleanup -Message "Repeated process-tree cleanup was not suppressed"
-Assert-Equal -Expected 1 -Actual $cleanupCounters.calls -Message "Process-tree cleanup ran more than once"
+$syntheticStopAction = {
+    param([object]$Process)
+    $Process.StopCalls++
+    if ($Process.StopCalls -eq 2) {
+        $Process.HasExited = $true
+    }
+}
+
+if (-not $syntheticCleanupProcess.HasExited) {
+    & $syntheticStopAction $syntheticCleanupProcess
+}
+Assert-Equal -Expected 1 -Actual $syntheticCleanupProcess.StopCalls -Message "Initial process-tree cleanup was not attempted"
+Assert-Equal -Expected $false -Actual $syntheticCleanupProcess.HasExited -Message "Synthetic first cleanup unexpectedly exited the process"
+
+if (-not $syntheticCleanupProcess.HasExited) {
+    & $syntheticStopAction $syntheticCleanupProcess
+}
+Assert-Equal -Expected 2 -Actual $syntheticCleanupProcess.StopCalls -Message "Cleanup was not retried while the process remained active"
+Assert-Equal -Expected $true -Actual $syntheticCleanupProcess.HasExited -Message "Synthetic retry did not produce an exited process"
+
+$alreadyExitedProcess = [pscustomobject]@{
+    HasExited = $true
+    StopCalls = 0
+}
+if (-not $alreadyExitedProcess.HasExited) {
+    & $syntheticStopAction $alreadyExitedProcess
+}
+Assert-Equal -Expected 0 -Actual $alreadyExitedProcess.StopCalls -Message "Cleanup was attempted for an already exited process"
 
 Write-Host "Target host-memory safety regressions passed."

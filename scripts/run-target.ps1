@@ -469,11 +469,6 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $sampleCount = 0
     $exitCode = $null
     $processStarted = $false
-    $processTreeStopState = @{ stopRequested = $false }
-    $stopProcessTreeAction = {
-        param([int]$RootProcessId)
-        Stop-ProcessTree -RootProcessId $RootProcessId
-    }
     $emulationProcessIds = [System.Collections.Generic.HashSet[int]]::new()
     $comparisonArguments = @($arguments + $AdditionalArguments)
     $launchAdditionalArguments = @($AdditionalArguments | ForEach-Object {
@@ -759,10 +754,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             if ($null -ne $hostBoundary) {
                 $terminationReason = [string]$hostBoundary.reason
                 $terminationBoundary = $hostBoundary
-                [void](Invoke-TargetProcessTreeStopOnce `
-                    -State $processTreeStopState `
-                    -RootProcessId $process.Id `
-                    -StopAction $stopProcessTreeAction)
+                Stop-ProcessTree -RootProcessId $process.Id
                 break
             }
 
@@ -774,10 +766,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                     thresholdSeconds = $wallTimeSeconds
                     sampledElapsedMilliseconds = [long]$stopwatch.Elapsed.TotalMilliseconds
                 }
-                [void](Invoke-TargetProcessTreeStopOnce `
-                    -State $processTreeStopState `
-                    -RootProcessId $process.Id `
-                    -StopAction $stopProcessTreeAction)
+                Stop-ProcessTree -RootProcessId $process.Id
                 break
             }
 
@@ -838,10 +827,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
 
         try {
             if ($processStarted -and -not $process.HasExited) {
-                [void](Invoke-TargetProcessTreeStopOnce `
-                    -State $processTreeStopState `
-                    -RootProcessId $process.Id `
-                    -StopAction $stopProcessTreeAction)
+                Stop-ProcessTree -RootProcessId $process.Id
                 if (-not $process.WaitForExit(5000)) {
                     throw "SharpEmu did not report exit within five seconds after forced termination."
                 }

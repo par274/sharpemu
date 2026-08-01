@@ -304,26 +304,6 @@ function Get-TargetTerminationBoundary {
     return $null
 }
 
-function Invoke-TargetProcessTreeStopOnce {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.Collections.IDictionary]$State,
-        [Parameter(Mandatory = $true)]
-        [int]$RootProcessId,
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$StopAction
-    )
-
-    if ([bool]$State.stopRequested) {
-        return $false
-    }
-
-    & $StopAction $RootProcessId
-    $State.stopRequested = $true
-    return $true
-}
-
 function New-HostMemoryManifestSection {
     [CmdletBinding()]
     param(
