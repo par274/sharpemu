@@ -267,7 +267,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        var lazyPrimeState = reservedOnly ? PrimeLazyReserveRegion(actualAddress, alignedSize) : "n/a";
+        var committedBytes = alignedSize;
+        var lazyPrimeState = reservedOnly
+            ? PrimeLazyReserveRegion(actualAddress, alignedSize, out committedBytes)
+            : "n/a";
 
         _gate.EnterWriteLock();
         try
@@ -276,10 +279,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             {
                 VirtualAddress = actualAddress,
                 Size = alignedSize,
+                CommittedBytes = checked((long)committedBytes),
                 IsExecutable = executable,
                 IsReservedOnly = reservedOnly,
                 Protection = protection
             });
+            RecordRegionAllocation(alignedSize, committedBytes);
         }
         finally
         {
@@ -370,7 +375,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
 
         var actualAddress = result;
-        var lazyPrimeState = reservedOnly ? PrimeLazyReserveRegion(actualAddress, alignedSize) : "n/a";
+        var committedBytes = alignedSize;
+        var lazyPrimeState = reservedOnly
+            ? PrimeLazyReserveRegion(actualAddress, alignedSize, out committedBytes)
+            : "n/a";
 
         _gate.EnterWriteLock();
         try
@@ -379,10 +387,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             {
                 VirtualAddress = actualAddress,
                 Size = alignedSize,
+                CommittedBytes = checked((long)committedBytes),
                 IsExecutable = executable,
                 IsReservedOnly = reservedOnly,
                 Protection = protection
             });
+            RecordRegionAllocation(alignedSize, committedBytes);
         }
         finally
         {
@@ -401,34 +411,36 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     /// Commits the leading slice of a reserve-only region so early guest touches
     /// succeed before on-demand <see cref="EnsureRangeCommitted"/> runs.
     /// </summary>
-    private string PrimeLazyReserveRegion(ulong actualAddress, ulong alignedSize)
+    private string PrimeLazyReserveRegion(ulong actualAddress, ulong alignedSize, out ulong committedBytes)
     {
         var primeBytes = Math.Min(alignedSize, LazyReservePrimeBytes);
+        committedBytes = 0;
         if (primeBytes == 0)
         {
             return "skip:0";
         }
 
-        ulong committedBytes = 0;
-        while (committedBytes < primeBytes)
+        ulong committed = 0;
+        while (committed < primeBytes)
         {
-            var remaining = primeBytes - committedBytes;
+            var remaining = primeBytes - committed;
             var chunkBytes = Math.Min(remaining, LazyReservePrimeChunkBytes);
-            var commitAddress = actualAddress + committedBytes;
+            var commitAddress = actualAddress + committed;
             if (!_hostMemory.Commit(commitAddress, chunkBytes, HostPageProtection.ReadWrite))
             {
                 break;
             }
 
-            committedBytes += chunkBytes;
+            committed += chunkBytes;
         }
 
-        if (committedBytes != 0)
+        committedBytes = committed;
+        if (committed != 0)
         {
-            var state = committedBytes == primeBytes
-                ? $"ok:{committedBytes:X}"
-                : $"partial:{committedBytes:X}/{primeBytes:X}";
-            TraceVmem($"Primed lazy region: 0x{actualAddress:X16} - 0x{actualAddress + committedBytes:X16} ({committedBytes} bytes)");
+            var state = committed == primeBytes
+                ? $"ok:{committed:X}"
+                : $"partial:{committed:X}/{primeBytes:X}";
+            TraceVmem($"Primed lazy region: 0x{actualAddress:X16} - 0x{actualAddress + committed:X16} ({committed} bytes)");
             return state;
         }
 
@@ -519,10 +531,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     VirtualAddress = gapAddress,
                     Size = gapSize,
+                    CommittedBytes = checked((long)gapSize),
                     IsExecutable = executable,
                     IsReservedOnly = false,
                     Protection = protection
                 });
+                RecordRegionAllocation(gapSize, gapSize);
             }
         }
         finally
@@ -615,6 +629,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private void ReleaseUntrackedAllocation(ulong address)
     {
+        MemoryRegion? removedRegion = null;
         _gate.EnterWriteLock();
         try
         {
@@ -622,6 +637,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             {
                 if (_regions[i].VirtualAddress == address)
                 {
+                    removedRegion = _regions[i];
                     _regions.RemoveAt(i);
                     break;
                 }
@@ -630,6 +646,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         finally
         {
             _gate.ExitWriteLock();
+        }
+
+        if (removedRegion is not null)
+        {
+            RecordRegionRelease(removedRegion.Size, checked((ulong)removedRegion.CommittedBytes));
         }
 
         Interlocked.Increment(ref _mappingGeneration);
@@ -796,6 +817,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             {
                 foreach (var region in _regions)
                 {
+                    RecordRegionRelease(region.Size, checked((ulong)region.CommittedBytes));
                     _hostMemory.Free(region.VirtualAddress);
                 }
                 _regions.Clear();
@@ -1599,6 +1621,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 return false;
             }
 
+            Interlocked.Add(ref region.CommittedBytes, checked((long)commitSize));
+            MemoryDiagnostics.Adjust("guest.host-committed", checked((long)commitSize));
             CacheCommittedRange(pageAddress, rangeEnd, mappingGeneration);
             pageAddress = rangeEnd;
         }
@@ -1676,6 +1700,18 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return DefaultLazyReservePrimeBytes;
     }
 
+    private static void RecordRegionAllocation(ulong reservedBytes, ulong committedBytes)
+    {
+        MemoryDiagnostics.Adjust("guest.host-reserved", checked((long)reservedBytes), countDelta: 1);
+        MemoryDiagnostics.Adjust("guest.host-committed", checked((long)committedBytes), countDelta: 1);
+    }
+
+    private static void RecordRegionRelease(ulong reservedBytes, ulong committedBytes)
+    {
+        MemoryDiagnostics.Adjust("guest.host-reserved", -checked((long)reservedBytes), countDelta: -1);
+        MemoryDiagnostics.Adjust("guest.host-committed", -checked((long)committedBytes), countDelta: -1);
+    }
+
     private static void TraceVmem(string message)
     {
         if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_VMEM"), "1", StringComparison.Ordinal))
@@ -1699,6 +1735,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         public ulong VirtualAddress { get; set; }
         public ulong Size { get; set; }
+        public long CommittedBytes;
         public bool IsExecutable { get; set; }
         public bool IsReservedOnly { get; set; }
         public uint Protection { get; set; }

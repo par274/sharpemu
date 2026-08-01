@@ -256,6 +256,27 @@ internal static partial class Program
         }
 
         SharpEmuLog.MinimumLevel = logLevel;
+        if (!TryGetMemoryDiagnosticsPath(args, out var memoryDiagnosticsPath, out var memoryDiagnosticsError))
+        {
+            Log.Error($"Invalid --memory-diagnostics option: {memoryDiagnosticsError}");
+            return 1;
+        }
+
+        MemoryDiagnosticsSession? memoryDiagnostics = null;
+        if (memoryDiagnosticsPath is not null)
+        {
+            try
+            {
+                memoryDiagnostics = MemoryDiagnosticsSession.Start(memoryDiagnosticsPath);
+            }
+            catch (Exception exception)
+            {
+                Log.Error($"Failed to start memory diagnostics at '{memoryDiagnosticsPath}'.", exception);
+                return 1;
+            }
+        }
+
+        using var memoryDiagnosticsScope = memoryDiagnostics;
         if (!HostVideoHost.TryConfigureVideo(videoOptions))
         {
             Console.Error.WriteLine("[LOADER][ERROR] Video options cannot change while a presenter is active.");
@@ -987,9 +1008,62 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--memory-diagnostics=<path>] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
+    }
+
+    private static bool TryGetMemoryDiagnosticsPath(
+        string[] args,
+        out string? path,
+        out string error)
+    {
+        path = null;
+        error = string.Empty;
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (string.Equals(argument, "--memory-diagnostics", StringComparison.OrdinalIgnoreCase))
+            {
+                if (index + 1 >= args.Length ||
+                    string.IsNullOrWhiteSpace(args[index + 1]) ||
+                    args[index + 1].StartsWith("--", StringComparison.Ordinal))
+                {
+                    error = "--memory-diagnostics requires a path.";
+                    return false;
+                }
+
+                if (path is not null)
+                {
+                    error = "--memory-diagnostics may be specified only once.";
+                    return false;
+                }
+
+                path = args[++index];
+                continue;
+            }
+
+            const string prefix = "--memory-diagnostics=";
+            if (argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var value = argument[prefix.Length..];
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    error = "--memory-diagnostics requires a path.";
+                    return false;
+                }
+
+                if (path is not null)
+                {
+                    error = "--memory-diagnostics may be specified only once.";
+                    return false;
+                }
+
+                path = value;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -1145,6 +1219,21 @@ internal static partial class Program
             if (string.Equals(argument, "--strict", StringComparison.OrdinalIgnoreCase))
             {
                 strictDynlibResolution = true;
+                continue;
+            }
+
+            if (string.Equals(argument, "--memory-diagnostics", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 < args.Length)
+                {
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (argument.StartsWith("--memory-diagnostics=", StringComparison.OrdinalIgnoreCase))
+            {
                 continue;
             }
 

@@ -12,6 +12,7 @@ using System.Threading;
 using System.Runtime.InteropServices;
 using System.Linq;
 using System.Globalization;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -3472,7 +3473,11 @@ public static partial class KernelMemoryCompatExports
 
             foreach (var mappedRegion in removedRegions)
             {
-                removedAny |= _mappedRegions.Remove(mappedRegion.Address);
+                if (_mappedRegions.Remove(mappedRegion.Address))
+                {
+                    RecordMappedRegionRelease(mappedRegion);
+                    removedAny = true;
+                }
                 if (mappedRegion.IsFlexible)
                 {
                     _allocatedFlexibleBytes = mappedRegion.Length >= _allocatedFlexibleBytes
@@ -6181,7 +6186,10 @@ public static partial class KernelMemoryCompatExports
 
         foreach (var region in affected)
         {
-            _mappedRegions.Remove(region.Address);
+            if (_mappedRegions.Remove(region.Address))
+            {
+                RecordMappedRegionRelease(region);
+            }
         }
 
         foreach (var region in affected)
@@ -6258,7 +6266,10 @@ public static partial class KernelMemoryCompatExports
         {
             foreach (var region in overlapping)
             {
-                _mappedRegions.Remove(region.Address);
+                if (_mappedRegions.Remove(region.Address))
+                {
+                    RecordMappedRegionRelease(region);
+                }
             }
 
             foreach (var region in overlapping)
@@ -6277,6 +6288,7 @@ public static partial class KernelMemoryCompatExports
         }
 
         _mappedRegions[start] = replacement;
+        RecordMappedRegionAllocation(replacement);
     }
 
     private static void AddMappedRegionSliceLocked(
@@ -6294,13 +6306,39 @@ public static partial class KernelMemoryCompatExports
             ? unchecked(source.DirectStart + (start - source.Address))
             : 0UL;
 
-        _mappedRegions[start] = source with
+        var slice = source with
         {
             Address = start,
             Length = end - start,
             Protection = protection,
             DirectStart = directStart,
         };
+        _mappedRegions[start] = slice;
+        RecordMappedRegionAllocation(slice);
+    }
+
+    private static void RecordMappedRegionAllocation(MappedRegion region)
+    {
+        if (region.IsDirect)
+        {
+            MemoryDiagnostics.Adjust("guest.direct-mapped-logical", checked((long)region.Length), countDelta: 1);
+        }
+        else if (region.IsFlexible)
+        {
+            MemoryDiagnostics.Adjust("guest.flexible-mapped-logical", checked((long)region.Length), countDelta: 1);
+        }
+    }
+
+    private static void RecordMappedRegionRelease(MappedRegion region)
+    {
+        if (region.IsDirect)
+        {
+            MemoryDiagnostics.Adjust("guest.direct-mapped-logical", -checked((long)region.Length), countDelta: -1);
+        }
+        else if (region.IsFlexible)
+        {
+            MemoryDiagnostics.Adjust("guest.flexible-mapped-logical", -checked((long)region.Length), countDelta: -1);
+        }
     }
 
     private static bool TryFindDirectAllocationLocked(ulong directStart, out DirectAllocation allocation)
@@ -6489,12 +6527,14 @@ public static partial class KernelMemoryCompatExports
         }
 
         _directAllocations.Remove(releasedFrom.Start);
+        var replacementCount = -1;
         if (start > releasedFrom.Start)
         {
             _directAllocations[releasedFrom.Start] = releasedFrom with
             {
                 Length = start - releasedFrom.Start,
             };
+            replacementCount++;
         }
 
         if (releaseEnd < ownerEnd)
@@ -6503,7 +6543,10 @@ public static partial class KernelMemoryCompatExports
                 releaseEnd,
                 ownerEnd - releaseEnd,
                 releasedFrom.MemoryType);
+            replacementCount++;
         }
+
+        MemoryDiagnostics.Adjust("guest.direct-logical", -checked((long)length), replacementCount);
 
         _nextPhysicalAddress = GetDirectMemoryHighWaterMarkLocked();
         return true;
@@ -6535,6 +6578,7 @@ public static partial class KernelMemoryCompatExports
         }
 
         _directAllocations[freePosition] = new DirectAllocation(freePosition, length, memoryType);
+        MemoryDiagnostics.Adjust("guest.direct-logical", checked((long)length), countDelta: 1);
         _nextPhysicalAddress = endAddress;
         selectedAddress = freePosition;
         return true;
@@ -6880,6 +6924,7 @@ public static partial class KernelMemoryCompatExports
         {
             _libcAllocations[alignedAddress] = new LibcHeapAllocation(baseAddress, actualSize, alignment);
         }
+        MemoryDiagnostics.Adjust("native.libc-heap", checked((long)actualSize), countDelta: 1);
 
         try
         {
@@ -7006,6 +7051,7 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
+        MemoryDiagnostics.Adjust("native.libc-heap", -checked((long)allocation.Size), countDelta: -1);
         Marshal.FreeHGlobal(allocation.BaseAddress);
     }
 
