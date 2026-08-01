@@ -54,6 +54,48 @@ public sealed class MemoryDiagnosticsTests
     }
 
     [Fact]
+    public void SessionWritesStructuredEvents()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "sharpemu-memory-diagnostics",
+            $"{Guid.NewGuid():N}.jsonl");
+
+        try
+        {
+            using (MemoryDiagnosticsSession.Start(path, TimeSpan.FromHours(1)))
+            {
+                MemoryDiagnostics.RecordEvent(
+                    "synthetic-event",
+                    new { Sequence = 7, PayloadBytes = 4096UL });
+            }
+
+            var records = File.ReadAllLines(path);
+            Assert.Equal(3, records.Length);
+
+            using var eventDocument = JsonDocument.Parse(records[1]);
+            var eventRoot = eventDocument.RootElement;
+            Assert.Equal("event", eventRoot.GetProperty("kind").GetString());
+            Assert.Equal(
+                "synthetic-event",
+                eventRoot.GetProperty("event").GetString());
+            Assert.Equal(
+                7,
+                eventRoot.GetProperty("data").GetProperty("sequence").GetInt32());
+            Assert.Equal(
+                4096UL,
+                eventRoot.GetProperty("data").GetProperty("payloadBytes").GetUInt64());
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
     public async Task DisposeDrainsAnInFlightTimerSampleBeforeClosingJsonl()
     {
         var path = Path.Combine(

@@ -9617,6 +9617,30 @@ public static partial class AgcExports
         return bytes;
     }
 
+    private static GuestTextureSnapshotInfo CreateTextureSnapshotInfo(
+        TextureDescriptor descriptor,
+        ulong baseMipByteOffset,
+        ulong logicalSourceByteCount,
+        ulong physicalSourceByteCount,
+        ulong sourceSliceByteCount,
+        ulong sourceSliceStride,
+        uint sourceLayerCount)
+    {
+        if (!MemoryDiagnostics.IsEnabled)
+        {
+            return default;
+        }
+
+        return new GuestTextureSnapshotInfo(
+            checked(descriptor.Address + baseMipByteOffset),
+            logicalSourceByteCount,
+            physicalSourceByteCount,
+            sourceSliceByteCount,
+            sourceSliceStride,
+            sourceLayerCount,
+            System.Diagnostics.Stopwatch.GetTimestamp());
+    }
+
     private static void TraceTextureFallback(TextureDescriptor descriptor, string reason)
     {
         var mode = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGES");
@@ -9802,7 +9826,7 @@ public static partial class AgcExports
                 descriptor.NumberType))
         {
             NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-            texture = new GuestDrawTexture(
+                        texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -9884,7 +9908,7 @@ public static partial class AgcExports
             }
 
             NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-            texture = new GuestDrawTexture(
+                        texture = new GuestDrawTexture(
                 descriptor.Address,
                 descriptor.Width,
                 descriptor.Height,
@@ -9902,7 +9926,17 @@ public static partial class AgcExports
                 DstSelect: descriptor.DstSelect,
                 Sampler: ToGuestSampler(samplerDescriptor),
                 Type: descriptor.Type,
-                Depth: textureDepth);
+                Depth: textureDepth,
+                SnapshotInfo: initialPixels.Length == 0
+                    ? default
+                    : CreateTextureSnapshotInfo(
+                        descriptor,
+                        baseMipByteOffset,
+                        sourceByteCount,
+                        physicalSourceByteCount,
+                        physicalSourceByteCount,
+                        physicalSourceByteCount,
+                        1));
             return true;
         }
 
@@ -10010,7 +10044,7 @@ public static partial class AgcExports
                     if (readAllLayers)
                     {
                         NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-            texture = new GuestDrawTexture(
+                        texture = new GuestDrawTexture(
                             descriptor.Address,
                             descriptor.Width,
                             descriptor.Height,
@@ -10037,7 +10071,15 @@ public static partial class AgcExports
                             Type: descriptor.Type,
                             Depth: textureDepth,
                             TiledSource: tiledLayers,
-                            Detile: gpuArrayParams);
+                            Detile: gpuArrayParams,
+                            SnapshotInfo: CreateTextureSnapshotInfo(
+                                descriptor,
+                                baseMipByteOffset,
+                                checked(sourceByteCount * arrayLayers),
+                                checked((ulong)sliceBytes * arrayLayers),
+                                (ulong)sliceBytes,
+                                chainSliceBytes,
+                                arrayLayers));
                         return true;
                     }
                 }
@@ -10079,7 +10121,7 @@ public static partial class AgcExports
                 if (uploadedLayers == arrayLayers)
                 {
                     NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-            texture = new GuestDrawTexture(
+                    texture = new GuestDrawTexture(
                         descriptor.Address,
                         descriptor.Width,
                         descriptor.Height,
@@ -10099,7 +10141,15 @@ public static partial class AgcExports
                         ArrayedView: true,
                         ArrayLayers: arrayLayers,
                         Type: descriptor.Type,
-                        Depth: textureDepth);
+                        Depth: textureDepth,
+                        SnapshotInfo: CreateTextureSnapshotInfo(
+                            descriptor,
+                            baseMipByteOffset,
+                            checked((ulong)layerBytes * arrayLayers),
+                            checked(physicalSourceByteCount * arrayLayers),
+                            physicalSourceByteCount,
+                            chainSliceBytes,
+                            arrayLayers));
                     return true;
                 }
             }
@@ -10185,7 +10235,7 @@ public static partial class AgcExports
                 (long)elementsWide * elementsHigh * bytesPerElement <= source.Length)
             {
                 NoteSampledAddress(descriptor.Address, descriptor.Format, descriptor.NumberType);
-            texture = new GuestDrawTexture(
+                texture = new GuestDrawTexture(
                     descriptor.Address,
                     descriptor.Width,
                     descriptor.Height,
@@ -10207,7 +10257,15 @@ public static partial class AgcExports
                     Type: descriptor.Type,
                     Depth: textureDepth,
                     TiledSource: source,
-                    Detile: gpuDetileParams);
+                    Detile: gpuDetileParams,
+                    SnapshotInfo: CreateTextureSnapshotInfo(
+                        descriptor,
+                        baseMipByteOffset,
+                        sourceByteCount,
+                        physicalSourceByteCount,
+                        physicalSourceByteCount,
+                        physicalSourceByteCount,
+                        1));
                 return true;
             }
         }
@@ -10243,7 +10301,15 @@ public static partial class AgcExports
             WriteGeneration: hasWriteGeneration ? writeGeneration : -1,
             ArrayedView: isArrayed,
             Type: descriptor.Type,
-            Depth: textureDepth);
+            Depth: textureDepth,
+            SnapshotInfo: CreateTextureSnapshotInfo(
+                descriptor,
+                baseMipByteOffset,
+                sourceByteCount,
+                physicalSourceByteCount,
+                physicalSourceByteCount,
+                physicalSourceByteCount,
+                1));
         return true;
     }
 

@@ -623,6 +623,12 @@ internal static unsafe class VulkanVideoPresenter
     private static readonly HashSet<long> _completedGuestWorkOutOfOrder = [];
     private static readonly Dictionary<string, long> _lastEnqueuedGuestWorkByQueue =
         new(StringComparer.Ordinal);
+    // Memory-diagnostics-only state for the bounded description of an item
+    // larger than the configured byte budget. The sets contain sequence IDs
+    // and state strings only; they never retain the guest work object or any
+    // of its arrays.
+    private static readonly HashSet<long> _diagnosticOversizedGuestWorkSequences = [];
+    private static readonly Dictionary<long, string> _diagnosticOversizedGuestWorkStates = [];
     private static long _executingGuestWorkSequence;
     [ThreadStatic]
     private static VulkanGuestQueueIdentity? _submittingGuestQueue;
@@ -794,6 +800,8 @@ internal static unsafe class VulkanVideoPresenter
         _completedGuestWorkSequence = 0;
         _completedGuestWorkOutOfOrder.Clear();
         _lastEnqueuedGuestWorkByQueue.Clear();
+        _diagnosticOversizedGuestWorkSequences.Clear();
+        _diagnosticOversizedGuestWorkStates.Clear();
         _executingGuestWorkSequence = 0;
     }
 
@@ -2523,8 +2531,15 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         var queue = _submittingGuestQueue ?? VulkanGuestQueueIdentity.Default;
+        var queueTailBefore = _lastEnqueuedGuestWorkByQueue.GetValueOrDefault(queue.Name);
+        var queueDepthBefore = _pendingGuestWorkByQueue.TryGetValue(
+            queue.Name,
+            out var existingQueue)
+            ? existingQueue.Count
+            : 0;
+        var pendingCountBefore = _pendingGuestWorkCount;
+        var pendingBytesBefore = _pendingGuestWorkBytes;
         var sequence = ++_enqueuedGuestWorkSequence;
-        _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
         var requiredSequence = GetGuestWorkDependencyLocked(work);
         if (!_pendingGuestWorkByQueue.TryGetValue(queue.Name, out var pendingQueue))
         {
@@ -2532,6 +2547,7 @@ internal static unsafe class VulkanVideoPresenter
             _pendingGuestWorkByQueue.Add(queue.Name, pendingQueue);
             _pendingGuestQueueSchedule.Add(queue.Name);
         }
+        _lastEnqueuedGuestWorkByQueue[queue.Name] = sequence;
 
         var pending = new PendingGuestWork(
             work,
@@ -2560,7 +2576,7 @@ internal static unsafe class VulkanVideoPresenter
         }
         else
         {
-        pendingQueue.AddLast(pending);
+            pendingQueue.AddLast(pending);
         }
         RecordGuestImageWritersLocked(work, sequence);
         _pendingGuestWorkCount++;
@@ -2582,6 +2598,26 @@ internal static unsafe class VulkanVideoPresenter
             "managed.guest-queue-enqueued",
             checked((long)payloadBytes),
             countDelta: 1);
+        RecordOversizedGuestWorkEnqueuedLocked(
+            pending,
+            queueDepthBefore,
+            queueTailBefore,
+            pendingCountBefore,
+            pendingBytesBefore);
+        if (_diagnosticOversizedGuestWorkSequences.Contains(sequence))
+        {
+            var initialState = pendingQueue.First?.Value.Sequence == sequence
+                ? IsGuestWorkCompletedLocked(requiredSequence)
+                    ? "ready-head"
+                    : "blocked-required-sequence"
+                : "behind-same-queue";
+            RecordOversizedGuestWorkStateLocked(
+                pending,
+                initialState,
+                pendingQueue.Count,
+                pendingQueue.First?.Value.Sequence ?? 0);
+        }
+        UpdateOversizedGuestWorkHeadStatesLocked();
         // Wake any thread waiting for guest work completion or queue space.
         System.Threading.Monitor.PulseAll(_gate);
         return sequence;
@@ -2597,6 +2633,182 @@ internal static unsafe class VulkanVideoPresenter
         VulkanOrderedGuestAction or
         VulkanOrderedGuestFlip or
         VulkanOrderedGuestFlipWait;
+
+    private static object DescribeGuestWorkForMemoryDiagnostics(object work) => work switch
+    {
+        VulkanComputeGuestDispatch compute => new
+        {
+            workType = nameof(VulkanComputeGuestDispatch),
+            operation = "compute-dispatch",
+            shaderAddress = compute.ShaderAddress,
+            groupCountX = compute.GroupCountX,
+            groupCountY = compute.GroupCountY,
+            groupCountZ = compute.GroupCountZ,
+            baseGroupX = compute.BaseGroupX,
+            baseGroupY = compute.BaseGroupY,
+            baseGroupZ = compute.BaseGroupZ,
+            localSizeX = compute.LocalSizeX,
+            localSizeY = compute.LocalSizeY,
+            localSizeZ = compute.LocalSizeZ,
+            threadCountX = compute.ThreadCountX,
+            threadCountY = compute.ThreadCountY,
+            threadCountZ = compute.ThreadCountZ,
+            isIndirect = compute.IsIndirect,
+            writesGlobalMemory = compute.WritesGlobalMemory,
+            spirvBytes = compute.ComputeSpirv.Length,
+            textureCount = compute.Textures.Count,
+            globalBufferCount = compute.GlobalMemoryBuffers.Count,
+        },
+        VulkanOffscreenGuestDraw draw => new
+        {
+            workType = nameof(VulkanOffscreenGuestDraw),
+            operation = "offscreen-draw",
+            shaderAddress = draw.ShaderAddress,
+            publishTarget = draw.PublishTarget,
+            targetCount = draw.Targets.Count,
+            vertexShaderBytes = draw.Draw.VertexSpirv.Length,
+            pixelShaderBytes = draw.Draw.PixelSpirv.Length,
+            textureCount = draw.Draw.Textures.Count,
+            globalBufferCount = draw.Draw.GlobalMemoryBuffers.Count,
+            vertexBufferCount = draw.Draw.VertexBuffers.Count,
+            indexBufferBytes = draw.Draw.IndexBuffer?.Data.LongLength ?? 0,
+            attributeCount = draw.Draw.AttributeCount,
+            vertexCount = draw.Draw.VertexCount,
+            instanceCount = draw.Draw.InstanceCount,
+            primitiveType = draw.Draw.PrimitiveType,
+            baseVertex = draw.Draw.BaseVertex,
+        },
+        VulkanGuestImageWrite imageWrite => new
+        {
+            workType = nameof(VulkanGuestImageWrite),
+            operation = "image-write",
+            address = imageWrite.Address,
+            pixelsBytes = imageWrite.Pixels?.LongLength ?? 0,
+            fillValue = imageWrite.FillValue,
+            rowOffset = imageWrite.RowOffset,
+        },
+        _ => new
+        {
+            workType = work.GetType().Name,
+            operation = "other",
+        },
+    };
+
+    private static void RecordOversizedGuestWorkEnqueuedLocked(
+        in PendingGuestWork pending,
+        int queueDepthBefore,
+        long queueTailBefore,
+        int pendingCountBefore,
+        ulong pendingBytesBefore)
+    {
+        if (!MemoryDiagnostics.IsEnabled ||
+            pending.PayloadBytes <= _maxPendingGuestWorkBytes)
+        {
+            return;
+        }
+
+        _diagnosticOversizedGuestWorkSequences.Add(pending.Sequence);
+        var payload = VulkanGuestWorkDiagnostics.Build(pending.Work);
+        MemoryDiagnostics.RecordEvent(
+            "guest-work-oversized",
+            new
+            {
+                eventVersion = 1,
+                work = DescribeGuestWorkForMemoryDiagnostics(pending.Work),
+                sequence = pending.Sequence,
+                requiredSequence = pending.RequiredSequence,
+                requiredSequenceCompleted = IsGuestWorkCompletedLocked(
+                    pending.RequiredSequence),
+                queue = new
+                {
+                    name = pending.Queue.Name,
+                    submissionId = pending.Queue.SubmissionId,
+                },
+                payloadBytes = pending.PayloadBytes,
+                configuredByteBudgetBytes = _maxPendingGuestWorkBytes,
+                queueDepthBefore,
+                queueTailBefore,
+                pendingCountBefore,
+                pendingBytesBefore,
+                pendingCountAfter = _pendingGuestWorkCount,
+                pendingBytesAfter = _pendingGuestWorkBytes,
+                executingGuestWorkSequence = _executingGuestWorkSequence,
+                payloadTotalMatchesStored = payload.TotalBytes == pending.PayloadBytes,
+                payload,
+            });
+    }
+
+    private static void RecordOversizedGuestWorkStateLocked(
+        in PendingGuestWork pending,
+        string state,
+        int queueDepth,
+        long headSequence)
+    {
+        if (!MemoryDiagnostics.IsEnabled ||
+            !_diagnosticOversizedGuestWorkSequences.Contains(pending.Sequence) ||
+            (_diagnosticOversizedGuestWorkStates.TryGetValue(
+                 pending.Sequence,
+                 out var previousState) &&
+             string.Equals(previousState, state, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        _diagnosticOversizedGuestWorkStates[pending.Sequence] = state;
+        MemoryDiagnostics.RecordEvent(
+            "guest-work-oversized-state",
+            new
+            {
+                eventVersion = 1,
+                sequence = pending.Sequence,
+                state,
+                workType = pending.Work.GetType().Name,
+                requiredSequence = pending.RequiredSequence,
+                requiredSequenceCompleted = IsGuestWorkCompletedLocked(
+                    pending.RequiredSequence),
+                queue = new
+                {
+                    name = pending.Queue.Name,
+                    submissionId = pending.Queue.SubmissionId,
+                },
+                queueDepth,
+                headSequence = headSequence == 0 ? (long?)null : headSequence,
+                pendingCount = _pendingGuestWorkCount,
+                pendingBytes = _pendingGuestWorkBytes,
+                completedContiguousSequence = _completedGuestWorkSequence,
+                completedOutOfOrderCount = _completedGuestWorkOutOfOrder.Count,
+                executingGuestWorkSequence = _executingGuestWorkSequence,
+            });
+    }
+
+    private static void UpdateOversizedGuestWorkHeadStatesLocked()
+    {
+        if (!MemoryDiagnostics.IsEnabled ||
+            _diagnosticOversizedGuestWorkSequences.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var entry in _pendingGuestWorkByQueue)
+        {
+            var queue = entry.Value;
+            if (queue.First is not { } first ||
+                !_diagnosticOversizedGuestWorkSequences.Contains(
+                    first.Value.Sequence))
+            {
+                continue;
+            }
+
+            var pending = first.Value;
+            RecordOversizedGuestWorkStateLocked(
+                pending,
+                IsGuestWorkCompletedLocked(pending.RequiredSequence)
+                    ? "ready-head"
+                    : "blocked-required-sequence",
+                queue.Count,
+                pending.Sequence);
+        }
+    }
 
     private static string FormatGuestQueueBacklogLocked()
     {
@@ -2823,6 +3035,11 @@ internal static unsafe class VulkanVideoPresenter
         bool advanceScheduleCursor)
     {
         var work = queue.First!.Value;
+        RecordOversizedGuestWorkStateLocked(
+            work,
+            "taken",
+            queue.Count,
+            work.Sequence);
         queue.RemoveFirst();
         _pendingGuestWorkCount--;
         if (IsPayloadBearingGuestWork(work.Work))
@@ -2856,6 +3073,8 @@ internal static unsafe class VulkanVideoPresenter
             _pendingGuestQueueCursor =
                 (scheduleIndex + 1) % _pendingGuestQueueSchedule.Count;
         }
+
+        UpdateOversizedGuestWorkHeadStatesLocked();
     }
 
     private static bool RequeueGuestWorkFront(in PendingGuestWork work)
@@ -2888,6 +3107,7 @@ internal static unsafe class VulkanVideoPresenter
                 _pendingSyncGuestWorkCount++;
             }
 
+            UpdateOversizedGuestWorkHeadStatesLocked();
             System.Threading.Monitor.PulseAll(_gate);
             return true;
         }
@@ -2934,6 +3154,14 @@ internal static unsafe class VulkanVideoPresenter
                     added,
                     "A guest work sequence must complete exactly once.");
             }
+            RecordOversizedGuestWorkStateLocked(
+                pending,
+                "completed",
+                0,
+                0);
+            _diagnosticOversizedGuestWorkSequences.Remove(pending.Sequence);
+            _diagnosticOversizedGuestWorkStates.Remove(pending.Sequence);
+            UpdateOversizedGuestWorkHeadStatesLocked();
             System.Threading.Monitor.PulseAll(_gate);
             if (_traceGuestWorkCompletion)
             {
@@ -14719,6 +14947,14 @@ internal static unsafe class VulkanVideoPresenter
                 Volatile.Write(
                     ref _executingGuestWorkSequence,
                     pendingGuestWork.Sequence);
+                lock (_gate)
+                {
+                    RecordOversizedGuestWorkStateLocked(
+                        pendingGuestWork,
+                        "executing",
+                        _pendingGuestWorkCount,
+                        0);
+                }
                 using var guestQueueScope = EnterGuestQueue(
                     pendingGuestWork.Queue.Name,
                     pendingGuestWork.Queue.SubmissionId);

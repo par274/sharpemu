@@ -148,6 +148,27 @@ public sealed class MemoryDiagnosticsSession : IDisposable
         }
     }
 
+    internal void RecordEvent(string eventName, object data)
+    {
+        if (string.IsNullOrWhiteSpace(eventName) || Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
+        lock (_writeGate)
+        {
+            _writer.WriteLine(
+                JsonSerializer.Serialize(
+                    new MemoryDiagnosticsEvent
+                    {
+                        Event = eventName,
+                        Data = data,
+                    },
+                    _jsonOptions));
+            _writer.Flush();
+        }
+    }
+
     private void WriteSampleIfIdle()
     {
         if (Volatile.Read(ref _disposed) != 0 || Interlocked.Exchange(ref _sampleInProgress, 1) != 0)
@@ -286,6 +307,12 @@ public static class MemoryDiagnostics
     {
         Volatile.Read(ref ActiveSession)?.Adjust(category, byteDelta, countDelta);
     }
+
+    public static void RecordEvent(string eventName, object data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        Volatile.Read(ref ActiveSession)?.RecordEvent(eventName, data);
+    }
 }
 
 internal sealed class MemoryDiagnosticsHeader
@@ -320,6 +347,13 @@ internal sealed class MemoryDiagnosticsSample
     public int GcCollectionCount2 { get; init; }
     public long GcFragmentedBytes { get; init; }
     public SortedDictionary<string, CategorySample> Categories { get; init; } = new(StringComparer.Ordinal);
+}
+
+internal sealed class MemoryDiagnosticsEvent
+{
+    public string Kind => "event";
+    public string Event { get; init; } = string.Empty;
+    public object Data { get; init; } = default!;
 }
 
 internal sealed class CategorySample
