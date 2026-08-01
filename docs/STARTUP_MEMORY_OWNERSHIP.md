@@ -106,8 +106,10 @@ or below 1.82 MiB before that late single oversized payload; the default budget
 therefore throttles normal backlog while the deliberate oversized-item rule
 admits the one work item. The retained count also includes zero-byte ordered
 follow-ups. Completed smaller work released its exact retained total back to
-zero in the traces. The oversized item was still pending at the safety cutoff,
-so its corresponding release was not expected in these trials. No
+zero in the traces. The old trials did not distinguish queue membership from
+active ownership at the safety cutoff. Focused follow-up instrumentation shows
+that the item was ready at the queue head, was taken, and was executing; its
+corresponding release was not expected before the execution call returned. No
 `managed.guest-queue-actual-*` category appeared, and the old ordinary-versus-
 complete accounting gap is gone.
 
@@ -121,11 +123,15 @@ guest mapping and other non-queue owners remain separate contributors.
 ## Remaining uncertainty and next frontier
 
 The correction is validated at the queue ownership boundary, but it does not
-make the 256 MiB budget a hard cap for one oversized payload. The next blocker
-is the lifetime and scheduling policy for that single multi-GiB detile work item
-while preserving immediate render-thread follow-up safety. This change does
-not address suspended AGC waits, zero-dimension dispatches, descriptor
-divergence, scalar-pointer fallback, shaders, or unrelated compatibility
-behavior. The early guest-commit diagnosis remains separate and is falsified
-only by a matched VMMap snapshot showing the 0xFFD90000 range reserved but not
-committed.
+make the 256 MiB budget a hard cap for one oversized payload. The focused
+follow-up finding is recorded in OVERSIZED_DETILE_WORK.md: the item is a ready
+queue head taken by the presenter, and sixteen distinct TiledSource arrays
+refer to one guest source range with compatible recorded metadata because image
+bindings are materialized eagerly without a dispatch-local snapshot table. The
+next implementation frontier is that producer-side repeated capture, while
+preserving resource visibility and render-thread follow-up safety. This change
+does not address suspended
+AGC waits, zero-dimension dispatches, descriptor divergence, scalar-pointer
+fallback, shaders, or unrelated compatibility behavior. The early guest-commit
+diagnosis remains separate and is falsified only by a matched VMMap snapshot
+showing the 0xFFD90000 range reserved but not committed.

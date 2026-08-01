@@ -43,7 +43,22 @@ internal sealed record GuestDrawTexture(
     // TiledSource; the Vulkan backend detiles them on the GPU. RgbaPixels is
     // empty in that case. Both are neutral (no host graphics-API values).
     byte[]? TiledSource = null,
-    DetileParams? Detile = null);
+    DetileParams? Detile = null,
+    GuestTextureSnapshotInfo SnapshotInfo = default);
+
+/// <summary>
+/// Diagnostics-only metadata for a texture snapshot. It describes the guest
+/// bytes read to create the retained array without retaining the guest data or
+/// copying it into the diagnostic stream.
+/// </summary>
+internal readonly record struct GuestTextureSnapshotInfo(
+    ulong GuestSourceAddress,
+    ulong LogicalSourceByteCount,
+    ulong PhysicalSourceByteCount,
+    ulong SourceSliceByteCount,
+    ulong SourceSliceStride,
+    uint SourceLayerCount,
+    long CreatedTicks);
 
 /// <summary>Raw guest sampler descriptor dwords, copied verbatim from guest memory.</summary>
 internal readonly record struct GuestSampler(

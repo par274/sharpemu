@@ -22,6 +22,7 @@ public sealed class MemoryDiagnosticsSession : IDisposable
     private readonly TimeSpan _sampleInterval;
     private readonly Action? _beforeSampleWriteForTests;
     private readonly Action? _timerDrainStartedForTests;
+    private readonly Action? _recordEventBeforeWriteGateForTests;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly System.Threading.Timer _timer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Counter> _counters = new(StringComparer.Ordinal);
@@ -40,7 +41,8 @@ public sealed class MemoryDiagnosticsSession : IDisposable
         string path,
         TimeSpan sampleInterval,
         Action? beforeSampleWriteForTests,
-        Action? timerDrainStartedForTests)
+        Action? timerDrainStartedForTests,
+        Action? recordEventBeforeWriteGateForTests)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -73,6 +75,7 @@ public sealed class MemoryDiagnosticsSession : IDisposable
         _sampleInterval = sampleInterval;
         _beforeSampleWriteForTests = beforeSampleWriteForTests;
         _timerDrainStartedForTests = timerDrainStartedForTests;
+        _recordEventBeforeWriteGateForTests = recordEventBeforeWriteGateForTests;
         _timer = new System.Threading.Timer(
             static state => ((MemoryDiagnosticsSession)state!).WriteSampleIfIdle(),
             this,
@@ -94,31 +97,39 @@ public sealed class MemoryDiagnosticsSession : IDisposable
         string path,
         TimeSpan? sampleInterval = null)
     {
-        return StartCore(path, sampleInterval, null, null);
+        return StartCore(path, sampleInterval, null, null, null);
     }
 
     internal static MemoryDiagnosticsSession StartForTests(
         string path,
         TimeSpan sampleInterval,
         Action beforeSampleWrite,
-        Action timerDrainStarted)
+        Action timerDrainStarted,
+        Action? recordEventBeforeWriteGate = null)
     {
         ArgumentNullException.ThrowIfNull(beforeSampleWrite);
         ArgumentNullException.ThrowIfNull(timerDrainStarted);
-        return StartCore(path, sampleInterval, beforeSampleWrite, timerDrainStarted);
+        return StartCore(
+            path,
+            sampleInterval,
+            beforeSampleWrite,
+            timerDrainStarted,
+            recordEventBeforeWriteGate);
     }
 
     private static MemoryDiagnosticsSession StartCore(
         string path,
         TimeSpan? sampleInterval,
         Action? beforeSampleWriteForTests,
-        Action? timerDrainStartedForTests)
+        Action? timerDrainStartedForTests,
+        Action? recordEventBeforeWriteGateForTests)
     {
         var session = new MemoryDiagnosticsSession(
             path,
             sampleInterval ?? TimeSpan.FromMilliseconds(500),
             beforeSampleWriteForTests,
-            timerDrainStartedForTests);
+            timerDrainStartedForTests,
+            recordEventBeforeWriteGateForTests);
         if (Interlocked.CompareExchange(ref MemoryDiagnostics.ActiveSession, session, null) is not null)
         {
             session.Dispose();
@@ -145,6 +156,34 @@ public sealed class MemoryDiagnosticsSession : IDisposable
         if (countDelta != 0)
         {
             Interlocked.Add(ref counter.Count, countDelta);
+        }
+    }
+
+    internal void RecordEvent(string eventName, object data)
+    {
+        if (string.IsNullOrWhiteSpace(eventName) || Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
+        _recordEventBeforeWriteGateForTests?.Invoke();
+
+        lock (_writeGate)
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
+            _writer.WriteLine(
+                JsonSerializer.Serialize(
+                    new MemoryDiagnosticsEvent
+                    {
+                        Event = eventName,
+                        Data = data,
+                    },
+                    _jsonOptions));
+            _writer.Flush();
         }
     }
 
@@ -286,6 +325,12 @@ public static class MemoryDiagnostics
     {
         Volatile.Read(ref ActiveSession)?.Adjust(category, byteDelta, countDelta);
     }
+
+    public static void RecordEvent(string eventName, object data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        Volatile.Read(ref ActiveSession)?.RecordEvent(eventName, data);
+    }
 }
 
 internal sealed class MemoryDiagnosticsHeader
@@ -320,6 +365,13 @@ internal sealed class MemoryDiagnosticsSample
     public int GcCollectionCount2 { get; init; }
     public long GcFragmentedBytes { get; init; }
     public SortedDictionary<string, CategorySample> Categories { get; init; } = new(StringComparer.Ordinal);
+}
+
+internal sealed class MemoryDiagnosticsEvent
+{
+    public string Kind => "event";
+    public string Event { get; init; } = string.Empty;
+    public object Data { get; init; } = default!;
 }
 
 internal sealed class CategorySample

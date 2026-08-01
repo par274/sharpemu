@@ -91,6 +91,94 @@ public sealed class VulkanGuestWorkPayloadTests
     }
 
     [Fact]
+    public void PayloadDiagnosticsReconcileAliasesAndTextureSourceRange()
+    {
+        var shader = new byte[5];
+        var rgba = new byte[7];
+        var tiled = new byte[11];
+        var shared = new byte[13];
+        var texture = new GuestDrawTexture(
+            Address: 0x1000,
+            Width: 32,
+            Height: 16,
+            Format: 5,
+            NumberType: 0,
+            RgbaPixels: rgba,
+            IsFallback: false,
+            IsStorage: false,
+            MipLevels: 3,
+            MipLevel: 1,
+            BaseMipLevel: 1,
+            ResourceMipLevels: 4,
+            Pitch: 64,
+            TileMode: 9,
+            DstSelect: 0xFAC,
+            ArrayedView: true,
+            ArrayLayers: 2,
+            Type: 13,
+            Depth: 1,
+            TiledSource: tiled,
+            SnapshotInfo: new GuestTextureSnapshotInfo(
+                GuestSourceAddress: 0x1000,
+                LogicalSourceByteCount: 128,
+                PhysicalSourceByteCount: 176,
+                SourceSliceByteCount: 80,
+                SourceSliceStride: 0x100,
+                SourceLayerCount: 2,
+                CreatedTicks: System.Diagnostics.Stopwatch.GetTimestamp()));
+        var work = new VulkanComputeGuestDispatch(
+            0xABC,
+            shader,
+            [texture],
+            [Buffer(shared), Buffer(shared)],
+            2,
+            3,
+            4,
+            0,
+            0,
+            0,
+            8,
+            8,
+            1,
+            false,
+            true);
+
+        var summary = VulkanGuestWorkDiagnostics.Build(
+            work,
+            maximumDetailedArrays: 2,
+            maximumDetailedTextures: 1);
+
+        Assert.Equal(
+            VulkanVideoPresenter.GetGuestWorkPayloadBytes(work),
+            summary.TotalBytes);
+        Assert.Equal(4, summary.UniqueArrayCount);
+        Assert.True(summary.LargestArrays.Count == 2);
+        Assert.True(summary.Textures.Count == 1);
+
+        var textureSummary = Assert.Single(summary.Textures);
+        Assert.Equal((ulong)0x1000, textureSummary.GuestSourceAddress);
+        Assert.Equal((ulong)0x1150, textureSummary.GuestSourceCoveredEnd);
+        Assert.Equal((ulong)0x150, textureSummary.GuestSourceCoveredRangeBytes);
+        Assert.Equal((uint)2, textureSummary.CalculatedSourceLayerCount);
+        Assert.Equal((ulong)80, textureSummary.CalculatedSourceSliceBytes);
+        Assert.Equal((ulong)0x100, textureSummary.CalculatedSourceSliceStride);
+        Assert.Equal((ulong)176, textureSummary.CalculatedPhysicalSourceBytes);
+        Assert.Equal(4u, textureSummary.ResourceMipLevels);
+        Assert.Equal(13u, textureSummary.Type);
+        Assert.Equal(2u, textureSummary.ArrayLayers);
+        Assert.Equal((ulong)rgba.Length, textureSummary.RgbaAllocatedBytes);
+        Assert.Equal((ulong)tiled.Length, textureSummary.TiledAllocatedBytes);
+
+        var globalCategory = Assert.Single(
+            summary.Categories,
+            category => category.Category == "globalBuffers");
+        Assert.Equal(1, globalCategory.UniqueArrayCount);
+        Assert.Equal((ulong)shared.Length, globalCategory.UniqueBytes);
+        Assert.Equal(2, globalCategory.ReferenceCount);
+        Assert.Equal((ulong)(shared.Length * 2), globalCategory.ReferencedBytes);
+    }
+
+    [Fact]
     public void ImageWritePayloadUsesItsPixelsAndNullFillHasNoPayload()
     {
         var pixels = new byte[23];
