@@ -51,8 +51,6 @@ Add a synthetic regression whenever behavior can be reproduced without proprieta
 
 Run the fast verification lane after non-graphics work and the shader lane when shader translation or GPU semantics change. For target work, use the controlled Windows runner. Run at least three comparable trials before drawing conclusions about memory or performance.
 
-Before handoff, have a separate agent review the complete change and its evidence without editing. Resolve valid findings and rerun affected checks.
-
 ## GitHub
 
 Work on a task branch. Keep `origin/main` releasable and preserve `upstream` as the SharpEmu source remote. Synchronize upstream through a dedicated reviewed change, not during an active compatibility experiment.
