@@ -7,6 +7,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Logging;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
@@ -2564,6 +2565,14 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         _pendingGuestWorkBytes = SaturatingAdd(_pendingGuestWorkBytes, payloadBytes);
+        MemoryDiagnostics.Adjust(
+            "managed.guest-queue-retained",
+            checked((long)payloadBytes),
+            countDelta: 1);
+        MemoryDiagnostics.Adjust(
+            "managed.guest-queue-enqueued",
+            checked((long)payloadBytes),
+            countDelta: 1);
         // Wake any thread waiting for guest work completion or queue space.
         System.Threading.Monitor.PulseAll(_gate);
         return sequence;
@@ -2888,9 +2897,16 @@ internal static unsafe class VulkanVideoPresenter
                     $"contiguous_completed={_completedGuestWorkSequence} " +
                     $"out_of_order={_completedGuestWorkOutOfOrder.Count}");
             }
+            var releasedPayloadBytes = Math.Min(
+                pending.PayloadBytes,
+                _pendingGuestWorkBytes);
             _pendingGuestWorkBytes = pending.PayloadBytes >= _pendingGuestWorkBytes
                 ? 0
                 : _pendingGuestWorkBytes - pending.PayloadBytes;
+            MemoryDiagnostics.Adjust(
+                "managed.guest-queue-retained",
+                -checked((long)releasedPayloadBytes),
+                countDelta: -1);
             ReleasePendingGuestImageUploadsLocked(pending.Work);
             if (pending.Sequence == _completedGuestWorkSequence + 1)
             {
