@@ -20,6 +20,8 @@ public sealed class MemoryDiagnosticsSession : IDisposable
     private readonly FileStream _stream;
     private readonly StreamWriter _writer;
     private readonly TimeSpan _sampleInterval;
+    private readonly Action? _beforeSampleWriteForTests;
+    private readonly Action? _timerDrainStartedForTests;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly System.Threading.Timer _timer;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Counter> _counters = new(StringComparer.Ordinal);
@@ -34,7 +36,11 @@ public sealed class MemoryDiagnosticsSession : IDisposable
     private int _sampleInProgress;
     private int _disposed;
 
-    private MemoryDiagnosticsSession(string path, TimeSpan sampleInterval)
+    private MemoryDiagnosticsSession(
+        string path,
+        TimeSpan sampleInterval,
+        Action? beforeSampleWriteForTests,
+        Action? timerDrainStartedForTests)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -65,6 +71,8 @@ public sealed class MemoryDiagnosticsSession : IDisposable
             AutoFlush = false,
         };
         _sampleInterval = sampleInterval;
+        _beforeSampleWriteForTests = beforeSampleWriteForTests;
+        _timerDrainStartedForTests = timerDrainStartedForTests;
         _timer = new System.Threading.Timer(
             static state => ((MemoryDiagnosticsSession)state!).WriteSampleIfIdle(),
             this,
@@ -86,9 +94,31 @@ public sealed class MemoryDiagnosticsSession : IDisposable
         string path,
         TimeSpan? sampleInterval = null)
     {
+        return StartCore(path, sampleInterval, null, null);
+    }
+
+    internal static MemoryDiagnosticsSession StartForTests(
+        string path,
+        TimeSpan sampleInterval,
+        Action beforeSampleWrite,
+        Action timerDrainStarted)
+    {
+        ArgumentNullException.ThrowIfNull(beforeSampleWrite);
+        ArgumentNullException.ThrowIfNull(timerDrainStarted);
+        return StartCore(path, sampleInterval, beforeSampleWrite, timerDrainStarted);
+    }
+
+    private static MemoryDiagnosticsSession StartCore(
+        string path,
+        TimeSpan? sampleInterval,
+        Action? beforeSampleWriteForTests,
+        Action? timerDrainStartedForTests)
+    {
         var session = new MemoryDiagnosticsSession(
             path,
-            sampleInterval ?? TimeSpan.FromMilliseconds(500));
+            sampleInterval ?? TimeSpan.FromMilliseconds(500),
+            beforeSampleWriteForTests,
+            timerDrainStartedForTests);
         if (Interlocked.CompareExchange(ref MemoryDiagnostics.ActiveSession, session, null) is not null)
         {
             session.Dispose();
@@ -127,6 +157,7 @@ public sealed class MemoryDiagnosticsSession : IDisposable
 
         try
         {
+            _beforeSampleWriteForTests?.Invoke();
             WriteSample();
         }
         finally
@@ -218,27 +249,24 @@ public sealed class MemoryDiagnosticsSession : IDisposable
             return;
         }
 
-        _timer.Dispose();
-        if (Interlocked.Exchange(ref _sampleInProgress, 1) == 0)
+        try
         {
-            try
+            _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            _timerDrainStartedForTests?.Invoke();
+            _timer.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            WriteSample();
+        }
+        finally
+        {
+            _ = Interlocked.CompareExchange(ref MemoryDiagnostics.ActiveSession, null, this);
+
+            lock (_writeGate)
             {
-                WriteSample();
-            }
-            finally
-            {
-                Volatile.Write(ref _sampleInProgress, 0);
+                _writer.Flush();
+                _writer.Dispose();
+                _stream.Dispose();
             }
         }
-
-        lock (_writeGate)
-        {
-            _writer.Flush();
-            _writer.Dispose();
-            _stream.Dispose();
-        }
-
-        _ = Interlocked.CompareExchange(ref MemoryDiagnostics.ActiveSession, null, this);
     }
 
     private sealed class Counter

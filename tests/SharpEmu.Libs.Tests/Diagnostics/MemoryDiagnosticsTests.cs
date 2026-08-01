@@ -51,4 +51,63 @@ public sealed class MemoryDiagnosticsTests
             }
         }
     }
+
+    [Fact]
+    public async Task DisposeDrainsAnInFlightTimerSampleBeforeClosingJsonl()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            "sharpemu-memory-diagnostics",
+            $"{Guid.NewGuid():N}.jsonl");
+        using var sampleEntered = new ManualResetEventSlim(false);
+        using var releaseSample = new ManualResetEventSlim(false);
+        using var timerDrainStarted = new ManualResetEventSlim(false);
+        var session = MemoryDiagnosticsSession.StartForTests(
+            path,
+            TimeSpan.FromMilliseconds(1),
+            beforeSampleWrite: () =>
+            {
+                sampleEntered.Set();
+                releaseSample.Wait();
+            },
+            timerDrainStarted: () => timerDrainStarted.Set());
+
+        try
+        {
+            Assert.True(sampleEntered.Wait(TimeSpan.FromSeconds(5)));
+
+            var disposeTask = Task.Run(session.Dispose);
+            Assert.True(timerDrainStarted.Wait(TimeSpan.FromSeconds(5)));
+            var earlyCompletion = await Task.WhenAny(
+                disposeTask,
+                Task.Delay(TimeSpan.FromMilliseconds(100)));
+            Assert.NotSame(disposeTask, earlyCompletion);
+
+            releaseSample.Set();
+            await disposeTask;
+            session.Dispose();
+            Assert.False(MemoryDiagnostics.IsEnabled);
+
+            var records = File.ReadAllLines(path);
+            Assert.True(records.Length >= 3);
+            foreach (var record in records)
+            {
+                using var document = JsonDocument.Parse(record);
+                Assert.Contains(
+                    document.RootElement.GetProperty("kind").GetString(),
+                    new[] { "header", "sample" });
+            }
+
+            Assert.Equal("sample", JsonDocument.Parse(records[^1]).RootElement.GetProperty("kind").GetString());
+        }
+        finally
+        {
+            releaseSample.Set();
+            session.Dispose();
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
 }
