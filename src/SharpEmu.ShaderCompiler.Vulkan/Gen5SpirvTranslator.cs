@@ -1801,13 +1801,16 @@ public static partial class Gen5SpirvTranslator
 
             if (instruction.Opcode == "SBarrier")
             {
-                var workgroup = UInt(2);
-                var semantics = UInt(0x108);
-                _module.AddStatement(
-                    SpirvOp.ControlBarrier,
-                    workgroup,
-                    workgroup,
-                    semantics);
+                if (_stage == Gen5SpirvStage.Compute)
+                {
+                    var workgroup = UInt(2);
+                    var semantics = UInt(0x108);
+                    _module.AddStatement(
+                        SpirvOp.ControlBarrier,
+                        workgroup,
+                        workgroup,
+                        semantics);
+                }
                 return true;
             }
 

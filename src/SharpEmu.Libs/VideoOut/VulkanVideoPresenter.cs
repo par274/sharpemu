@@ -4060,11 +4060,7 @@ internal static unsafe class VulkanVideoPresenter
             };
             Console.Error.WriteLine($"{prefix} {message}");
 
-            // vkCreateShaderModule() still returns VK_SUCCESS from the driver
-            // even when the validation layer's embedded spirv-val flags the
-            // module as invalid - the failure only surfaces here, never as a
-            // non-Success Result our own Check() calls would catch. Flag it
-            // loudly so it isn't mistaken for a passive/advisory message.
+
             if (severity == DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt &&
                 message is not null &&
                 message.Contains("vkCreateShaderModule", StringComparison.Ordinal))
@@ -6879,7 +6875,7 @@ internal static unsafe class VulkanVideoPresenter
             if (!string.IsNullOrWhiteSpace(dumpDirectory))
             {
                 Directory.CreateDirectory(dumpDirectory);
-                
+
                 var sequence = Interlocked.Increment(ref _shaderModuleDumpSequence);
                 dumpPath = Path.Combine(dumpDirectory, $"{sequence:D4}.spv");
                 File.WriteAllBytes(dumpPath, code);
