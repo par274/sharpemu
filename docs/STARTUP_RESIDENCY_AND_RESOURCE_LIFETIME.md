@@ -28,6 +28,8 @@ vmmap64.exe -p <actual SharpEmu child PID> <output.csv>
 See the [official VMMap documentation](https://learn.microsoft.com/en-us/sysinternals/downloads/vmmap).
 Raw `.mmp`/CSV-equivalent exports, logs, manifests, and diagnostics remain
 outside Git under `C:\sharpemu-investigation`.
+The classification-grouped recomputation is retained there as
+`residency-attribution-corrected.json`; the incomplete 110/172 scan is excluded.
 
 The presenter diagnostics gate now enables two bounded ledgers. Guest mappings
 are matched to VMMap only by exact base address and reserved size. Resource
@@ -64,14 +66,17 @@ process-tree shutdown failure are also excluded from causal attribution.
 ## Matched VMMap attribution
 
 The complete VMMap scans classified the resident set as follows. Values are
-from the VMMap scan; `guest resident` is the sum of VMMap working set for the
-exactly matched guest mappings. Categories are not added to one another.
+from the VMMap scan. The two `exact guest` columns group the working set of
+exact base-and-size guest matches by the region-level VMMap type; `total exact
+guest resident` is their sum. `Unattributed Private Data` is calculated only as
+`Private Data WS - exact guest WS classified as Private Data`.
 
-| Capture | VMMap total WS | Private Data WS | Stack WS | Heap WS | Image WS | Mapped File WS | Shareable WS | Guest committed | Exact guest resident |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Corrected frontier | 5.64 GiB | 5.35 GiB | 134.0 MiB | 27.2 MiB | 43.3 MiB | 1.9 MiB | 97.0 MiB | 6.70 GiB | 3.08 GiB (172/172) |
-| Late, `094826414` | 5.65 GiB | 5.36 GiB | 127.1 MiB | 27.7 MiB | 43.3 MiB | 1.9 MiB | 97.4 MiB | 6.70 GiB | 3.07 GiB (167/167) |
-| Late, `095812249` | 5.24 GiB | 4.95 GiB | 133.8 MiB | 28.2 MiB | 43.3 MiB | 1.9 MiB | 96.5 MiB | 6.70 GiB | 2.93 GiB (165/165) |
+| Capture | VMMap total WS | Private Data WS | Stack WS | Heap WS | Image WS | Mapped File WS | Shareable WS | Guest committed | Exact guest: Private Data | Exact guest: Thread Stack | Total exact guest resident | Unattributed Private Data |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Corrected frontier | 5.64 GiB | 5.35 GiB | 134.0 MiB | 27.2 MiB | 43.3 MiB | 1.9 MiB | 97.0 MiB | 6.70 GiB | 3,020.3 MiB | 132.4 MiB | 3.08 GiB (172/172) | 2.40 GiB |
+| Late, `094826414` | 5.65 GiB | 5.36 GiB | 127.1 MiB | 27.7 MiB | 43.3 MiB | 1.9 MiB | 97.4 MiB | 6.70 GiB | 3,020.8 MiB | 125.6 MiB | 3.07 GiB (167/167) | 2.41 GiB |
+| Late, `094912261` | 4.83 GiB | 4.54 GiB | 128.0 MiB | 26.5 MiB | 43.3 MiB | 1.9 MiB | 96.2 MiB | 6.68 GiB | 2,719.0 MiB | 126.4 MiB | 2.78 GiB (162/162) | 1.88 GiB |
+| Late, `095812249` | 5.24 GiB | 4.95 GiB | 133.8 MiB | 28.2 MiB | 43.3 MiB | 1.9 MiB | 96.5 MiB | 6.70 GiB | 2,868.5 MiB | 132.2 MiB | 2.93 GiB (165/165) | 2.15 GiB |
 
 For the complete `094826414` late scan, the raw VMMap classification was:
 
@@ -101,13 +106,18 @@ frontier were `0x0000000400000000` (1,261–1,413 MiB),
 ranges including `0x0000000800000000` (approximately 54 MiB). These are
 address-correlated observations, not size-based ownership guesses.
 
-Thus guest mapping commitment is not residency: roughly 2.8–3.1 GiB of the
+Thus guest mapping commitment is not residency: roughly 2.78–3.08 GiB of the
 approximately 6.7 GiB committed guest mappings was resident in these scans.
-The dominant VMMap class is `Private Data`. After exact guest-region matches,
-about 2.0–2.3 GiB of the scan’s Private Data working set remains unattributed
-to a named owner. VMMap did not label a managed heap on .NET 10; GC heap and
-GC committed counters are therefore an inference about managed segments, not
-an additional VMMap category. They must not be added to VMMap totals.
+The dominant VMMap class is `Private Data`. The exact guest subset classified
+as `Private Data` was 2.66–2.95 GiB, while 125.6–132.4 MiB of exact guest
+working set was classified at the region level as `Thread Stack` (the VMMap
+summary reports this aggregate under `Stack`). The classification-safe
+remainder of `Private Data` was 1.88–2.41 GiB. This is VMMap-classification
+remainder, not a named native/runtime owner: it must not be described as one
+until a separate allocation ledger or address correlation identifies it.
+VMMap did not label a managed heap on .NET 10; GC heap and GC committed
+counters are therefore an inference about managed segments, not an additional
+VMMap category. They must not be added to VMMap totals.
 
 The host-visible Vulkan mapping total was 118–135 MiB in the late diagnostic
 samples. Device-local Vulkan allocation was 2.54–2.63 GiB and is not added to
@@ -125,15 +135,18 @@ cache-plateau, and cutoff sequence. Guest resident bytes are only available at
 the intrusive exact-match VMMap checkpoints; a dash means that the safety run
 did not take another VMMap snapshot at that point.
 
-| Phase | WS | Private | Guest committed / resident | GC heap / committed | Cache image / staging | Other Vulkan total | Host mapped | Deferred texture / translated | Queue payload | Presenter phase |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Corrected dispatch complete, 18,526 ms | 4.68 GiB | 9.66 GiB | 6.73 / 3.08 GiB* | 0.89 / 1.09 GiB | 384.5 / 0.5 MiB | 1.57 GiB | 35.6 MiB | 0 / 0 MiB | 0.1 MiB | `compute.resource-create` |
-| Cache plateau, 21,030 ms | 4.95 GiB | 10.42 GiB | 6.73 / — | 0.65 / 0.82 GiB | 594.8 / 0.5 MiB | 2.51 GiB | 94.5 MiB | 0 / 0 MiB | 0 MiB | `presentation.idle` |
-| Near cutoff, 28,026 ms | 6.21 GiB | 11.67 GiB | 6.84 / — | 0.72 / 1.64 GiB | 594.8 / 0.5 MiB | 2.57 GiB | 132.3 MiB | 0 / 0 MiB | 0 MiB | `guest-work.enter` |
+| Phase | WS | Private | Guest committed / resident | VMMap Private Data / exact guest Private Data / Thread Stack | GC heap / committed | Cache image / staging | Other Vulkan total | Host mapped | Deferred texture / translated | Queue payload | Presenter phase |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Corrected dispatch complete, 18,526 ms | 4.68 GiB | 9.66 GiB | 6.73 / 3.08 GiB* | 5.35 GiB / 3,020.3 MiB / 132.4 MiB | 0.89 / 1.09 GiB | 384.5 / 0.5 MiB | 1.57 GiB | 35.6 MiB | 0 / 0 MiB | 0.1 MiB | `compute.resource-create` |
+| Cache plateau, 21,030 ms | 4.95 GiB | 10.42 GiB | 6.73 / — | — | 0.65 / 0.82 GiB | 594.8 / 0.5 MiB | 2.51 GiB | 94.5 MiB | 0 / 0 MiB | 0 MiB | `presentation.idle` |
+| Near cutoff, 28,026 ms | 6.21 GiB | 11.67 GiB | 6.84 / — | — | 0.72 / 1.64 GiB | 594.8 / 0.5 MiB | 2.57 GiB | 132.3 MiB | 0 / 0 MiB | 0 MiB | `guest-work.enter` |
 
 `*` The corrected-frontier resident value is the exact-match result from the
 3,115 ms VMMap scan whose nearest sample was 18,524 ms; it is not a second
 diagnostics sample at 18,526 ms. The VMMap scan itself reported 5.64 GiB WS.
+The VMMap column uses that same completed scan; its two exact-guest values are
+grouped by VMMap region classification and are not inferred from the adjacent
+diagnostics sample.
 
 At the cutoff, the labeled Vulkan subcategories included approximately
 1,372 MiB detile, 446 MiB offscreen, 124 MiB guest buffers, and 610 MiB texture
@@ -180,15 +193,19 @@ double release and negative values.
 
 The current working-set cutoff is materially associated with resident
 `Private Data`, not with guest committed bytes alone. Guest mappings are a
-large resident contributor, but at least roughly 2 GiB of late VMMap Private
-Data remains outside the exact guest mappings. The texture image cache is large
-in device-local Vulkan accounting but plateaus before working set continues to
-grow. Cached staging is only 0.5 MiB. Deferred destruction was not active.
+large resident contributor, but 1.88–2.41 GiB of late VMMap `Private Data`
+remains after subtracting only exact guest mappings that VMMap classified as
+`Private Data`. Exact guest mappings classified as `Thread Stack` are reported
+separately and are not subtracted from `Private Data`; the remainder is still
+not a named owner. The texture image cache is large in device-local Vulkan
+accounting but plateaus before working set continues to grow. Cached staging is
+only 0.5 MiB. Deferred destruction was not active.
 
 Ranked candidates:
 
-1. **No memory correction yet.** Attribute the remaining VMMap `Private Data`
-   regions to a named native/runtime owner before changing ownership.
+1. **No memory correction yet.** Attribute the 1.88–2.41 GiB VMMap
+   classification remainder to a named native/runtime owner before changing
+   ownership.
 2. If that ledger identifies a retained native/runtime owner, correct that
    owner at its allocation/lifetime boundary.
 3. Releasing cached staging after upload completion is a plausible cleanup but
@@ -201,16 +218,20 @@ Ranked candidates:
    measured retained total was zero.
 
 The single recommended next boundary is a scalar native/runtime private-data
-ledger that can be correlated with the remaining VMMap `Private Data` regions
-without double-counting guest mappings, managed segments, or Vulkan device-local
-memory. Do not implement a cache, staging, or guest-memory correction from this
-finding alone.
+ledger that can be correlated with the VMMap `Private Data` classification
+remainder without double-counting guest mappings, managed segments, or Vulkan
+device-local memory. Do not implement a cache, staging, or guest-memory
+correction from this finding alone.
 
 ## Falsification conditions
 
 * The guest-residency conclusion is falsified if a matched scan shows most of
   the cutoff working set in exact guest mappings, or if committed guest pages
-  become predominantly resident without another owner growing.
+  become predominantly resident without another owner growing. The
+  classification arithmetic is falsified if most VMMap `Private Data` working
+  set is accounted for by exact guest mappings that VMMap also classifies as
+  `Private Data`; a `Thread Stack` or other VMMap class does not satisfy that
+  condition.
 * The staging conclusion is falsified if a comparable run retains materially
   more staging, remaps staging on cache hits, or shows staging growth after the
   image plateau.
@@ -218,8 +239,9 @@ finding alone.
   growing after the reported plateau while the working set rises, or if cache
   removal/deferred bytes become the matching late owner.
 * The Private Data next-boundary conclusion is falsified if a synchronized
-  allocation ledger or VMMap correlation attributes the remaining resident set
-  to a different named runtime, mapped-file, shareable, or driver-backed owner.
+  allocation ledger or VMMap correlation attributes the classification
+  remainder to a different named runtime, mapped-file, shareable, or
+  driver-backed owner.
 * The deferred-destruction observation is falsified by a run that reaches an
   eviction or normal shutdown and records deferred bytes that remain after the
   corresponding timeline completes.
