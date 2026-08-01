@@ -234,6 +234,7 @@ function Start-VmMapCapture {
         [object]$TargetArguments,
         [Parameter(Mandatory = $true)]
         [object]$DiagnosticState,
+        [AllowEmptyCollection()]
         [Parameter(Mandatory = $true)]
         [System.Collections.ArrayList]$Pending,
         [object]$ProcessCounters,
