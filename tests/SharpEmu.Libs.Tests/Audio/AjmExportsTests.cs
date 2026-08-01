@@ -353,6 +353,13 @@ public sealed class AjmExportsTests : IDisposable
         return AjmExports.AjmModuleRegister(_ctx);
     }
 
+    private int UnregisterCodec(uint contextId, uint codecType)
+    {
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = codecType;
+        return AjmExports.AjmModuleUnregister(_ctx);
+    }
+
     private int RegisterMemory(uint contextId, ulong address, ulong pages)
     {
         _ctx[CpuRegister.Rdi] = contextId;
