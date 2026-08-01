@@ -3607,6 +3607,7 @@ internal static unsafe class VulkanVideoPresenter
         private bool _diagnosticsEnabled;
         private IDisposable? _memoryDiagnosticsProvider;
         private VulkanHostAllocationDiagnostics? _vulkanHostAllocationDiagnostics;
+        private VulkanHostAllocationLifetime? _vulkanHostAllocationLifetime;
         private string _diagnosticPhase = "not-started";
         private string _diagnosticActiveWorkSummary = string.Empty;
         private string _diagnosticActiveQueueName = string.Empty;
@@ -4459,6 +4460,15 @@ internal static unsafe class VulkanVideoPresenter
                     _resourceLifetimeDiagnostics = new VulkanResourceLifetimeDiagnostics();
                     _diagnosticBatchTextureResourceIds = new List<long>(64);
                     _vulkanHostAllocationDiagnostics = VulkanHostAllocationDiagnostics.Start();
+                    if (_vulkanHostAllocationDiagnostics is not null)
+                    {
+                        _vulkanHostAllocationLifetime = new VulkanHostAllocationLifetime(
+                            () =>
+                            {
+                                _vulkanHostAllocationDiagnostics?.Dispose();
+                                _vulkanHostAllocationDiagnostics = null;
+                            });
+                    }
                     _memoryDiagnosticsProvider =
                         MemoryDiagnostics.RegisterSampleProvider(GetDiagnosticSnapshot);
                 }
@@ -4481,14 +4491,21 @@ internal static unsafe class VulkanVideoPresenter
             {
                 try
                 {
-                    _memoryDiagnosticsProvider?.Dispose();
+                    DisposeVulkan();
                 }
                 finally
                 {
-                    _memoryDiagnosticsProvider = null;
-                    _diagnosticBatchTextureResourceIds = null;
-                    _resourceLifetimeDiagnostics = null;
-                    Volatile.Write(ref _diagnosticsEnabled, false);
+                    try
+                    {
+                        _memoryDiagnosticsProvider?.Dispose();
+                    }
+                    finally
+                    {
+                        _memoryDiagnosticsProvider = null;
+                        _diagnosticBatchTextureResourceIds = null;
+                        _resourceLifetimeDiagnostics = null;
+                        Volatile.Write(ref _diagnosticsEnabled, false);
+                    }
                 }
             }
         }
@@ -4825,6 +4842,8 @@ internal static unsafe class VulkanVideoPresenter
                             VulkanHostAllocationDiagnostics.CurrentCallbacks,
                             out _instance),
                         "vkCreateInstance");
+                    _vulkanHostAllocationLifetime?.RegisterInstance(
+                        DestroyVulkanInstanceRoot);
                     if (!_vk.TryGetInstanceExtension(_instance, out _surfaceApi))
                     {
                         throw new InvalidOperationException("VK_KHR_surface is unavailable.");
@@ -5249,6 +5268,8 @@ internal static unsafe class VulkanVideoPresenter
                         VulkanHostAllocationDiagnostics.CurrentCallbacks,
                         out _device),
                     "vkCreateDevice");
+                _vulkanHostAllocationLifetime?.RegisterDevice(
+                    () => DestroyVulkanDeviceRoot());
             }
             finally
             {
@@ -19306,17 +19327,86 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
-        private void DisposeVulkan()
+        private void DestroyDebugUtilsMessengerIfNeeded()
         {
-            if (!_vulkanReady)
+            if (_debugUtils is not null &&
+                _debugMessenger.Handle != 0 &&
+                _instance.Handle != 0)
+            {
+                _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);
+                _debugMessenger = default;
+            }
+        }
+
+        private void DestroyVulkanDeviceRoot(bool waitForIdle = true)
+        {
+            if (_device.Handle == 0)
             {
                 return;
             }
 
-            if (_debugUtils is not null && _debugMessenger.Handle != 0)
+            if (waitForIdle)
             {
-                _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);
+                _vk.DeviceWaitIdle(_device);
             }
+            _vk.DestroyDevice(
+                _device,
+                VulkanHostAllocationDiagnostics.CurrentCallbacks);
+            _device = default;
+        }
+
+        private void DestroyVulkanInstanceRoot()
+        {
+            if (_surface.Handle != 0 && _instance.Handle != 0)
+            {
+                _surfaceApi.DestroySurface(_instance, _surface, null);
+                _surface = default;
+            }
+
+            if (_instance.Handle != 0)
+            {
+                _vk.DestroyInstance(
+                    _instance,
+                    VulkanHostAllocationDiagnostics.CurrentCallbacks);
+                _instance = default;
+            }
+        }
+
+        private void DisposePartialVulkan()
+        {
+            _vulkanReady = false;
+            DestroyDebugUtilsMessengerIfNeeded();
+            if (_vulkanHostAllocationLifetime is not null)
+            {
+                _vulkanHostAllocationLifetime.Dispose();
+                _vulkanHostAllocationLifetime = null;
+            }
+            else
+            {
+                DestroyVulkanDeviceRoot();
+                DestroyVulkanInstanceRoot();
+                _vulkanHostAllocationDiagnostics?.Dispose();
+                _vulkanHostAllocationDiagnostics = null;
+            }
+        }
+
+        private void DisposeVulkan()
+        {
+            if (!_vulkanReady)
+            {
+                if (_vulkanHostAllocationLifetime is not null ||
+                    _vulkanHostAllocationDiagnostics is not null ||
+                    _device.Handle != 0 ||
+                    _surface.Handle != 0 ||
+                    _instance.Handle != 0)
+                {
+                    DisposePartialVulkan();
+                }
+
+                return;
+            }
+
+            DestroyDebugUtilsMessengerIfNeeded();
             _vulkanReady = false;
             _vk.DeviceWaitIdle(_device);
             SavePipelineCache(force: true);
@@ -19406,26 +19496,20 @@ internal static unsafe class VulkanVideoPresenter
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);
                     _pipelineCache = default;
                 }
-                _vk.DestroyDevice(
-                    _device,
-                    VulkanHostAllocationDiagnostics.CurrentCallbacks);
-                _device = default;
-            }
-            if (_surface.Handle != 0)
-            {
-                _surfaceApi.DestroySurface(_instance, _surface, null);
-                _surface = default;
-            }
-            if (_instance.Handle != 0)
-            {
-                _vk.DestroyInstance(
-                    _instance,
-                    VulkanHostAllocationDiagnostics.CurrentCallbacks);
-                _instance = default;
             }
 
-            _vulkanHostAllocationDiagnostics?.Dispose();
-            _vulkanHostAllocationDiagnostics = null;
+            if (_vulkanHostAllocationLifetime is not null)
+            {
+                _vulkanHostAllocationLifetime.Dispose();
+                _vulkanHostAllocationLifetime = null;
+            }
+            else
+            {
+                DestroyVulkanDeviceRoot(waitForIdle: false);
+                DestroyVulkanInstanceRoot();
+                _vulkanHostAllocationDiagnostics?.Dispose();
+                _vulkanHostAllocationDiagnostics = null;
+            }
         }
 
         private void RecreateSwapchainResources(string operation, Result result)
