@@ -2608,26 +2608,29 @@ internal static unsafe class VulkanVideoPresenter
             "managed.guest-queue-enqueued",
             checked((long)payloadBytes),
             countDelta: 1);
-        RecordOversizedGuestWorkEnqueuedLocked(
-            pending,
-            queueDepthBefore,
-            queueTailBefore,
-            pendingCountBefore,
-            pendingBytesBefore);
-        if (_diagnosticOversizedGuestWorkSequences.Contains(sequence))
+        if (MemoryDiagnostics.IsEnabled)
         {
-            var initialState = pendingQueue.First?.Value.Sequence == sequence
-                ? IsGuestWorkCompletedLocked(requiredSequence)
-                    ? "ready-head"
-                    : "blocked-required-sequence"
-                : "behind-same-queue";
-            RecordOversizedGuestWorkStateLocked(
+            RecordOversizedGuestWorkEnqueuedLocked(
                 pending,
-                initialState,
-                pendingQueue.Count,
-                pendingQueue.First?.Value.Sequence ?? 0);
+                queueDepthBefore,
+                queueTailBefore,
+                pendingCountBefore,
+                pendingBytesBefore);
+            if (_diagnosticOversizedGuestWorkSequences.Contains(sequence))
+            {
+                var initialState = pendingQueue.First?.Value.Sequence == sequence
+                    ? IsGuestWorkCompletedLocked(requiredSequence)
+                        ? "ready-head"
+                        : "blocked-required-sequence"
+                    : "behind-same-queue";
+                RecordOversizedGuestWorkStateLocked(
+                    pending,
+                    initialState,
+                    pendingQueue.Count,
+                    pendingQueue.First?.Value.Sequence ?? 0);
+            }
+            UpdateOversizedGuestWorkHeadStatesLocked();
         }
-        UpdateOversizedGuestWorkHeadStatesLocked();
         // Wake any thread waiting for guest work completion or queue space.
         System.Threading.Monitor.PulseAll(_gate);
         return sequence;
@@ -3070,9 +3073,11 @@ internal static unsafe class VulkanVideoPresenter
         bool advanceScheduleCursor)
     {
         var work = queue.First!.Value;
-        var diagnosticTrace =
+        var diagnosticsEnabled = MemoryDiagnostics.IsEnabled;
+        var diagnosticTrace = diagnosticsEnabled &&
             _diagnosticOversizedGuestWorkSequences.Contains(work.Sequence);
-        if (!diagnosticTrace && _diagnosticPostCorrectionWorkBudget > 0)
+        if (diagnosticsEnabled &&
+            !diagnosticTrace && _diagnosticPostCorrectionWorkBudget > 0)
         {
             diagnosticTrace = true;
             _diagnosticPostCorrectionWorkBudget--;
@@ -3083,11 +3088,14 @@ internal static unsafe class VulkanVideoPresenter
             work = work with { DiagnosticTrace = true };
         }
 
-        RecordOversizedGuestWorkStateLocked(
-            work,
-            "taken",
-            queue.Count,
-            work.Sequence);
+        if (diagnosticsEnabled)
+        {
+            RecordOversizedGuestWorkStateLocked(
+                work,
+                "taken",
+                queue.Count,
+                work.Sequence);
+        }
         queue.RemoveFirst();
         _pendingGuestWorkCount--;
         if (IsPayloadBearingGuestWork(work.Work))
@@ -3122,7 +3130,10 @@ internal static unsafe class VulkanVideoPresenter
                 (scheduleIndex + 1) % _pendingGuestQueueSchedule.Count;
         }
 
-        UpdateOversizedGuestWorkHeadStatesLocked();
+        if (diagnosticsEnabled)
+        {
+            UpdateOversizedGuestWorkHeadStatesLocked();
+        }
         return work;
     }
 
@@ -3156,7 +3167,10 @@ internal static unsafe class VulkanVideoPresenter
                 _pendingSyncGuestWorkCount++;
             }
 
-            UpdateOversizedGuestWorkHeadStatesLocked();
+            if (MemoryDiagnostics.IsEnabled)
+            {
+                UpdateOversizedGuestWorkHeadStatesLocked();
+            }
             System.Threading.Monitor.PulseAll(_gate);
             return true;
         }
@@ -3167,7 +3181,8 @@ internal static unsafe class VulkanVideoPresenter
         SharpEmu.HLE.GuestImageWriteTracker.FlushPendingDiagnostics();
         lock (_gate)
         {
-            var completedOversizedWork =
+            var diagnosticsEnabled = MemoryDiagnostics.IsEnabled;
+            var completedOversizedWork = diagnosticsEnabled &&
                 _diagnosticOversizedGuestWorkSequences.Contains(pending.Sequence);
             if (_traceGuestWorkCompletion)
             {
@@ -3205,11 +3220,14 @@ internal static unsafe class VulkanVideoPresenter
                     added,
                     "A guest work sequence must complete exactly once.");
             }
-            RecordOversizedGuestWorkStateLocked(
-                pending,
-                "completed",
-                0,
-                0);
+            if (diagnosticsEnabled)
+            {
+                RecordOversizedGuestWorkStateLocked(
+                    pending,
+                    "completed",
+                    0,
+                    0);
+            }
             if (completedOversizedWork)
             {
                 _diagnosticCorrectedDispatchSequence = pending.Sequence;
@@ -3234,9 +3252,12 @@ internal static unsafe class VulkanVideoPresenter
                         postCorrectionWorkBudget = DiagnosticPostCorrectionWorkBudget,
                     });
             }
-            _diagnosticOversizedGuestWorkSequences.Remove(pending.Sequence);
-            _diagnosticOversizedGuestWorkStates.Remove(pending.Sequence);
-            UpdateOversizedGuestWorkHeadStatesLocked();
+            if (diagnosticsEnabled)
+            {
+                _diagnosticOversizedGuestWorkSequences.Remove(pending.Sequence);
+                _diagnosticOversizedGuestWorkStates.Remove(pending.Sequence);
+                UpdateOversizedGuestWorkHeadStatesLocked();
+            }
             System.Threading.Monitor.PulseAll(_gate);
             if (_traceGuestWorkCompletion)
             {
@@ -3580,6 +3601,10 @@ internal static unsafe class VulkanVideoPresenter
         // after the label is reset (queue switch / end-of-drain).
         private string _lastGuestWorkLabel = string.Empty;
         private string _lastSubmitDebugName = string.Empty;
+        // Set once for the presenter lifetime. The render path is single
+        // threaded, so the hot diagnostic call sites can use a plain read;
+        // the sample provider uses a volatile read to close the shutdown race.
+        private bool _diagnosticsEnabled;
         private IDisposable? _memoryDiagnosticsProvider;
         private string _diagnosticPhase = "not-started";
         private string _diagnosticActiveWorkSummary = string.Empty;
@@ -3773,6 +3798,7 @@ internal static unsafe class VulkanVideoPresenter
             public bool IsStorage;
             public bool Cached;
             public long DiagnosticCacheDeviceBytes;
+            public int DiagnosticCacheOwnership;
             public bool IsHostMovie;
             public int HostMoviePlane = -1;
             public long HostMovieFrameSerial;
@@ -3922,6 +3948,11 @@ internal static unsafe class VulkanVideoPresenter
 
         private void SetDiagnosticWork(in PendingGuestWork pending)
         {
+            if (!_diagnosticsEnabled)
+            {
+                return;
+            }
+
             Volatile.Write(
                 ref _diagnosticActiveWorkSequence,
                 pending.Sequence);
@@ -3940,6 +3971,11 @@ internal static unsafe class VulkanVideoPresenter
 
         private void SetDiagnosticPhase(string phase)
         {
+            if (!_diagnosticsEnabled)
+            {
+                return;
+            }
+
             var now = Stopwatch.GetTimestamp();
             var previous = Volatile.Read(ref _diagnosticPhase);
             Volatile.Write(ref _diagnosticPhase, phase);
@@ -3970,6 +4006,11 @@ internal static unsafe class VulkanVideoPresenter
 
         private void ClearDiagnosticWork()
         {
+            if (!_diagnosticsEnabled)
+            {
+                return;
+            }
+
             SetDiagnosticPhase("guest-work.complete");
             Volatile.Write(ref _diagnosticTraceActiveWork, false);
             Volatile.Write(ref _diagnosticActiveWorkSequence, 0);
@@ -3977,6 +4018,41 @@ internal static unsafe class VulkanVideoPresenter
             Volatile.Write(ref _diagnosticActiveQueueName, string.Empty);
             Volatile.Write(ref _diagnosticActiveWorkSummary, string.Empty);
             SetDiagnosticPhase("idle");
+        }
+
+        private void IncrementDiagnosticPendingGuestSubmission()
+        {
+            if (_diagnosticsEnabled)
+            {
+                Interlocked.Increment(ref _diagnosticPendingGuestSubmissionCount);
+            }
+        }
+
+        private void DecrementDiagnosticPendingGuestSubmission()
+        {
+            // A presenter can finish shutting down after a diagnostic session
+            // has been detached. Drain ownership acquired before that point,
+            // but do no interlocked work for an ordinary disabled run.
+            if (_diagnosticPendingGuestSubmissionCount > 0)
+            {
+                Interlocked.Decrement(ref _diagnosticPendingGuestSubmissionCount);
+            }
+        }
+
+        private void IncrementDiagnosticAbandonedGuestSubmission()
+        {
+            if (_diagnosticsEnabled)
+            {
+                Interlocked.Increment(ref _diagnosticAbandonedGuestSubmissionCount);
+            }
+        }
+
+        private void DecrementDiagnosticAbandonedGuestSubmission()
+        {
+            if (_diagnosticAbandonedGuestSubmissionCount > 0)
+            {
+                Interlocked.Decrement(ref _diagnosticAbandonedGuestSubmissionCount);
+            }
         }
 
         private static long DiagnosticAgeMilliseconds(long now, long started)
@@ -3989,8 +4065,13 @@ internal static unsafe class VulkanVideoPresenter
             return (now - started) * 1000L / Stopwatch.Frequency;
         }
 
-        private object GetDiagnosticSnapshot()
+        private object? GetDiagnosticSnapshot()
         {
+            if (!Volatile.Read(ref _diagnosticsEnabled))
+            {
+                return null;
+            }
+
             var now = Stopwatch.GetTimestamp();
             var phase = Volatile.Read(ref _diagnosticPhase);
             var phaseStarted = Volatile.Read(ref _diagnosticPhaseStartedTicks);
@@ -4097,14 +4178,18 @@ internal static unsafe class VulkanVideoPresenter
 
         public void Run()
         {
-            if (MemoryDiagnostics.IsEnabled)
-            {
-                _memoryDiagnosticsProvider =
-                    MemoryDiagnostics.RegisterSampleProvider(GetDiagnosticSnapshot);
-            }
+            Volatile.Write(
+                ref _diagnosticsEnabled,
+                MemoryDiagnostics.IsEnabled);
 
             try
             {
+                if (_diagnosticsEnabled)
+                {
+                    _memoryDiagnosticsProvider =
+                        MemoryDiagnostics.RegisterSampleProvider(GetDiagnosticSnapshot);
+                }
+
                 _window.Run(
                     Initialize,
                     Render,
@@ -4121,8 +4206,15 @@ internal static unsafe class VulkanVideoPresenter
             }
             finally
             {
-                _memoryDiagnosticsProvider?.Dispose();
-                _memoryDiagnosticsProvider = null;
+                try
+                {
+                    _memoryDiagnosticsProvider?.Dispose();
+                }
+                finally
+                {
+                    _memoryDiagnosticsProvider = null;
+                    Volatile.Write(ref _diagnosticsEnabled, false);
+                }
             }
         }
 
@@ -5756,7 +5848,7 @@ internal static unsafe class VulkanVideoPresenter
                     resources.Count > 0 ? resources[0].DebugName : "batch",
                     _activeGuestQueue,
                     _activeGuestWorkSequence));
-            Interlocked.Increment(ref _diagnosticPendingGuestSubmissionCount);
+            IncrementDiagnosticPendingGuestSubmission();
             _lastSubmittedTimelineByGuestQueue[_activeGuestQueue.Name] =
                 _submitTimeline;
         }
@@ -5856,7 +5948,7 @@ internal static unsafe class VulkanVideoPresenter
 
                     while (_abandonedGuestSubmissions.TryDequeue(out var abandoned))
                     {
-                        Interlocked.Decrement(ref _diagnosticAbandonedGuestSubmissionCount);
+                        DecrementDiagnosticAbandonedGuestSubmission();
                         RetireGuestSubmission(abandoned);
                     }
 
@@ -5912,9 +6004,9 @@ internal static unsafe class VulkanVideoPresenter
                     // objects yet — the work may still be running. Poll and
                     // retire from the abandoned list once the fence signals.
                     _pendingGuestSubmissions.Dequeue();
-                    Interlocked.Decrement(ref _diagnosticPendingGuestSubmissionCount);
+                    DecrementDiagnosticPendingGuestSubmission();
                     _abandonedGuestSubmissions.Enqueue(oldest);
-                    Interlocked.Increment(ref _diagnosticAbandonedGuestSubmissionCount);
+                    IncrementDiagnosticAbandonedGuestSubmission();
                 }
                 else if (result == Result.ErrorDeviceLost)
                 {
@@ -5957,7 +6049,7 @@ internal static unsafe class VulkanVideoPresenter
                 }
 
                 _pendingGuestSubmissions.Dequeue();
-                Interlocked.Decrement(ref _diagnosticPendingGuestSubmissionCount);
+                DecrementDiagnosticPendingGuestSubmission();
                 RetireGuestSubmission(submission);
             }
 
@@ -5974,13 +6066,13 @@ internal static unsafe class VulkanVideoPresenter
                 {
                     break;
                 }
-                Interlocked.Decrement(ref _diagnosticAbandonedGuestSubmissionCount);
+                DecrementDiagnosticAbandonedGuestSubmission();
 
                 var status = _vk.GetFenceStatus(_device, submission.Fence);
                 if (status == Result.NotReady && !_deviceLost)
                 {
                     _abandonedGuestSubmissions.Enqueue(submission);
-                    Interlocked.Increment(ref _diagnosticAbandonedGuestSubmissionCount);
+                    IncrementDiagnosticAbandonedGuestSubmission();
                     continue;
                 }
 
@@ -9237,18 +9329,22 @@ internal static unsafe class VulkanVideoPresenter
             if (resource.OwnsStorage)
             {
                 resource.Cached = true;
-                resource.DiagnosticCacheDeviceBytes = checked((long)(
-                    VulkanMemoryDiagnostics.GetAllocationSize(resource.ImageMemory) +
-                    VulkanMemoryDiagnostics.GetAllocationSize(resource.StagingMemory)));
                 _textureCache[key] = resource;
-                Interlocked.Increment(ref _diagnosticTextureCacheCount);
-                Interlocked.Add(
-                    ref _diagnosticTextureCacheBytes,
-                    resource.DiagnosticCacheDeviceBytes);
-                MemoryDiagnostics.Adjust(
-                    "vulkan.texture-cache-retained",
-                    resource.DiagnosticCacheDeviceBytes,
-                    countDelta: 1);
+                if (_diagnosticsEnabled)
+                {
+                    resource.DiagnosticCacheDeviceBytes = checked((long)(
+                        VulkanMemoryDiagnostics.GetAllocationSize(resource.ImageMemory) +
+                        VulkanMemoryDiagnostics.GetAllocationSize(resource.StagingMemory)));
+                    resource.DiagnosticCacheOwnership = 1;
+                    Interlocked.Increment(ref _diagnosticTextureCacheCount);
+                    Interlocked.Add(
+                        ref _diagnosticTextureCacheBytes,
+                        resource.DiagnosticCacheDeviceBytes);
+                    MemoryDiagnostics.Adjust(
+                        "vulkan.texture-cache-retained",
+                        resource.DiagnosticCacheDeviceBytes,
+                        countDelta: 1);
+                }
                 MarkTextureContentCached(key);
                 // Do not Track sampled textures here. Watch-only registration
                 // still poisoned NotifyManagedWrite when it shared the fault
@@ -9455,11 +9551,14 @@ internal static unsafe class VulkanVideoPresenter
 
         private void ReleaseTextureCacheDiagnosticOwnership(TextureResource texture)
         {
-            var bytes = Interlocked.Exchange(ref texture.DiagnosticCacheDeviceBytes, 0);
-            if (bytes == 0)
+            if (texture.DiagnosticCacheOwnership == 0 ||
+                Interlocked.Exchange(ref texture.DiagnosticCacheOwnership, 0) == 0)
             {
                 return;
             }
+
+            var bytes = texture.DiagnosticCacheDeviceBytes;
+            texture.DiagnosticCacheDeviceBytes = 0;
 
             Interlocked.Decrement(ref _diagnosticTextureCacheCount);
             Interlocked.Add(ref _diagnosticTextureCacheBytes, -bytes);
@@ -15288,13 +15387,16 @@ internal static unsafe class VulkanVideoPresenter
                     ref _executingGuestWorkSequence,
                     pendingGuestWork.Sequence);
                 SetDiagnosticWork(in pendingGuestWork);
-                lock (_gate)
+                if (MemoryDiagnostics.IsEnabled)
                 {
-                    RecordOversizedGuestWorkStateLocked(
-                        pendingGuestWork,
-                        "executing",
-                        _pendingGuestWorkCount,
-                        0);
+                    lock (_gate)
+                    {
+                        RecordOversizedGuestWorkStateLocked(
+                            pendingGuestWork,
+                            "executing",
+                            _pendingGuestWorkCount,
+                            0);
+                    }
                 }
                 using var guestQueueScope = EnterGuestQueue(
                     pendingGuestWork.Queue.Name,
@@ -15869,16 +15971,19 @@ internal static unsafe class VulkanVideoPresenter
                 Console.Error.WriteLine(
                     $"[LOADER][INFO] Vulkan VideoOut presented first frame: " +
                     $"{presentation.Width}x{presentation.Height}");
-                MemoryDiagnostics.RecordEvent(
-                    "presenter-milestone",
-                    new
-                    {
-                        eventVersion = 1,
-                        milestone = "first-frame",
-                        sequence = presentation.Sequence,
-                        width = presentation.Width,
-                        height = presentation.Height,
-                    });
+                if (_diagnosticsEnabled)
+                {
+                    MemoryDiagnostics.RecordEvent(
+                        "presenter-milestone",
+                        new
+                        {
+                            eventVersion = 1,
+                            milestone = "first-frame",
+                            sequence = presentation.Sequence,
+                            width = presentation.Width,
+                            height = presentation.Height,
+                        });
+                }
             }
 
             if (pixels is null && !_firstGuestDrawPresented)
@@ -15892,16 +15997,19 @@ internal static unsafe class VulkanVideoPresenter
                         : presentation.TranslatedDraw is null
                         ? $"{presentation.DrawKind}"
                         : $"shader textures={presentation.TranslatedDraw.Textures.Count}"));
-                MemoryDiagnostics.RecordEvent(
-                    "presenter-milestone",
-                    new
-                    {
-                        eventVersion = 1,
-                        milestone = "first-guest-frame",
-                        sequence = presentation.Sequence,
-                        guestImageAddress = presentation.GuestImageAddress,
-                        drawKind = presentation.DrawKind.ToString(),
-                    });
+                if (_diagnosticsEnabled)
+                {
+                    MemoryDiagnostics.RecordEvent(
+                        "presenter-milestone",
+                        new
+                        {
+                            eventVersion = 1,
+                            milestone = "first-guest-frame",
+                            sequence = presentation.Sequence,
+                            guestImageAddress = presentation.GuestImageAddress,
+                            drawKind = presentation.DrawKind.ToString(),
+                        });
+                }
             }
 
             if (recreateAfterPresent)
