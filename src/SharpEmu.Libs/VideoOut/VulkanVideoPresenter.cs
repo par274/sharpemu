@@ -3002,7 +3002,10 @@ internal static unsafe class VulkanVideoPresenter
                     continue;
                 }
 
-                RemoveTakenGuestWorkLocked(queueName, queue, advanceScheduleCursor: true);
+                work = RemoveTakenGuestWorkLocked(
+                    queueName,
+                    queue,
+                    advanceScheduleCursor: true);
                 return true;
             }
 
@@ -3039,7 +3042,10 @@ internal static unsafe class VulkanVideoPresenter
                 continue;
             }
 
-            RemoveTakenGuestWorkLocked(queueName, queue, advanceScheduleCursor: false);
+            work = RemoveTakenGuestWorkLocked(
+                queueName,
+                queue,
+                advanceScheduleCursor: false);
             if (_pendingGuestQueueSchedule.Count > 0)
             {
                 _pendingGuestQueueCursor =
@@ -3058,7 +3064,7 @@ internal static unsafe class VulkanVideoPresenter
         return false;
     }
 
-    private static void RemoveTakenGuestWorkLocked(
+    private static PendingGuestWork RemoveTakenGuestWorkLocked(
         string queueName,
         LinkedList<PendingGuestWork> queue,
         bool advanceScheduleCursor)
@@ -3117,6 +3123,7 @@ internal static unsafe class VulkanVideoPresenter
         }
 
         UpdateOversizedGuestWorkHeadStatesLocked();
+        return work;
     }
 
     private static bool RequeueGuestWorkFront(in PendingGuestWork work)
