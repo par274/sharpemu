@@ -2578,19 +2578,22 @@ internal static unsafe class VulkanVideoPresenter
             "managed.guest-queue-retained",
             checked((long)payloadBytes),
             countDelta: 1);
-        var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(work);
-        MemoryDiagnostics.Adjust(
-            "managed.guest-queue-actual-retained",
-            checked((long)diagnosticPayloadBytes),
-            countDelta: 1);
         MemoryDiagnostics.Adjust(
             "managed.guest-queue-enqueued",
             checked((long)payloadBytes),
             countDelta: 1);
-        MemoryDiagnostics.Adjust(
-            "managed.guest-queue-actual-enqueued",
-            checked((long)diagnosticPayloadBytes),
-            countDelta: 1);
+        if (MemoryDiagnostics.IsEnabled)
+        {
+            var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(work);
+            MemoryDiagnostics.Adjust(
+                "managed.guest-queue-actual-retained",
+                checked((long)diagnosticPayloadBytes),
+                countDelta: 1);
+            MemoryDiagnostics.Adjust(
+                "managed.guest-queue-actual-enqueued",
+                checked((long)diagnosticPayloadBytes),
+                countDelta: 1);
+        }
         // Wake any thread waiting for guest work completion or queue space.
         System.Threading.Monitor.PulseAll(_gate);
         return sequence;
@@ -2925,11 +2928,14 @@ internal static unsafe class VulkanVideoPresenter
                 "managed.guest-queue-retained",
                 -checked((long)releasedPayloadBytes),
                 countDelta: -1);
-            var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(pending.Work);
-            MemoryDiagnostics.Adjust(
-                "managed.guest-queue-actual-retained",
-                -checked((long)diagnosticPayloadBytes),
-                countDelta: -1);
+            if (MemoryDiagnostics.IsEnabled)
+            {
+                var diagnosticPayloadBytes = GetGuestWorkDiagnosticPayloadBytes(pending.Work);
+                MemoryDiagnostics.Adjust(
+                    "managed.guest-queue-actual-retained",
+                    -checked((long)diagnosticPayloadBytes),
+                    countDelta: -1);
+            }
             ReleasePendingGuestImageUploadsLocked(pending.Work);
             if (pending.Sequence == _completedGuestWorkSequence + 1)
             {
