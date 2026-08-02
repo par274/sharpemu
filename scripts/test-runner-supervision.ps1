@@ -99,13 +99,16 @@ function New-FakeProcessRecord {
 function New-TestState {
     param(
         [Parameter(Mandatory = $true)]
-        [object[]]$Records
+        [object[]]$Records,
+        [ValidateSet("direct-launch", "expected-mitigated-child")]
+        [string]$ExpectedMode = "direct-launch"
     )
 
     $identity = New-SupervisedProcessIdentity -ProcessRecord $Records[0]
     return New-SupervisionState `
         -LauncherIdentity $identity `
-        -ObservedAtUtc "2026-08-02T00:00:00.0000000Z"
+        -ObservedAtUtc "2026-08-02T00:00:00.0000000Z" `
+        -ExpectedMode $ExpectedMode
 }
 
 $launcher = New-FakeProcessRecord `
@@ -154,7 +157,7 @@ Assert-Equal -Expected $null -Actual $directState.actualChild -Message "Direct l
 
 # The launcher tree and independently tracked child tree overlap.  The
 # aggregate must count each stable PID/start-time identity once.
-$state = New-TestState -Records @($launcher)
+$state = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
 $bothAlive = Get-SupervisionSample `
     -State $state `
     -ProcessRecords @($launcher, $child, $grandchild, $unrelated) `
@@ -254,7 +257,7 @@ $unknownChild = New-FakeProcessRecord `
     -WorkingSetBytes 1 `
     -PrivateBytes 1
 $unknownChild.commandLine = $null
-$unknownState = New-TestState -Records @($launcher)
+$unknownState = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
 Assert-Throws `
     -Action {
         Get-SupervisionSample `
@@ -267,7 +270,7 @@ Assert-Throws `
 # Cleanup receives validated identities, retries the independently tracked
 # child even when the launcher is absent, and never targets an unrelated same-
 # name process.
-$cleanupState = New-TestState -Records @($launcher)
+$cleanupState = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
 Get-SupervisionSample `
     -State $cleanupState `
     -ProcessRecords @($launcher, $child, $grandchild, $unrelated) `
@@ -295,7 +298,7 @@ Assert-True -Condition (@($cleanupState.cleanupTargets | Where-Object { $_.proce
 
 # A retained child is cleaned independently after its launcher has already
 # exited, and a reused child PID is rejected before the stop action runs.
-$childCleanupState = New-TestState -Records @($launcher)
+$childCleanupState = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
 Get-SupervisionSample `
     -State $childCleanupState `
     -ProcessRecords @($launcher, $child) `
@@ -336,5 +339,187 @@ Assert-Throws `
     } `
     -Message "Cleanup accepted a reused PID"
 Assert-Equal -Expected 0 -Actual $mismatchStopCalls.Count -Message "Cleanup invoked a stop action after identity mismatch"
+
+# The controlled SharpEmu executable expects the mitigated relaunch on
+# Windows unless the documented environment switch disables it.  Other
+# executables remain explicit direct launches.
+Assert-Equal `
+    -Expected "expected-mitigated-child" `
+    -Actual (Get-ControlledSupervisionMode -ExecutablePath "C:\synthetic\SharpEmu.exe" -WindowsHost $true -MitigationDisableEnvironmentValue $null) `
+    -Message "Controlled SharpEmu launch did not require the mitigated child"
+Assert-Equal `
+    -Expected "direct-launch" `
+    -Actual (Get-ControlledSupervisionMode -ExecutablePath "C:\synthetic\SharpEmu.exe" -WindowsHost $true -MitigationDisableEnvironmentValue "1") `
+    -Message "Explicit mitigation disable did not preserve direct-launch mode"
+Assert-Equal `
+    -Expected "direct-launch" `
+    -Actual (Get-ControlledSupervisionMode -ExecutablePath "C:\synthetic\other.exe" -WindowsHost $true -MitigationDisableEnvironmentValue $null) `
+    -Message "Unknown executable was assigned SharpEmu child expectations"
+
+# The first identity is captured from the exact Process object, including the
+# configured executable path, before any inventory is available.
+$trustedProcessObject = [pscustomobject]@{
+    Id = 100
+    StartTime = "2026-08-02T00:00:00.1000000Z"
+    ProcessName = "SharpEmu"
+}
+$trustedIdentity = New-SupervisedProcessIdentityFromProcess `
+    -Process $trustedProcessObject `
+    -ConfiguredExecutablePath "C:\synthetic\SharpEmu.exe"
+Assert-Equal -Expected 100 -Actual $trustedIdentity.processId -Message "Trusted launcher identity lost the PID"
+Assert-Equal -Expected "2026-08-02T00:00:00.1000000+00:00" -Actual $trustedIdentity.startTimeUtc -Message "Trusted launcher identity lost the start time"
+Assert-Equal -Expected "SharpEmu" -Actual $trustedIdentity.name -Message "Trusted launcher identity lost the process name"
+Assert-Equal -Expected "C:\synthetic\SharpEmu.exe" -Actual $trustedIdentity.executablePath -Message "Trusted launcher identity lost the configured executable path"
+
+# If the first inventory fails, the root is already tracked and fallback
+# cleanup uses only that exact PID/start-time identity.
+$initialInventoryFailureState = New-SupervisionState `
+    -LauncherIdentity $trustedIdentity `
+    -ObservedAtUtc "2026-08-02T00:00:00.0000000Z" `
+    -ExpectedMode "expected-mitigated-child"
+$initialFallbackFixture = [pscustomobject]@{
+    records = @($launcher)
+    stopped = [System.Collections.Generic.List[int]]::new()
+}
+$initialFallbackLookup = {
+    param([int]$ProcessId)
+    @($initialFallbackFixture.records | Where-Object { [int]$_.processId -eq $ProcessId })
+}
+$initialFallbackStop = {
+    param([object]$Record)
+    [void]$initialFallbackFixture.stopped.Add([int]$Record.processId)
+    $initialFallbackFixture.records = @($initialFallbackFixture.records | Where-Object { [int]$_.processId -ne [int]$Record.processId })
+}
+Stop-SupervisedRoots `
+    -State $initialInventoryFailureState `
+    -Reason "synthetic-initial-inventory-failure" `
+    -InventoryAction { throw "synthetic initial CIM failure" } `
+    -ProcessLookupAction $initialFallbackLookup `
+    -StopProcessAction $initialFallbackStop `
+    -SleepAction { param([int]$Milliseconds) throw "Initial fallback unexpectedly slept." } | Out-Null
+Assert-True -Condition ($initialFallbackFixture.stopped -contains 100) -Message "Initial inventory failure did not target the exact launcher identity"
+Assert-True -Condition ($initialInventoryFailureState.cleanupEnumerationIncomplete.Count -eq 1) -Message "Initial inventory failure did not report incomplete descendant enumeration"
+Assert-True -Condition (@($initialInventoryFailureState.cleanupTargets | Where-Object { $_.method -eq "fallback-individual" -and $_.processId -eq 100 }).Count -eq 1) -Message "Initial fallback cleanup target was not recorded"
+
+# After a successful child sample, an inventory failure still falls back to
+# every known launcher/child identity, independently of their tree relation.
+$postDiscoveryFailureState = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
+Get-SupervisionSample `
+    -State $postDiscoveryFailureState `
+    -ProcessRecords @($launcher, $child) `
+    -ObservedAtUtc "2026-08-02T00:00:09.0000000Z" | Out-Null
+$postDiscoveryFallbackFixture = [pscustomobject]@{
+    records = @($launcher, $child)
+    stopped = [System.Collections.Generic.List[int]]::new()
+}
+$postDiscoveryFallbackLookup = {
+    param([int]$ProcessId)
+    @($postDiscoveryFallbackFixture.records | Where-Object { [int]$_.processId -eq $ProcessId })
+}
+$postDiscoveryFallbackStop = {
+    param([object]$Record)
+    [void]$postDiscoveryFallbackFixture.stopped.Add([int]$Record.processId)
+    $postDiscoveryFallbackFixture.records = @($postDiscoveryFallbackFixture.records | Where-Object { [int]$_.processId -ne [int]$Record.processId })
+}
+Stop-SupervisedRoots `
+    -State $postDiscoveryFailureState `
+    -Reason "synthetic-post-discovery-inventory-failure" `
+    -InventoryAction { throw "synthetic post-discovery CIM failure" } `
+    -ProcessLookupAction $postDiscoveryFallbackLookup `
+    -StopProcessAction $postDiscoveryFallbackStop `
+    -SleepAction { param([int]$Milliseconds) throw "Post-discovery fallback unexpectedly slept." } | Out-Null
+Assert-True -Condition ($postDiscoveryFallbackFixture.stopped -contains 100 -and $postDiscoveryFallbackFixture.stopped -contains 101) -Message "Post-discovery fallback did not target both exact supervised roots"
+Assert-True -Condition ($postDiscoveryFallbackFixture.stopped -notcontains 999) -Message "Post-discovery fallback targeted an unrelated same-name process"
+Assert-True -Condition ($postDiscoveryFailureState.cleanupEnumerationIncomplete.Count -eq 1) -Message "Post-discovery inventory failure did not report incomplete descendant enumeration"
+
+# PID reuse is rejected by the Get-Process fallback before the stop action is
+# called, even though the reused process has the same name and executable.
+$fallbackReuseState = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
+$fallbackStopCalls = [System.Collections.Generic.List[int]]::new()
+$fallbackReusedRecord = New-FakeProcessRecord `
+    -ProcessId 100 `
+    -ParentProcessId 1 `
+    -StartTimeUtc "2026-08-02T00:00:19.9000000Z" `
+    -Name "SharpEmu.exe" `
+    -CommandLine "SharpEmu.exe unrelated" `
+    -WorkingSetBytes 1 `
+    -PrivateBytes 1
+Assert-Throws `
+    -Action {
+        Stop-SupervisedRoots `
+            -State $fallbackReuseState `
+            -Reason "synthetic-fallback-reuse" `
+            -InventoryAction { throw "synthetic CIM unavailable" } `
+            -ProcessLookupAction { param([int]$ProcessId) @($fallbackReusedRecord) } `
+            -StopProcessAction { param([object]$Record) [void]$fallbackStopCalls.Add([int]$Record.processId) } `
+            -SleepAction { param([int]$Milliseconds) throw "Fallback reuse unexpectedly slept." }
+    } `
+    -Message "Fallback cleanup accepted a reused PID"
+Assert-Equal -Expected 0 -Actual $fallbackStopCalls.Count -Message "Fallback cleanup invoked a stop action after PID reuse"
+Assert-True -Condition (@($fallbackReuseState.cleanupFailures | Where-Object { $_.processId -eq 100 }).Count -eq 1) -Message "Fallback PID reuse failure was not recorded"
+
+# The ordinary state model closes the launcher-exit window.  A child that is
+# present only after launcher exit is recovered by the one strict attempt.
+$immediateState = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
+$preFinalSample = Get-SupervisionSample `
+    -State $immediateState `
+    -ProcessRecords @($child) `
+    -ObservedAtUtc "2026-08-02T00:00:20.0000000Z"
+Assert-Equal -Expected "final-child-discovery" -Actual (Get-SupervisionLoopDecision -State $immediateState -Sample $preFinalSample) -Message "Launcher exit without promotion was treated as process-exited"
+$strictResult = Invoke-SupervisionFinalChildDiscovery `
+    -State $immediateState `
+    -ProcessRecords @($child) `
+    -ObservedAtUtc "2026-08-02T00:00:20.1000000Z"
+Assert-Equal -Expected "found" -Actual $strictResult.status -Message "Strict final child discovery did not recover the child"
+$strictSample = Get-SupervisionSample `
+    -State $immediateState `
+    -ProcessRecords @($child) `
+    -ObservedAtUtc "2026-08-02T00:00:20.1000000Z"
+Assert-True -Condition $strictSample.actualChildAlive -Message "Strictly recovered child was not supervised"
+
+$missingExpectedChildState = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
+$missingExpectedChildSample = Get-SupervisionSample `
+    -State $missingExpectedChildState `
+    -ProcessRecords @() `
+    -ObservedAtUtc "2026-08-02T00:00:21.0000000Z"
+Assert-Equal -Expected "final-child-discovery" -Actual (Get-SupervisionLoopDecision -State $missingExpectedChildState -Sample $missingExpectedChildSample) -Message "Missing expected child skipped strict final discovery"
+$missingResult = Invoke-SupervisionFinalChildDiscovery `
+    -State $missingExpectedChildState `
+    -ProcessRecords @() `
+    -ObservedAtUtc "2026-08-02T00:00:21.1000000Z"
+Assert-Equal -Expected "not-found" -Actual $missingResult.status -Message "Unobservable expected child was reported as found"
+$missingAfterFinalSample = Get-SupervisionSample `
+    -State $missingExpectedChildState `
+    -ProcessRecords @() `
+    -ObservedAtUtc "2026-08-02T00:00:21.1000000Z"
+Assert-Equal -Expected "supervision-failure" -Actual (Get-SupervisionLoopDecision -State $missingExpectedChildState -Sample $missingAfterFinalSample) -Message "Unobservable expected child became a successful process-exited run"
+
+$directExitState = New-TestState -Records @($launcher) -ExpectedMode "direct-launch"
+$directExitSample = Get-SupervisionSample `
+    -State $directExitState `
+    -ProcessRecords @() `
+    -ObservedAtUtc "2026-08-02T00:00:22.0000000Z"
+Assert-Equal -Expected "process-exited" -Actual (Get-SupervisionLoopDecision -State $directExitState -Sample $directExitSample) -Message "Explicit direct-launch mode invented a missing mitigated child"
+
+# An unrelated descendant carrying the exact marker is not a candidate when
+# its executable/name is incompatible with the launcher.
+$unrelatedMarkedDescendant = New-FakeProcessRecord `
+    -ProcessId 104 `
+    -ParentProcessId 100 `
+    -StartTimeUtc "2026-08-02T00:00:00.4000000Z" `
+    -Name "SharpEmuWorker.exe" `
+    -CommandLine "SharpEmuWorker.exe --sharpemu-mitigated-child" `
+    -WorkingSetBytes 1 `
+    -PrivateBytes 1
+$candidateRestrictionState = New-TestState -Records @($launcher) -ExpectedMode "expected-mitigated-child"
+$candidateRestrictionSample = Get-SupervisionSample `
+    -State $candidateRestrictionState `
+    -ProcessRecords @($launcher, $unrelatedMarkedDescendant) `
+    -ObservedAtUtc "2026-08-02T00:00:23.0000000Z"
+Assert-True -Condition ($null -eq $candidateRestrictionState.actualChild) -Message "Incompatible marked descendant was promoted as the actual child"
+Assert-True -Condition (-not $candidateRestrictionSample.actualChildAlive) -Message "Incompatible marked descendant entered actual-child metrics"
+
+Assert-True -Condition (Test-SupervisionMitigatedChildMarker -CommandLine "SharpEmu.exe --sharpemu-mitigated-child") -Message "Exact mitigated-child marker was not recognized"
+Assert-True -Condition (-not (Test-SupervisionMitigatedChildMarker -CommandLine "SharpEmu.exe --sharpemu-mitigated-child-copy")) -Message "Marker prefix was accepted as the mitigated-child flag"
 
 Write-Host "Runner supervision regressions passed."

@@ -15,7 +15,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ReleaseEventName,
     [string]$ExitEventName = "",
-    [string]$Marker = ""
+    [string]$Marker = "",
+    [switch]$ExitAfterReady
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,16 +64,19 @@ try {
         if (-not $ready.WaitOne(10000)) {
             throw "Synthetic child did not signal readiness."
         }
-        $exit = [Threading.EventWaitHandle]::OpenExisting($ExitEventName)
-        try {
-            [void]$exit.WaitOne()
-        }
-        finally {
-            $exit.Dispose()
-        }
     }
     finally {
         $ready.Dispose()
+    }
+    if ($ExitAfterReady) {
+        return
+    }
+    $exit = [Threading.EventWaitHandle]::OpenExisting($ExitEventName)
+    try {
+        [void]$exit.WaitOne()
+    }
+    finally {
+        $exit.Dispose()
     }
 }
 finally {

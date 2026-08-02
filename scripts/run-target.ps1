@@ -289,6 +289,12 @@ if (-not (Test-Path -LiteralPath $emulatorPath -PathType Leaf)) {
     throw "The configured emulator executable was not found. Publish the Release win-x64 CLI first."
 }
 
+$mitigationDisableEnvironmentValue = [Environment]::GetEnvironmentVariable("SHARPEMU_DISABLE_MITIGATION_RELAUNCH")
+$expectedSupervisionMode = Get-ControlledSupervisionMode `
+    -ExecutablePath $emulatorPath `
+    -WindowsHost $IsWindows `
+    -MitigationDisableEnvironmentValue $mitigationDisableEnvironmentValue
+
 $actualEbootHash = (Get-FileHash -LiteralPath $ebootPath -Algorithm SHA256).Hash.ToUpperInvariant()
 if ($expectedEbootHash -notmatch "^[0-9A-F]{64}$") {
     throw "ebootSha256 must be a 64-character SHA-256 value. Actual file hash: $actualEbootHash"
@@ -455,16 +461,26 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             enabled = $null -ne $diagnosticsPath
         }
         supervision = [ordered]@{
+            expectedMode = $expectedSupervisionMode
+            mitigationRelaunchDisabled = [string]::Equals(
+                $mitigationDisableEnvironmentValue,
+                "1",
+                [StringComparison]::Ordinal)
             launcher = $null
             actualEmulation = $null
             actualChild = $null
             childDiscoveredAtUtc = $null
             launcherExitedAtUtc = $null
             monitoringContinuedAfterLauncherExit = $false
+            finalChildDiscoveryAttempted = $false
+            finalChildDiscoveryAtUtc = $null
+            expectedChildNeverConfirmed = $false
+            knownSupervisedIdentities = @()
             samples = @()
             identityMismatches = @()
             lookupFailures = @()
             cleanupTargets = @()
+            cleanupEnumerationIncomplete = @()
             cleanupFailures = @()
         }
         vmmap = if ($vmMapEnabled) {
@@ -518,17 +534,15 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         $processStarted = $true
 
         $launcherObservedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
-        $initialProcessInventory = @(Get-TargetProcessInventory)
-        $launcherRecords = @($initialProcessInventory | Where-Object {
-                [int](Get-SupervisionProperty -Object $_ -Names @("processId", "ProcessId", "Id")) -eq $process.Id
-            })
-        if ($launcherRecords.Count -ne 1) {
-            throw "SharpEmu launcher identity could not be captured after start: expected one record for PID $($process.Id), found $($launcherRecords.Count)."
-        }
-        $launcherIdentity = New-SupervisedProcessIdentity -ProcessRecord $launcherRecords[0]
+        # Capture the root directly from the exact Process object returned by
+        # Start(), before the first CIM inventory can fail or lose the root.
+        $launcherIdentity = New-SupervisedProcessIdentityFromProcess `
+            -Process $process `
+            -ConfiguredExecutablePath $emulatorPath
         $supervisionState = New-SupervisionState `
             -LauncherIdentity $launcherIdentity `
-            -ObservedAtUtc $launcherObservedAtUtc
+            -ObservedAtUtc $launcherObservedAtUtc `
+            -ExpectedMode $expectedSupervisionMode
         $manifest.supervision.launcher = $launcherIdentity
         $manifest.supervision.actualEmulation = [ordered]@{
             mode = $supervisionState.actualEmulation.mode
@@ -544,7 +558,59 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 -State $supervisionState `
                 -ProcessRecords $processInventory `
                 -ObservedAtUtc $observedAtUtc
-            if (-not $supervisionSample.anySupervisedProcessAlive) {
+
+            $loopDecision = Get-SupervisionLoopDecision `
+                -State $supervisionState `
+                -Sample $supervisionSample
+            if ($loopDecision -eq "final-child-discovery") {
+                # The launcher can disappear between child creation and the
+                # ordinary promotion sample.  Spend exactly one strict
+                # inventory attempt on the launcher-associated child.
+                $finalDiscoveryObservedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+                try {
+                    $finalProcessInventory = @(Get-TargetProcessInventory)
+                }
+                catch {
+                    $supervisionState.finalChildDiscoveryAttempted = $true
+                    $supervisionState.finalChildDiscoveryAtUtc = $finalDiscoveryObservedAtUtc
+                    throw
+                }
+                $finalChildResult = Invoke-SupervisionFinalChildDiscovery `
+                    -State $supervisionState `
+                    -ProcessRecords $finalProcessInventory `
+                    -ObservedAtUtc $finalDiscoveryObservedAtUtc
+                if ($finalChildResult.status -eq "found") {
+                    $supervisionSample = Get-SupervisionSample `
+                        -State $supervisionState `
+                        -ProcessRecords $finalProcessInventory `
+                        -ObservedAtUtc $finalDiscoveryObservedAtUtc
+                    $loopDecision = Get-SupervisionLoopDecision `
+                        -State $supervisionState `
+                        -Sample $supervisionSample
+                }
+                else {
+                    $terminationReason = "supervision-failure"
+                    $terminationBoundary = [ordered]@{
+                        reason = "supervision-failure"
+                        boundary = "expected-child-confirmation"
+                        expectedMode = $supervisionState.expectedMode
+                        detail = "Expected mitigated child was never safely confirmed before launcher exit."
+                        discoveryStatus = $finalChildResult.status
+                    }
+                    throw "Expected mitigated child was never safely confirmed: $($finalChildResult.reason)"
+                }
+            }
+            if ($loopDecision -eq "supervision-failure") {
+                $terminationReason = "supervision-failure"
+                $terminationBoundary = [ordered]@{
+                    reason = "supervision-failure"
+                    boundary = "expected-child-confirmation"
+                    expectedMode = $supervisionState.expectedMode
+                    detail = "Expected mitigated child was never safely confirmed before launcher exit."
+                }
+                throw "Expected mitigated child was never safely confirmed."
+            }
+            if ($loopDecision -eq "process-exited") {
                 break
             }
 
@@ -792,7 +858,8 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         $primaryFailure = $_
         if ($null -ne $supervisionState -and
             ($supervisionState.identityMismatches.Count -gt 0 -or
-                $supervisionState.lookupFailures.Count -gt 0)) {
+                $supervisionState.lookupFailures.Count -gt 0 -or
+                $supervisionState.expectedChildNeverConfirmed)) {
             $terminationReason = "supervision-failure"
         }
         if ($_.Exception.Message -like "SharpEmu process lookup failed:*" -or
@@ -855,6 +922,10 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 mode = $supervisionState.actualEmulation.mode
                 identity = $supervisionState.actualEmulation.identity
             }
+            $manifest.supervision.expectedMode = $supervisionState.expectedMode
+            $manifest.supervision.finalChildDiscoveryAttempted = $supervisionState.finalChildDiscoveryAttempted
+            $manifest.supervision.finalChildDiscoveryAtUtc = $supervisionState.finalChildDiscoveryAtUtc
+            $manifest.supervision.expectedChildNeverConfirmed = $supervisionState.expectedChildNeverConfirmed
             $manifest.supervision.actualChild = if ($null -eq $supervisionState.actualChild) {
                 $null
             }
@@ -874,10 +945,19 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             }
             $manifest.supervision.launcherExitedAtUtc = $supervisionState.launcher.exitedAtUtc
             $manifest.supervision.monitoringContinuedAfterLauncherExit = $supervisionState.monitoringContinuedAfterLauncherExit
+            $manifest.supervision.knownSupervisedIdentities = @($supervisionState.knownSupervisedIdentities | ForEach-Object {
+                    [ordered]@{
+                        identity = $_.identity
+                        firstObservedAtUtc = $_.firstObservedAtUtc
+                        lastObservedAtUtc = $_.lastObservedAtUtc
+                        sources = @($_.sources)
+                    }
+                })
             $manifest.supervision.samples = @($supervisionSamples)
             $manifest.supervision.identityMismatches = @($supervisionState.identityMismatches)
             $manifest.supervision.lookupFailures = @($supervisionState.lookupFailures)
             $manifest.supervision.cleanupTargets = @($supervisionState.cleanupTargets)
+            $manifest.supervision.cleanupEnumerationIncomplete = @($supervisionState.cleanupEnumerationIncomplete)
             $manifest.supervision.cleanupFailures = @($supervisionState.cleanupFailures)
         }
         else {
@@ -901,6 +981,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         $manifest.result = [ordered]@{
             terminationReason = $terminationReason
             terminationBoundary = $terminationBoundary
+            primaryError = if ($null -eq $primaryFailure) { $null } else { $primaryFailure.Exception.Message }
             exitCode = $exitCode
             durationMilliseconds = [long]($completedAt - $startedAt).TotalMilliseconds
             sampleCount = $sampleCount
@@ -915,6 +996,9 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             }
             checkpointObserved = $null
             notes = "Record the observed checkpoint after reviewing the run. Do not infer it from process exit."
+        }
+        if ($supervisionEarlyFailures.Count -gt 0) {
+            $manifest.result.earlySupervisionFailures = @($supervisionEarlyFailures)
         }
         if ($cleanupFailures.Count -gt 0) {
             $manifest.result.cleanupErrors = @($cleanupFailures | ForEach-Object {

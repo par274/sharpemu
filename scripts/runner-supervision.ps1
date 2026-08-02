@@ -24,6 +24,66 @@ function Get-SupervisionProperty {
     return $null
 }
 
+function Normalize-SupervisionProcessName {
+    param(
+        [AllowNull()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $name = [System.IO.Path]::GetFileName($Value.Trim())
+    if ($name.EndsWith(".exe", [StringComparison]::OrdinalIgnoreCase)) {
+        $name = $name.Substring(0, $name.Length - 4)
+    }
+
+    return $name.ToUpperInvariant()
+}
+
+function Test-SupervisionMitigatedChildMarker {
+    param(
+        [AllowNull()]
+        [string]$CommandLine
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+
+    # Treat the internal flag as an argument token.  A prefix such as
+    # --sharpemu-mitigated-child-copy is not evidence of the child mode.
+    return $CommandLine -match '(^|[\s"])--sharpemu-mitigated-child(?=$|[\s"])'
+}
+
+function Test-SupervisionCompatibleExecutable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$LauncherIdentity,
+        [Parameter(Mandatory = $true)]
+        [object]$CandidateRecord
+    )
+
+    $launcherName = Normalize-SupervisionProcessName -Value ([string]$LauncherIdentity.name)
+    $candidateName = Normalize-SupervisionProcessName -Value ([string](Get-SupervisionProperty `
+                -Object $CandidateRecord `
+                -Names @("name", "Name", "ProcessName")))
+    $launcherPath = [string]$LauncherIdentity.executablePath
+    $candidatePath = [string](Get-SupervisionProperty `
+            -Object $CandidateRecord `
+            -Names @("executablePath", "ExecutablePath", "Path"))
+
+    $sameExecutable = -not [string]::IsNullOrWhiteSpace($launcherPath) -and
+        -not [string]::IsNullOrWhiteSpace($candidatePath) -and
+        [string]::Equals($launcherPath, $candidatePath, [StringComparison]::OrdinalIgnoreCase)
+    $sameName = -not [string]::IsNullOrWhiteSpace($launcherName) -and
+        -not [string]::IsNullOrWhiteSpace($candidateName) -and
+        [string]::Equals($launcherName, $candidateName, [StringComparison]::OrdinalIgnoreCase)
+
+    return [bool]($sameExecutable -or $sameName)
+}
+
 function Format-SupervisionStartTimeUtc {
     param(
         [Parameter(Mandatory = $true)]
@@ -120,6 +180,66 @@ function New-SupervisedProcessIdentity {
     }
 }
 
+function New-SupervisedProcessIdentityFromProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Process,
+        [AllowNull()]
+        [string]$ConfiguredExecutablePath
+    )
+
+    $processId = Get-SupervisionProperty -Object $Process -Names @("Id", "ProcessId", "processId")
+    if ($null -eq $processId -or [int]$processId -le 0) {
+        throw "Started process did not expose a positive PID."
+    }
+
+    $startTime = Get-SupervisionProperty -Object $Process -Names @("StartTime", "startTimeUtc", "StartTimeUtc", "CreationDate")
+    if ($null -eq $startTime) {
+        throw "Started process PID $processId did not expose a start time."
+    }
+
+    $name = Get-SupervisionProperty -Object $Process -Names @("ProcessName", "Name", "name")
+    if ([string]::IsNullOrWhiteSpace([string]$name)) {
+        throw "Started process PID $processId did not expose a process name."
+    }
+
+    return New-SupervisedProcessIdentity -ProcessRecord ([pscustomobject][ordered]@{
+            processId = [int]$processId
+            startTimeUtc = $startTime
+            name = [string]$name
+            executablePath = $ConfiguredExecutablePath
+            commandLine = $null
+        })
+}
+
+function Merge-SupervisedProcessIdentityEvidence {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$RecordedIdentity,
+        [Parameter(Mandatory = $true)]
+        [object]$ObservedIdentity
+    )
+
+    foreach ($propertyName in @("name", "executablePath", "commandLine")) {
+        if ([string]::IsNullOrWhiteSpace([string]$RecordedIdentity.$propertyName) -and
+            -not [string]::IsNullOrWhiteSpace([string]$ObservedIdentity.$propertyName)) {
+            $RecordedIdentity.$propertyName = $ObservedIdentity.$propertyName
+        }
+    }
+
+    if ($null -ne $ObservedIdentity.mitigatedChildEvidence) {
+        if ($null -eq $RecordedIdentity.mitigatedChildEvidence) {
+            $RecordedIdentity.mitigatedChildEvidence = $ObservedIdentity.mitigatedChildEvidence
+        }
+        elseif ($ObservedIdentity.mitigatedChildEvidence.argumentObserved) {
+            $RecordedIdentity.mitigatedChildEvidence.argumentObserved = $true
+            $RecordedIdentity.mitigatedChildEvidence.available = $true
+        }
+    }
+
+    return $RecordedIdentity
+}
+
 function Test-SupervisedProcessIdentity {
     param(
         [Parameter(Mandatory = $true)]
@@ -158,9 +278,18 @@ function Test-SupervisedProcessIdentity {
     foreach ($propertyName in @("name", "executablePath")) {
         $recordedValue = [string]$RecordedIdentity.$propertyName
         $observedValue = [string]$observedIdentity.$propertyName
+        $valuesMatch = if ($propertyName -eq "name") {
+            [string]::Equals(
+                (Normalize-SupervisionProcessName -Value $recordedValue),
+                (Normalize-SupervisionProcessName -Value $observedValue),
+                [StringComparison]::OrdinalIgnoreCase)
+        }
+        else {
+            [string]::Equals($recordedValue, $observedValue, [StringComparison]::OrdinalIgnoreCase)
+        }
         if (-not [string]::IsNullOrWhiteSpace($recordedValue) -and
             -not [string]::IsNullOrWhiteSpace($observedValue) -and
-            $recordedValue -ne $observedValue) {
+            -not $valuesMatch) {
             return [pscustomobject]@{
                 matches = $false
                 reason = "$propertyName-mismatch"
@@ -307,18 +436,10 @@ function Find-SupervisedMitigatedChild {
             [int](Get-SupervisionProperty -Object $_ -Names @("processId", "ProcessId", "Id")) -ne [int]$LauncherIdentity.processId
         })
 
-    $launcherName = [string]$LauncherIdentity.name
-    $launcherPath = [string]$LauncherIdentity.executablePath
     foreach ($descendant in $descendants) {
-        $descendantName = [string](Get-SupervisionProperty -Object $descendant -Names @("name", "Name", "ProcessName"))
-        $descendantPath = [string](Get-SupervisionProperty -Object $descendant -Names @("executablePath", "ExecutablePath", "Path"))
-        $sameExecutable = (-not [string]::IsNullOrWhiteSpace($launcherPath) -and
-            -not [string]::IsNullOrWhiteSpace($descendantPath) -and
-            $launcherPath -eq $descendantPath)
-        $sameName = (-not [string]::IsNullOrWhiteSpace($launcherName) -and
-            -not [string]::IsNullOrWhiteSpace($descendantName) -and
-            $launcherName -eq $descendantName)
-        if (-not ($sameExecutable -or $sameName)) {
+        if (-not (Test-SupervisionCompatibleExecutable `
+                    -LauncherIdentity $LauncherIdentity `
+                    -CandidateRecord $descendant)) {
             continue
         }
 
@@ -334,8 +455,13 @@ function Find-SupervisedMitigatedChild {
     }
 
     $candidates = @($descendants | Where-Object {
+            if (-not (Test-SupervisionCompatibleExecutable `
+                        -LauncherIdentity $LauncherIdentity `
+                        -CandidateRecord $_)) {
+                return $false
+            }
             $commandLine = [string](Get-SupervisionProperty -Object $_ -Names @("commandLine", "CommandLine"))
-            $commandLine -like "*--sharpemu-mitigated-child*"
+            Test-SupervisionMitigatedChildMarker -CommandLine $commandLine
         })
     if ($candidates.Count -eq 0) {
         return [pscustomobject]@{
@@ -349,6 +475,91 @@ function Find-SupervisedMitigatedChild {
             status = "ambiguous"
             record = $null
             reason = "Found $($candidates.Count) mitigated-child candidates below launcher PID $($LauncherIdentity.processId)."
+        }
+    }
+
+    return [pscustomobject]@{
+        status = "found"
+        record = $candidates[0]
+        reason = $null
+    }
+}
+
+function Find-SupervisedMitigatedChildAfterLauncherExit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$LauncherIdentity,
+        [AllowEmptyCollection()]
+        [Parameter(Mandatory = $true)]
+        [object[]]$ProcessRecords
+    )
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($record in $ProcessRecords) {
+        $parentProcessId = Get-SupervisionProperty -Object $record -Names @("parentProcessId", "ParentProcessId")
+        if ($null -eq $parentProcessId -or [int]$parentProcessId -ne [int]$LauncherIdentity.processId) {
+            continue
+        }
+
+        if (-not (Test-SupervisionCompatibleExecutable `
+                    -LauncherIdentity $LauncherIdentity `
+                    -CandidateRecord $record)) {
+            continue
+        }
+
+        $commandLineProperty = $record.PSObject.Properties["commandLine"]
+        $commandLine = Get-SupervisionProperty -Object $record -Names @("commandLine", "CommandLine")
+        if ($null -eq $commandLineProperty -or $null -eq $commandLine) {
+            return [pscustomobject]@{
+                status = "lookup-failure"
+                record = $null
+                reason = "Final mitigated-child command evidence was unavailable for descendant PID $((Get-SupervisionProperty -Object $record -Names @('processId', 'ProcessId', 'Id')))."
+            }
+        }
+        if (-not (Test-SupervisionMitigatedChildMarker -CommandLine ([string]$commandLine))) {
+            continue
+        }
+
+        try {
+            $candidateIdentity = New-SupervisedProcessIdentity -ProcessRecord $record
+            $launcherStart = [DateTimeOffset]::Parse(
+                [string]$LauncherIdentity.startTimeUtc,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AssumeUniversal)
+            $candidateStart = [DateTimeOffset]::Parse(
+                [string]$candidateIdentity.startTimeUtc,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AssumeUniversal)
+        }
+        catch {
+            return [pscustomobject]@{
+                status = "lookup-failure"
+                record = $null
+                reason = "Final mitigated-child identity evidence was unavailable: $($_.Exception.Message)"
+            }
+        }
+
+        # A direct child whose recorded start predates the launcher cannot be
+        # safely associated with this launcher identity.
+        if ($candidateStart -le $launcherStart) {
+            continue
+        }
+
+        [void]$candidates.Add($record)
+    }
+
+    if ($candidates.Count -eq 0) {
+        return [pscustomobject]@{
+            status = "not-found"
+            record = $null
+            reason = "No compatible mitigated child associated with launcher PID $($LauncherIdentity.processId) was observable in the final inventory."
+        }
+    }
+    if ($candidates.Count -ne 1) {
+        return [pscustomobject]@{
+            status = "ambiguous"
+            record = $null
+            reason = "Found $($candidates.Count) compatible mitigated-child candidates associated with launcher PID $($LauncherIdentity.processId)."
         }
     }
 
@@ -463,15 +674,43 @@ function Get-DeduplicatedSupervisionCounters {
     }
 }
 
+function Get-ControlledSupervisionMode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExecutablePath,
+        [Parameter(Mandatory = $true)]
+        [bool]$WindowsHost,
+        [AllowNull()]
+        [string]$MitigationDisableEnvironmentValue
+    )
+
+    if (-not $WindowsHost -or
+        [string]::Equals($MitigationDisableEnvironmentValue, "1", [StringComparison]::Ordinal)) {
+        return "direct-launch"
+    }
+
+    $executableName = Normalize-SupervisionProcessName -Value ([System.IO.Path]::GetFileName($ExecutablePath))
+    if ([string]::Equals($executableName, "SHARPEMU", [StringComparison]::OrdinalIgnoreCase)) {
+        return "expected-mitigated-child"
+    }
+
+    # The controlled runner only infers the relaunch contract for the known
+    # SharpEmu CLI.  Other executables remain explicit direct-launch roots.
+    return "direct-launch"
+}
+
 function New-SupervisionState {
     param(
         [Parameter(Mandatory = $true)]
         [object]$LauncherIdentity,
         [Parameter(Mandatory = $true)]
-        [string]$ObservedAtUtc
+        [string]$ObservedAtUtc,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("direct-launch", "expected-mitigated-child")]
+        [string]$ExpectedMode
     )
 
-    return [pscustomobject][ordered]@{
+    $state = [pscustomobject][ordered]@{
         launcher = [pscustomobject][ordered]@{
             identity = $LauncherIdentity
             discoveredAtUtc = $ObservedAtUtc
@@ -480,17 +719,104 @@ function New-SupervisionState {
             lastRecord = $null
         }
         actualEmulation = [pscustomobject][ordered]@{
-            mode = "direct-launch"
-            identity = $LauncherIdentity
+            mode = if ($ExpectedMode -eq "direct-launch") { "direct-launch" } else { "unconfirmed" }
+            identity = if ($ExpectedMode -eq "direct-launch") { $LauncherIdentity } else { $null }
         }
+        expectedMode = $ExpectedMode
         actualChild = $null
         handoffObserved = $false
         monitoringContinuedAfterLauncherExit = $false
+        finalChildDiscoveryAttempted = $false
+        finalChildDiscoveryAtUtc = $null
+        expectedChildNeverConfirmed = $false
         identityMismatches = [System.Collections.Generic.List[object]]::new()
         lookupFailures = [System.Collections.Generic.List[object]]::new()
+        knownSupervisedIdentities = [System.Collections.Generic.List[object]]::new()
         cleanupTargets = [System.Collections.Generic.List[object]]::new()
+        cleanupEnumerationIncomplete = [System.Collections.Generic.List[object]]::new()
         cleanupFailures = [System.Collections.Generic.List[object]]::new()
     }
+
+    Add-SupervisionKnownIdentity `
+        -State $state `
+        -Identity $LauncherIdentity `
+        -Source "launcher" `
+        -ObservedAtUtc $ObservedAtUtc
+    return $state
+}
+
+function Add-SupervisionKnownIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [object]$Identity,
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+        [Parameter(Mandatory = $true)]
+        [string]$ObservedAtUtc
+    )
+
+    $existing = @($State.knownSupervisedIdentities | Where-Object {
+            [string]$_.identity.identityKey -eq [string]$Identity.identityKey
+        }) | Select-Object -First 1
+    if ($null -eq $existing) {
+        [void]$State.knownSupervisedIdentities.Add([pscustomobject][ordered]@{
+                identity = $Identity
+                firstObservedAtUtc = $ObservedAtUtc
+                lastObservedAtUtc = $ObservedAtUtc
+                sources = [System.Collections.Generic.List[string]]::new()
+            })
+        $existing = $State.knownSupervisedIdentities[$State.knownSupervisedIdentities.Count - 1]
+    }
+    else {
+        [void](Merge-SupervisedProcessIdentityEvidence `
+                -RecordedIdentity $existing.identity `
+                -ObservedIdentity $Identity)
+        $existing.lastObservedAtUtc = $ObservedAtUtc
+    }
+
+    if (-not $existing.sources.Contains($Source)) {
+        [void]$existing.sources.Add($Source)
+    }
+}
+
+function Promote-SupervisedMitigatedChild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [object]$ProcessRecord,
+        [Parameter(Mandatory = $true)]
+        [string]$ObservedAtUtc
+    )
+
+    $childIdentity = New-SupervisedProcessIdentity -ProcessRecord $ProcessRecord
+    if ([string]$childIdentity.identityKey -eq [string]$State.launcher.identity.identityKey) {
+        throw "Mitigated-child discovery returned the launcher identity instead of a descendant."
+    }
+
+    Add-SupervisionKnownIdentity `
+        -State $State `
+        -Identity $childIdentity `
+        -Source "child" `
+        -ObservedAtUtc $ObservedAtUtc
+    $State.actualChild = [pscustomobject][ordered]@{
+        identity = $childIdentity
+        discoveredAtUtc = $ObservedAtUtc
+        exitedAtUtc = $null
+        alive = $true
+        lastRecord = $ProcessRecord
+        lastCounters = [ordered]@{
+            processId = $childIdentity.processId
+            startTimeUtc = $childIdentity.startTimeUtc
+            workingSetBytes = Get-SupervisionCounterValue -ProcessRecord $ProcessRecord -Names @("workingSetBytes", "WorkingSet64", "WorkingSetSize")
+            privateBytes = Get-SupervisionCounterValue -ProcessRecord $ProcessRecord -Names @("privateBytes", "PrivateMemorySize64", "PrivatePageCount")
+        }
+    }
+    $State.actualEmulation.mode = "mitigated-child"
+    $State.actualEmulation.identity = $childIdentity
+    $State.handoffObserved = $true
 }
 
 function Add-SupervisionDiagnostic {
@@ -536,6 +862,15 @@ function Update-SupervisionState {
     if ($launcherObservation.status -eq "alive") {
         $State.launcher.alive = $true
         $State.launcher.lastRecord = $launcherObservation.record
+        $observedLauncherIdentity = New-SupervisedProcessIdentity -ProcessRecord $launcherObservation.record
+        [void](Merge-SupervisedProcessIdentityEvidence `
+                -RecordedIdentity $State.launcher.identity `
+                -ObservedIdentity $observedLauncherIdentity)
+        Add-SupervisionKnownIdentity `
+            -State $State `
+            -Identity $observedLauncherIdentity `
+            -Source "launcher" `
+            -ObservedAtUtc $ObservedAtUtc
     }
     else {
         $State.launcher.alive = $false
@@ -544,7 +879,9 @@ function Update-SupervisionState {
         }
     }
 
-    if ($State.launcher.alive -and $null -eq $State.actualChild) {
+    if ($State.expectedMode -eq "expected-mitigated-child" -and
+        $State.launcher.alive -and
+        $null -eq $State.actualChild) {
         $childResult = Find-SupervisedMitigatedChild `
             -LauncherIdentity $State.launcher.identity `
             -ProcessRecords $ProcessRecords
@@ -559,23 +896,10 @@ function Update-SupervisionState {
             throw "Actual mitigated child could not be safely discovered: $($childResult.reason)"
         }
         if ($childResult.status -eq "found") {
-            $childIdentity = New-SupervisedProcessIdentity -ProcessRecord $childResult.record
-            $State.actualChild = [pscustomobject][ordered]@{
-                identity = $childIdentity
-                discoveredAtUtc = $ObservedAtUtc
-                exitedAtUtc = $null
-                alive = $true
-                lastRecord = $childResult.record
-                lastCounters = [ordered]@{
-                    processId = $childIdentity.processId
-                    startTimeUtc = $childIdentity.startTimeUtc
-                    workingSetBytes = Get-SupervisionCounterValue -ProcessRecord $childResult.record -Names @("workingSetBytes", "WorkingSet64", "WorkingSetSize")
-                    privateBytes = Get-SupervisionCounterValue -ProcessRecord $childResult.record -Names @("privateBytes", "PrivateMemorySize64", "PrivatePageCount")
-                }
-            }
-            $State.actualEmulation.mode = "mitigated-child"
-            $State.actualEmulation.identity = $childIdentity
-            $State.handoffObserved = $true
+            Promote-SupervisedMitigatedChild `
+                -State $State `
+                -ProcessRecord $childResult.record `
+                -ObservedAtUtc $ObservedAtUtc
         }
     }
 
@@ -597,6 +921,15 @@ function Update-SupervisionState {
         if ($childObservation.status -eq "alive") {
             $State.actualChild.alive = $true
             $State.actualChild.lastRecord = $childObservation.record
+            $observedChildIdentity = New-SupervisedProcessIdentity -ProcessRecord $childObservation.record
+            [void](Merge-SupervisedProcessIdentityEvidence `
+                    -RecordedIdentity $State.actualChild.identity `
+                    -ObservedIdentity $observedChildIdentity)
+            Add-SupervisionKnownIdentity `
+                -State $State `
+                -Identity $observedChildIdentity `
+                -Source "child" `
+                -ObservedAtUtc $ObservedAtUtc
             $State.actualChild.lastCounters = [ordered]@{
                 processId = $State.actualChild.identity.processId
                 startTimeUtc = $State.actualChild.identity.startTimeUtc
@@ -619,6 +952,82 @@ function Update-SupervisionState {
     }
 
     return $State
+}
+
+function Invoke-SupervisionFinalChildDiscovery {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [AllowEmptyCollection()]
+        [Parameter(Mandatory = $true)]
+        [object[]]$ProcessRecords,
+        [Parameter(Mandatory = $true)]
+        [string]$ObservedAtUtc
+    )
+
+    if ($State.expectedMode -ne "expected-mitigated-child" -or
+        $null -ne $State.actualChild) {
+        return [pscustomobject]@{
+            status = "not-required"
+            record = if ($null -eq $State.actualChild) { $null } else { $State.actualChild.lastRecord }
+            reason = $null
+        }
+    }
+
+    if ($State.finalChildDiscoveryAttempted) {
+        return [pscustomobject]@{
+            status = if ($State.expectedChildNeverConfirmed) { "not-found" } else { "already-attempted" }
+            record = $null
+            reason = "Final mitigated-child discovery was already attempted."
+        }
+    }
+
+    $State.finalChildDiscoveryAttempted = $true
+    $State.finalChildDiscoveryAtUtc = $ObservedAtUtc
+    $result = Find-SupervisedMitigatedChildAfterLauncherExit `
+        -LauncherIdentity $State.launcher.identity `
+        -ProcessRecords $ProcessRecords
+    if ($result.status -eq "found") {
+        Promote-SupervisedMitigatedChild `
+            -State $State `
+            -ProcessRecord $result.record `
+            -ObservedAtUtc $ObservedAtUtc
+        return $result
+    }
+
+    $State.expectedChildNeverConfirmed = $true
+    $diagnostic = [ordered]@{
+        process = "expected-actual-child"
+        processId = $State.launcher.identity.processId
+        identity = $State.launcher.identity
+        reason = $result.reason
+        status = $result.status
+        observedAtUtc = $ObservedAtUtc
+    }
+    Add-SupervisionDiagnostic -State $State -Collection "lookupFailures" -Record $diagnostic
+    return $result
+}
+
+function Get-SupervisionLoopDecision {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [object]$Sample
+    )
+
+    if ($Sample.anySupervisedProcessAlive) {
+        return "continue"
+    }
+    if ($State.expectedMode -eq "expected-mitigated-child" -and
+        $null -eq $State.actualChild) {
+        if (-not $State.finalChildDiscoveryAttempted) {
+            return "final-child-discovery"
+        }
+        return "supervision-failure"
+    }
+
+    return "process-exited"
 }
 
 function Get-SupervisionSample {
@@ -656,6 +1065,16 @@ function Get-SupervisionSample {
     }
 
     $aggregate = Get-DeduplicatedSupervisionCounters -Trees @($trees)
+    foreach ($tree in $trees) {
+        foreach ($record in @($tree.records)) {
+            $identity = New-SupervisedProcessIdentity -ProcessRecord $record
+            Add-SupervisionKnownIdentity `
+                -State $State `
+                -Identity $identity `
+                -Source ([string]$tree.source) `
+                -ObservedAtUtc $ObservedAtUtc
+        }
+    }
     $actualRecord = $null
     $actualCounters = $null
     if ($State.actualEmulation.mode -eq "mitigated-child") {
@@ -698,6 +1117,7 @@ function Get-SupervisionSample {
     }
 
     return [pscustomobject][ordered]@{
+        expectedSupervisionMode = $State.expectedMode
         launcherAlive = [bool]$State.launcher.alive
         actualChildAlive = [bool]($null -ne $State.actualChild -and $State.actualChild.alive)
         anySupervisedProcessAlive = [bool]($State.launcher.alive -or
@@ -711,6 +1131,14 @@ function Get-SupervisionSample {
         actualEmulationCounters = $actualCounters
         actualChildIdentity = if ($null -eq $State.actualChild) { $null } else { $State.actualChild.identity }
         actualChildCounters = if ($null -eq $State.actualChild) { $null } else { $State.actualChild.lastCounters }
+        knownSupervisedIdentities = @($State.knownSupervisedIdentities | ForEach-Object {
+                [ordered]@{
+                    identity = $_.identity
+                    firstObservedAtUtc = $_.firstObservedAtUtc
+                    lastObservedAtUtc = $_.lastObservedAtUtc
+                    sources = @($_.sources)
+                }
+            })
         workingSetBytes = [UInt64]$aggregate.workingSetBytes
         privateBytes = [UInt64]$aggregate.privateBytes
         processCount = [int]$aggregate.processCount
@@ -824,6 +1252,138 @@ function Stop-ValidatedSupervisedProcess {
     $process.Kill()
 }
 
+function Stop-ValidatedSupervisedIdentityFallback {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$RecordedIdentity,
+        [scriptblock]$ProcessLookupAction,
+        [scriptblock]$StopProcessAction
+    )
+
+    if ($null -eq $ProcessLookupAction) {
+        $ProcessLookupAction = {
+            param([int]$ProcessId)
+            try {
+                Get-Process -Id $ProcessId -ErrorAction Stop
+            }
+            catch {
+                if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+                    return
+                }
+                throw "Fallback Get-Process lookup failed for recorded PID ${ProcessId}: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    $currentProcesses = @(& $ProcessLookupAction ([int]$RecordedIdentity.processId))
+    if ($currentProcesses.Count -eq 0) {
+        return [pscustomobject][ordered]@{
+            status = "already-exited"
+            processId = $RecordedIdentity.processId
+            identity = $RecordedIdentity
+            method = "fallback-individual"
+        }
+    }
+    if ($currentProcesses.Count -ne 1) {
+        throw "Fallback process lookup returned $($currentProcesses.Count) records for PID $($RecordedIdentity.processId)."
+    }
+
+    # This is the final validation immediately before the kill.  The fallback
+    # never searches by name and never treats a PID without its recorded start
+    # time as a durable target.
+    try {
+        $currentIdentity = New-SupervisedProcessIdentity -ProcessRecord $currentProcesses[0]
+    }
+    catch {
+        throw "Refusing to terminate PID $($RecordedIdentity.processId): current identity could not be confirmed ($($_.Exception.Message))."
+    }
+    $identityResult = Test-SupervisedProcessIdentity `
+        -RecordedIdentity $RecordedIdentity `
+        -ObservedProcess $currentProcesses[0]
+    if (-not $identityResult.matches) {
+        throw "Refusing to terminate PID $($RecordedIdentity.processId): current process identity changed ($($identityResult.reason))."
+    }
+
+    if ($null -ne $StopProcessAction) {
+        & $StopProcessAction $currentProcesses[0]
+    }
+    else {
+        $process = $currentProcesses[0]
+        if ($null -eq $process.PSObject.Methods["Kill"]) {
+            throw "Fallback process PID $($RecordedIdentity.processId) did not expose a kill operation."
+        }
+        $process.Kill()
+        if ($null -ne $process.PSObject.Methods["WaitForExit"]) {
+            [void]$process.WaitForExit(5000)
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        status = "terminated"
+        processId = $RecordedIdentity.processId
+        identity = $RecordedIdentity
+        method = "fallback-individual"
+    }
+}
+
+function Stop-SupervisedKnownIdentitiesFallback {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$State,
+        [Parameter(Mandatory = $true)]
+        [string]$Reason,
+        [Parameter(Mandatory = $true)]
+        [object[]]$Identities,
+        [scriptblock]$ProcessLookupAction,
+        [scriptblock]$StopProcessAction,
+        [bool]$DescendantEnumerationIncomplete = $true
+    )
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    $results = [System.Collections.Generic.List[object]]::new()
+    $failures = [System.Collections.Generic.List[string]]::new()
+    # The normal observation order is root to descendant.  Reverse it for
+    # fallback cleanup so a known descendant gets an independent attempt
+    # before its parent is terminated.
+    for ($index = $Identities.Count - 1; $index -ge 0; $index--) {
+        $identity = $Identities[$index]
+        if ($null -eq $identity -or -not $seen.Add([string]$identity.identityKey)) {
+            continue
+        }
+
+        $target = [ordered]@{
+            attemptedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+            reason = $Reason
+            method = "fallback-individual"
+            descendantEnumerationIncomplete = $DescendantEnumerationIncomplete
+            identity = $identity
+            processId = $identity.processId
+            status = $null
+            error = $null
+        }
+        try {
+            $result = Stop-ValidatedSupervisedIdentityFallback `
+                -RecordedIdentity $identity `
+                -ProcessLookupAction $ProcessLookupAction `
+                -StopProcessAction $StopProcessAction
+            $target.status = $result.status
+            [void]$results.Add($result)
+        }
+        catch {
+            $target.status = "failed"
+            $target.error = $_.Exception.Message
+            [void]$failures.Add("PID $($identity.processId): $($_.Exception.Message)")
+            [void]$State.cleanupFailures.Add($target)
+        }
+        [void]$State.cleanupTargets.Add($target)
+    }
+
+    return [pscustomobject][ordered]@{
+        results = @($results)
+        failures = @($failures)
+    }
+}
+
 function Stop-SupervisedProcessTree {
     param(
         [Parameter(Mandatory = $true)]
@@ -845,10 +1405,17 @@ function Stop-SupervisedProcessTree {
     $attempts = 0
     do {
         $attempts++
-        $records = @(& $InventoryAction)
-        $rootObservation = Get-SupervisedProcessRootObservation `
-            -Identity $RootIdentity `
-            -ProcessRecords $records
+        try {
+            $records = @(& $InventoryAction)
+            $rootObservation = Get-SupervisedProcessRootObservation `
+                -Identity $RootIdentity `
+                -ProcessRecords $records
+        }
+        catch {
+            throw [System.InvalidOperationException]::new(
+                "supervision-inventory-unavailable: $($_.Exception.Message)",
+                $_.Exception)
+        }
         if ($rootObservation.status -eq "absent") {
             return [pscustomobject][ordered]@{
                 status = "already-exited"
@@ -861,9 +1428,16 @@ function Stop-SupervisedProcessTree {
             throw "Refusing to terminate supervised PID $($RootIdentity.processId): $($rootObservation.mismatch)"
         }
 
-        $tree = @(Get-SupervisedProcessTreeRecords `
-                -RootIdentity $RootIdentity `
-                -ProcessRecords $records)
+        try {
+            $tree = @(Get-SupervisedProcessTreeRecords `
+                    -RootIdentity $RootIdentity `
+                    -ProcessRecords $records)
+        }
+        catch {
+            throw [System.InvalidOperationException]::new(
+                "supervision-inventory-unavailable: $($_.Exception.Message)",
+                $_.Exception)
+        }
         # Descendants are handled before the root so that a launcher cannot
         # disappear before the independently tracked child is considered.
         for ($index = $tree.Count - 1; $index -ge 0; $index--) {
@@ -873,10 +1447,17 @@ function Stop-SupervisedProcessTree {
                 -StopProcessAction $StopProcessAction
         }
 
-        $remaining = @(& $InventoryAction)
-        $remainingObservation = Get-SupervisedProcessRootObservation `
-            -Identity $RootIdentity `
-            -ProcessRecords $remaining
+        try {
+            $remaining = @(& $InventoryAction)
+            $remainingObservation = Get-SupervisedProcessRootObservation `
+                -Identity $RootIdentity `
+                -ProcessRecords $remaining
+        }
+        catch {
+            throw [System.InvalidOperationException]::new(
+                "supervision-inventory-unavailable: $($_.Exception.Message)",
+                $_.Exception)
+        }
         if ($remainingObservation.status -eq "absent") {
             return [pscustomobject][ordered]@{
                 status = "terminated"
@@ -904,6 +1485,7 @@ function Stop-SupervisedRoots {
         [string]$Reason,
         [scriptblock]$InventoryAction,
         [scriptblock]$StopProcessAction,
+        [scriptblock]$ProcessLookupAction,
         [scriptblock]$SleepAction,
         [int]$TimeoutMilliseconds = 10000
     )
@@ -916,6 +1498,7 @@ function Stop-SupervisedRoots {
     )
     $failures = [System.Collections.Generic.List[string]]::new()
     $results = [System.Collections.Generic.List[object]]::new()
+    $fallbackUsed = $false
     foreach ($identity in $identities) {
         if ($null -eq $identity) {
             continue
@@ -923,6 +1506,8 @@ function Stop-SupervisedRoots {
         $target = [ordered]@{
             attemptedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
             reason = $Reason
+            method = "tree-inventory"
+            descendantEnumerationIncomplete = $false
             identity = $identity
             processId = $identity.processId
             status = $null
@@ -939,12 +1524,64 @@ function Stop-SupervisedRoots {
             [void]$results.Add($result)
         }
         catch {
+            if ($_.Exception.Message -like "supervision-inventory-unavailable:*") {
+                $fallbackUsed = $true
+                $incompleteRecord = [ordered]@{
+                    attemptedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+                    reason = $Reason
+                    rootIdentity = $identity
+                    error = $_.Exception.Message
+                    knownIdentityCount = $State.knownSupervisedIdentities.Count
+                }
+                [void]$State.cleanupEnumerationIncomplete.Add($incompleteRecord)
+                $target.status = "fallback-individual"
+                $target.method = "tree-inventory-failed"
+                $target.descendantEnumerationIncomplete = $true
+                $target.error = $_.Exception.Message
+                [void]$State.cleanupTargets.Add($target)
+
+                $knownIdentities = @($State.knownSupervisedIdentities | ForEach-Object { $_.identity })
+                if ($knownIdentities.Count -eq 0) {
+                    $knownIdentities = @($identities | Where-Object { $null -ne $_ })
+                }
+                if ($knownIdentities.Count -eq 0) {
+                    $failure = "No individually known supervised identities were available for fallback cleanup."
+                    [void]$failures.Add($failure)
+                    [void]$State.cleanupFailures.Add([ordered]@{
+                            attemptedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+                            reason = $Reason
+                            method = "fallback-individual"
+                            descendantEnumerationIncomplete = $true
+                            identity = $null
+                            processId = $null
+                            status = "failed"
+                            error = $failure
+                        })
+                    break
+                }
+                $fallback = Stop-SupervisedKnownIdentitiesFallback `
+                    -State $State `
+                    -Reason $Reason `
+                    -Identities $knownIdentities `
+                    -ProcessLookupAction $ProcessLookupAction `
+                    -StopProcessAction $StopProcessAction
+                foreach ($fallbackResult in @($fallback.results)) {
+                    [void]$results.Add($fallbackResult)
+                }
+                foreach ($fallbackFailure in @($fallback.failures)) {
+                    [void]$failures.Add([string]$fallbackFailure)
+                }
+                break
+            }
+
             $target.status = "failed"
             $target.error = $_.Exception.Message
             [void]$failures.Add("PID $($identity.processId): $($_.Exception.Message)")
             [void]$State.cleanupFailures.Add($target)
         }
-        [void]$State.cleanupTargets.Add($target)
+        if (-not $fallbackUsed) {
+            [void]$State.cleanupTargets.Add($target)
+        }
     }
 
     if ($failures.Count -gt 0) {
