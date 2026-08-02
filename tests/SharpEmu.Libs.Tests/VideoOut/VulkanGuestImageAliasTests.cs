@@ -53,7 +53,6 @@ public sealed class VulkanGuestImageAliasTests
     }
 
     [Theory]
-    [InlineData(Format.R8Srgb, Format.R8Unorm)]
     [InlineData(Format.BC3SrgbBlock, Format.BC3UnormBlock)]
     public void CounterpartsOutsideTheViewClassTableAreNotAliased(
         Format existing,
@@ -66,6 +65,15 @@ public sealed class VulkanGuestImageAliasTests
             VulkanVideoPresenter.IsCompatibleGuestImageViewFormat(existing, requested));
         Assert.False(
             VulkanVideoPresenter.IsAliasableGuestImageFormat(existing, requested));
+    }
+
+    [Fact]
+    public void R8SrgbAndR8UnormShareOneCompatibilityClass()
+    {
+        Assert.True(
+            VulkanVideoPresenter.IsCompatibleGuestImageViewFormat(
+                Format.R8Srgb,
+                Format.R8Unorm));
     }
 
     [Fact]
