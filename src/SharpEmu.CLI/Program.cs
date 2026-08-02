@@ -3,6 +3,7 @@
 
 using SharpEmu.Core.Runtime;
 using SharpEmu.Core.Cpu;
+using SharpEmu.Core.Memory;
 using SharpEmu.GUI;
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
@@ -262,6 +263,17 @@ internal static partial class Program
             return 1;
         }
 
+        if (!TryGetGuestResidencyDiagnosticsPath(
+                args,
+                out var guestResidencyDiagnosticsPath,
+                out var guestResidencyDiagnosticsError))
+        {
+            Log.Error(
+                $"Invalid --guest-residency-diagnostics option: " +
+                guestResidencyDiagnosticsError);
+            return 1;
+        }
+
         MemoryDiagnosticsSession? memoryDiagnostics = null;
         if (memoryDiagnosticsPath is not null)
         {
@@ -277,6 +289,25 @@ internal static partial class Program
         }
 
         using var memoryDiagnosticsScope = memoryDiagnostics;
+        GuestResidencyDiagnosticsSession? guestResidencyDiagnostics = null;
+        if (guestResidencyDiagnosticsPath is not null)
+        {
+            try
+            {
+                guestResidencyDiagnostics = GuestResidencyDiagnosticsSession.Start(
+                    guestResidencyDiagnosticsPath);
+            }
+            catch (Exception exception)
+            {
+                Log.Error(
+                    $"Failed to start guest residency diagnostics at " +
+                    $"'{guestResidencyDiagnosticsPath}'.",
+                    exception);
+                return 1;
+            }
+        }
+
+        using var guestResidencyDiagnosticsScope = guestResidencyDiagnostics;
         if (!HostVideoHost.TryConfigureVideo(videoOptions))
         {
             Console.Error.WriteLine("[LOADER][ERROR] Video options cannot change while a presenter is active.");
@@ -1008,7 +1039,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--memory-diagnostics=<path>] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--log-level=<level>] [--log-file[=<path>]] [--memory-diagnostics=<path>] [--guest-residency-diagnostics=<path>] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--debug-server[=host:port]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1056,6 +1087,62 @@ internal static partial class Program
                 if (path is not null)
                 {
                     error = "--memory-diagnostics may be specified only once.";
+                    return false;
+                }
+
+                path = value;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryGetGuestResidencyDiagnosticsPath(
+        string[] args,
+        out string? path,
+        out string error)
+    {
+        path = null;
+        error = string.Empty;
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (string.Equals(
+                    argument,
+                    "--guest-residency-diagnostics",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                if (index + 1 >= args.Length ||
+                    string.IsNullOrWhiteSpace(args[index + 1]) ||
+                    args[index + 1].StartsWith("--", StringComparison.Ordinal))
+                {
+                    error = "--guest-residency-diagnostics requires a path.";
+                    return false;
+                }
+
+                if (path is not null)
+                {
+                    error = "--guest-residency-diagnostics may be specified only once.";
+                    return false;
+                }
+
+                path = args[++index];
+                continue;
+            }
+
+            const string prefix = "--guest-residency-diagnostics=";
+            if (argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var value = argument[prefix.Length..];
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    error = "--guest-residency-diagnostics requires a path.";
+                    return false;
+                }
+
+                if (path is not null)
+                {
+                    error = "--guest-residency-diagnostics may be specified only once.";
                     return false;
                 }
 
@@ -1232,7 +1319,27 @@ internal static partial class Program
                 continue;
             }
 
+            if (string.Equals(
+                    argument,
+                    "--guest-residency-diagnostics",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 < args.Length)
+                {
+                    i++;
+                }
+
+                continue;
+            }
+
             if (argument.StartsWith("--memory-diagnostics=", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (argument.StartsWith(
+                    "--guest-residency-diagnostics=",
+                    StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
