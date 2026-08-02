@@ -6,6 +6,14 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Media;
 
+internal readonly record struct MoviePresenterRejectionDiagnostic(
+    string Movie,
+    long MovieInstanceId,
+    long HostMovieGeneration,
+    long ActiveHostMovieGeneration,
+    long FrameSerial,
+    string Reason);
+
 /// <summary>
 /// Bounded, opt-in movie lifecycle diagnostics written to the existing JSONL
 /// memory-diagnostics stream. The default path is a short-circuiting set of
@@ -30,12 +38,15 @@ internal static class MovieDiagnostics
     private static bool _lastPresenterFrameAvailable;
     private static bool _lastPresenterPlaybackActive;
     private static long _lastPresenterInstanceId;
+    private static long _lastPresenterFrameGeneration;
+    private static long _lastPresenterActiveGeneration;
     private static string? _lastPresenterPath;
     private static readonly MovieDiagnosticRateLimiter PresenterPresentationLimiter =
         new();
     private static bool _hasPresenterPresentation;
     private static bool _lastPresenterPresentedHost;
     private static long _lastPresenterPresentedInstanceId;
+    private static long _lastPresenterPresentedGeneration;
     private static string? _lastPresenterPresentedPath;
     private static string _lastPresenterPresentedMovie = string.Empty;
 
@@ -129,6 +140,7 @@ internal static class MovieDiagnostics
     internal static void Attach(
         string path,
         long instanceId,
+        long hostGeneration,
         uint width,
         uint height,
         uint framesPerSecondNumerator,
@@ -144,6 +156,7 @@ internal static class MovieDiagnostics
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
+            hostMovieGeneration = hostGeneration,
             width,
             height,
             framesPerSecondNumerator,
@@ -155,8 +168,10 @@ internal static class MovieDiagnostics
     internal static void Reattach(
         string? previousPath,
         long previousInstanceId,
+        long previousGeneration,
         string nextPath,
-        long nextInstanceId)
+        long nextInstanceId,
+        long nextGeneration)
     {
         if (!TryReserveEvent())
         {
@@ -167,8 +182,10 @@ internal static class MovieDiagnostics
         {
             previousMovie = MovieIdentity(previousPath),
             previousMovieInstanceId = previousInstanceId,
+            previousHostMovieGeneration = previousGeneration,
             movie = MovieIdentity(nextPath),
             movieInstanceId = nextInstanceId,
+            hostMovieGeneration = nextGeneration,
         });
     }
 
@@ -241,6 +258,7 @@ internal static class MovieDiagnostics
     internal static void Complete(
         string path,
         long instanceId,
+        long hostGeneration,
         double wallSeconds,
         long frameIndex)
     {
@@ -253,12 +271,37 @@ internal static class MovieDiagnostics
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
+            hostMovieGeneration = hostGeneration,
             wallSeconds,
             frameIndex,
         });
     }
 
-    internal static void Stop(string path, long instanceId, string reason)
+    internal static void GenerationEnd(
+        string path,
+        long hostGeneration,
+        long instanceId,
+        string reason)
+    {
+        if (!TryReserveEvent())
+        {
+            return;
+        }
+
+        WriteReserved("generation-end", new
+        {
+            movie = MovieIdentity(path),
+            movieInstanceId = instanceId,
+            hostMovieGeneration = hostGeneration,
+            reason,
+        });
+    }
+
+    internal static void Stop(
+        string path,
+        long instanceId,
+        long hostGeneration,
+        string reason)
     {
         if (!TryReserveEvent())
         {
@@ -269,11 +312,16 @@ internal static class MovieDiagnostics
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
+            hostMovieGeneration = hostGeneration,
             reason,
         });
     }
 
-    internal static void Dispose(string path, long instanceId, string reason)
+    internal static void Dispose(
+        string path,
+        long instanceId,
+        long hostGeneration,
+        string reason)
     {
         if (!TryReserveEvent())
         {
@@ -284,6 +332,7 @@ internal static class MovieDiagnostics
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
+            hostMovieGeneration = hostGeneration,
             reason,
         });
     }
@@ -331,6 +380,8 @@ internal static class MovieDiagnostics
     internal static void PresenterPump(
         string? path,
         long instanceId,
+        long frameGeneration,
+        long activeGeneration,
         bool hostFrameAvailable,
         bool hostPlaybackActive,
         bool advanced,
@@ -360,6 +411,8 @@ internal static class MovieDiagnostics
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
+            hostMovieGeneration = frameGeneration,
+            activeHostMovieGeneration = activeGeneration,
             hostFrameAvailable,
             hostPlaybackActive,
             advanced,
@@ -372,6 +425,8 @@ internal static class MovieDiagnostics
     internal static void PresenterSelection(
         string? path,
         long instanceId,
+        long frameGeneration,
+        long activeGeneration,
         bool hostFrameAvailable,
         bool hostPlaybackActive,
         bool selectedHostMovie,
@@ -393,6 +448,8 @@ internal static class MovieDiagnostics
             _lastPresenterFrameAvailable != hostFrameAvailable ||
             _lastPresenterPlaybackActive != hostPlaybackActive ||
             _lastPresenterInstanceId != instanceId ||
+            _lastPresenterFrameGeneration != frameGeneration ||
+            _lastPresenterActiveGeneration != activeGeneration ||
             !string.Equals(_lastPresenterPath, path, StringComparison.Ordinal);
 
         var shouldEmit = changed ||
@@ -409,6 +466,8 @@ internal static class MovieDiagnostics
             {
                 movie,
                 movieInstanceId = instanceId,
+                hostMovieGeneration = frameGeneration,
+                activeHostMovieGeneration = activeGeneration,
                 hostFrameAvailable,
                 hostPlaybackActive,
                 selectedHostMovie,
@@ -429,12 +488,16 @@ internal static class MovieDiagnostics
         _lastPresenterFrameAvailable = hostFrameAvailable;
         _lastPresenterPlaybackActive = hostPlaybackActive;
         _lastPresenterInstanceId = instanceId;
+        _lastPresenterFrameGeneration = frameGeneration;
+        _lastPresenterActiveGeneration = activeGeneration;
         _lastPresenterPath = path;
     }
 
     internal static void PresenterPresentation(
         string? path,
         long instanceId,
+        long frameGeneration,
+        long activeGeneration,
         bool selectedHostMovie,
         bool hostPlaybackActive,
         long frameSerial,
@@ -450,6 +513,7 @@ internal static class MovieDiagnostics
         var changed = !_hasPresenterPresentation ||
             _lastPresenterPresentedHost != selectedHostMovie ||
             _lastPresenterPresentedInstanceId != instanceId ||
+            _lastPresenterPresentedGeneration != frameGeneration ||
             !string.Equals(_lastPresenterPresentedPath, path, StringComparison.Ordinal);
         var state = selectedHostMovie ? 1 : 0;
         var shouldEmit = changed ||
@@ -467,6 +531,7 @@ internal static class MovieDiagnostics
             {
                 movie = _lastPresenterPresentedMovie,
                 movieInstanceId = _lastPresenterPresentedInstanceId,
+                hostMovieGeneration = _lastPresenterPresentedGeneration,
                 reason = "presentation-changed",
             });
         }
@@ -483,6 +548,8 @@ internal static class MovieDiagnostics
             {
                 movie,
                 movieInstanceId = instanceId,
+                hostMovieGeneration = frameGeneration,
+                activeHostMovieGeneration = activeGeneration,
                 frameSerial,
             });
         }
@@ -499,6 +566,8 @@ internal static class MovieDiagnostics
             {
                 movie,
                 movieInstanceId = instanceId,
+                hostMovieGeneration = frameGeneration,
+                activeHostMovieGeneration = activeGeneration,
                 selectedHostMovie,
                 hostPlaybackActive,
                 frameSerial,
@@ -515,13 +584,79 @@ internal static class MovieDiagnostics
         _hasPresenterPresentation = true;
         _lastPresenterPresentedHost = selectedHostMovie;
         _lastPresenterPresentedInstanceId = instanceId;
+        _lastPresenterPresentedGeneration = frameGeneration;
         _lastPresenterPresentedPath = path;
         _lastPresenterPresentedMovie = movie ?? _lastPresenterPresentedMovie;
     }
 
+    internal static void PresenterInvalidation(
+        string? path,
+        long instanceId,
+        long frameGeneration,
+        long activeGeneration,
+        long frameSerial,
+        string reason)
+    {
+        if (!TryReserveEvent())
+        {
+            return;
+        }
+
+        WriteReserved("presenter-invalidation", new
+        {
+            movie = MovieIdentity(path),
+            movieInstanceId = instanceId,
+            hostMovieGeneration = frameGeneration,
+            activeHostMovieGeneration = activeGeneration,
+            frameSerial,
+            reason,
+        });
+    }
+
+    internal static void PresenterRejection(
+        string? path,
+        long instanceId,
+        long frameGeneration,
+        long activeGeneration,
+        long frameSerial,
+        string reason)
+    {
+        if (!TryReserveEvent())
+        {
+            return;
+        }
+
+        WriteReserved(
+            "presenter-rejection",
+            CreatePresenterRejectionDiagnostic(
+                path,
+                instanceId,
+                frameGeneration,
+                activeGeneration,
+                frameSerial,
+                reason));
+    }
+
+    internal static MoviePresenterRejectionDiagnostic CreatePresenterRejectionDiagnostic(
+        string? path,
+        long instanceId,
+        long frameGeneration,
+        long activeGeneration,
+        long frameSerial,
+        string reason) =>
+        new(
+            MovieIdentity(path),
+            instanceId,
+            frameGeneration,
+            activeGeneration,
+            frameSerial,
+            reason);
+
     internal static void PresenterUpload(
         string? path,
         long instanceId,
+        long frameGeneration,
+        long activeGeneration,
         long frameSerial,
         int plane)
     {
@@ -534,6 +669,8 @@ internal static class MovieDiagnostics
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
+            hostMovieGeneration = frameGeneration,
+            activeHostMovieGeneration = activeGeneration,
             frameSerial,
             plane,
         });
@@ -542,6 +679,8 @@ internal static class MovieDiagnostics
     internal static void PresenterShutdown(
         string? path,
         long instanceId,
+        long frameGeneration,
+        long activeGeneration,
         long frameSerial,
         bool hostPlaybackActive)
     {
@@ -574,6 +713,8 @@ internal static class MovieDiagnostics
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
+            hostMovieGeneration = frameGeneration,
+            activeHostMovieGeneration = activeGeneration,
             frameSerial,
             hostPlaybackActive,
         });
@@ -586,7 +727,19 @@ internal static class MovieDiagnostics
             return string.Empty;
         }
 
-        return Path.GetFileName(path);
+        // Guest paths can retain their Windows spelling when diagnostics are
+        // consumed on another host platform. Treat both separators as path
+        // boundaries so the bounded identity remains platform-neutral.
+        var lastSeparator = -1;
+        for (var index = 0; index < path.Length; index++)
+        {
+            if (path[index] is '/' or '\\')
+            {
+                lastSeparator = index;
+            }
+        }
+
+        return lastSeparator >= 0 ? path[(lastSeparator + 1)..] : path;
     }
 
     private static void WriteReserved(string eventName, object data)

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Tests.Diagnostics;
+using SharpEmu.Libs.Media;
 using SharpEmu.Libs.VideoOut;
 using Xunit;
 
@@ -120,6 +121,45 @@ public sealed class VulkanResourceLifetimeDiagnosticsTests
         var entry = Assert.Single(diagnostics.GetSnapshot().Entries);
         Assert.Equal("vulkan-device-teardown", entry.ActualDestructionReason);
         Assert.False(entry.Retained);
+        Assert.Equal(0, diagnostics.GetSnapshot().DeferredDestructionBytes);
+    }
+
+    [Fact]
+    public void GenerationInvalidationLeavesInFlightStorageDeferredUntilRetirement()
+    {
+        var tracker = new HostMovieGenerationTracker();
+        var generation = tracker.Activate();
+        var frame = new HostMovieFrameLifetime();
+        frame.Publish(generation);
+        Assert.True(tracker.TryBeginSubmission(
+            generation,
+            out var submission,
+            out var activeGeneration));
+        Assert.Equal(generation, activeGeneration);
+        Assert.NotNull(submission);
+        var diagnostics = new VulkanResourceLifetimeDiagnostics();
+        var resourceId = diagnostics.TrackCacheInsertion(
+            Descriptor,
+            guestWorkSequence: 1,
+            queue: "graphics",
+            insertionMilliseconds: 2,
+            imageMemoryBytes: 100,
+            stagingMemoryBytes: 40,
+            stagingMapped: false,
+            uploadRecorded: true);
+
+        diagnostics.RecordCacheRemoval(resourceId, "generation-invalidated", 3, 12);
+        diagnostics.RecordDeferredDestroy(resourceId, 12, 3);
+        // The command's submission reservation is released only after the
+        // queue accepts it. Logical invalidation then proceeds while storage
+        // remains deferred for the normal fence/timeline retirement.
+        submission!.Dispose();
+        Assert.True(tracker.Invalidate(generation));
+        Assert.True(frame.Invalidate(generation));
+        Assert.False(frame.IsEligible(tracker.ActiveGeneration));
+        Assert.Equal(140, diagnostics.GetSnapshot().DeferredDestructionBytes);
+
+        diagnostics.RecordActualDestroy(resourceId, 12, 4, "deferred-retire");
         Assert.Equal(0, diagnostics.GetSnapshot().DeferredDestructionBytes);
     }
 
