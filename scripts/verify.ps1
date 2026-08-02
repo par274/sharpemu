@@ -39,6 +39,7 @@ function Test-RepositoryInputs {
 function Invoke-FastLane {
     Invoke-Checked -Command "pwsh" -Arguments @("-NoProfile", "-File", (Join-Path $PSScriptRoot "test-compare-runs.ps1"))
     Invoke-Checked -Command "pwsh" -Arguments @("-NoProfile", "-File", (Join-Path $PSScriptRoot "test-run-target-memory-safety.ps1"))
+    Invoke-Checked -Command "pwsh" -Arguments @("-NoProfile", "-File", (Join-Path $PSScriptRoot "test-run-target-vmmap-threshold.ps1"))
     Invoke-Checked -Command "pwsh" -Arguments @("-NoProfile", "-File", (Join-Path $PSScriptRoot "test-run-target-vmmap-cleanup.ps1"))
     Invoke-Checked -Command "dotnet" -Arguments @("restore", (Join-Path $repositoryRoot "SharpEmu.slnx"))
     Invoke-Checked -Command "dotnet" -Arguments @("build", (Join-Path $repositoryRoot "SharpEmu.slnx"), "-c", "Release", "--no-restore")

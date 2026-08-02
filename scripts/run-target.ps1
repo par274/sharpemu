@@ -12,7 +12,15 @@ param(
     [string[]]$AdditionalArguments = @(),
     [string]$VmMapPath = "",
     [string]$VmMapOutputRoot = "C:\sharpemu-investigation\vmmap-captures",
-    [ValidateRange(1.0, 5.9)]
+    [ValidateScript({
+        if ([double]::IsNaN([double]$_) -or
+            [double]::IsInfinity([double]$_) -or
+            [double]$_ -lt 1.0) {
+            throw "VmMapNearCutoffGiB must be a finite value of at least 1.0 GiB."
+        }
+
+        return $true
+    })]
     [double]$VmMapNearCutoffGiB = 5.0,
     [ValidateSet("all", "near-cutoff")]
     [string]$VmMapCheckpointMode = "all"
