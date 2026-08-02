@@ -11,20 +11,20 @@ public sealed class AudioDiagnosticsTests
     [Fact]
     public void Signed48KHzStereoDeliveryReconcilesExactly()
     {
-        var accounting = new AudioSampleAccounting(bytesPerOutputFrame: 4);
+        var accounting = new AudioSampleAccounting(bytesPerStreamFrame: 4);
 
         accounting.RecordDecodedAndConverted(sourceFrames: 480, outputFrames: 480);
         accounting.RecordSubmission(bytes: 480 * 4, accepted: true);
         accounting.RecordDecodedAndConverted(sourceFrames: 480, outputFrames: 480);
         accounting.RecordSubmission(bytes: 480 * 4, accepted: true);
 
-        var snapshot = accounting.Snapshot(queuedOutputBytes: 480 * 4);
+        var snapshot = accounting.Snapshot(queuedInputBytes: 480 * 4);
 
         Assert.Equal(960, snapshot.DecodedSourceFrames);
         Assert.Equal(960, snapshot.ConvertedOutputFrames);
-        Assert.Equal(960, snapshot.SubmittedOutputFrames);
-        Assert.Equal(480, snapshot.QueuedOutputFrames);
-        Assert.Equal(480, snapshot.ConsumedOutputFrames);
+        Assert.Equal(960, snapshot.SubmittedInputFrames);
+        Assert.Equal(480, snapshot.QueuedInputFrames);
+        Assert.Equal(480, snapshot.DequeuedInputFrames);
         Assert.Equal(0, snapshot.FailedSubmissionFrames);
         Assert.Equal(0, snapshot.MissingOutputFrames);
         Assert.Equal(960, snapshot.ResamplerInputFrames);
@@ -32,22 +32,44 @@ public sealed class AudioDiagnosticsTests
     }
 
     [Fact]
+    public void Full48KHzStereoMovieTotalUsesExactInputFrameCount()
+    {
+        const long frames = 408_960;
+        const int bytesPerInputFrame = 2 * sizeof(short);
+        var accounting = new AudioSampleAccounting(bytesPerStreamFrame: bytesPerInputFrame);
+
+        accounting.RecordDecodedAndConverted(sourceFrames: frames, outputFrames: frames);
+        accounting.RecordSubmission(
+            bytes: checked((int)(frames * bytesPerInputFrame)),
+            accepted: true);
+
+        var snapshot = accounting.Snapshot(queuedInputBytes: 0);
+
+        Assert.Equal(frames, snapshot.DecodedSourceFrames);
+        Assert.Equal(frames, snapshot.ConvertedOutputFrames);
+        Assert.Equal(frames, snapshot.SubmittedInputFrames);
+        Assert.Equal(frames, snapshot.DequeuedInputFrames);
+        Assert.Equal(frames * bytesPerInputFrame, snapshot.SubmittedInputBytes);
+        Assert.Equal(0, snapshot.MissingOutputFrames);
+    }
+
+    [Fact]
     public void PartialAndFailedDeliveryPreservesByteRemainders()
     {
-        var accounting = new AudioSampleAccounting(bytesPerOutputFrame: 4);
+        var accounting = new AudioSampleAccounting(bytesPerStreamFrame: 4);
         accounting.RecordDecodedAndConverted(sourceFrames: 3, outputFrames: 3);
         accounting.RecordSubmission(bytes: 6, accepted: true);
         accounting.RecordSubmission(bytes: 6, accepted: false);
 
-        var snapshot = accounting.Snapshot(queuedOutputBytes: 2);
+        var snapshot = accounting.Snapshot(queuedInputBytes: 2);
 
         Assert.Equal(12, snapshot.ConvertedOutputBytes);
-        Assert.Equal(6, snapshot.SubmittedOutputBytes);
+        Assert.Equal(6, snapshot.SubmittedInputBytes);
         Assert.Equal(6, snapshot.FailedSubmissionBytes);
-        Assert.Equal(1, snapshot.SubmittedOutputFrames);
+        Assert.Equal(1, snapshot.SubmittedInputFrames);
         Assert.Equal(1, snapshot.FailedSubmissionFrames);
-        Assert.Equal(2, snapshot.QueuedOutputBytes);
-        Assert.Equal(4, snapshot.ConsumedOutputBytes);
+        Assert.Equal(2, snapshot.QueuedInputBytes);
+        Assert.Equal(4, snapshot.DequeuedInputBytes);
         Assert.Equal(6, snapshot.MissingOutputBytes);
         Assert.Equal(1, snapshot.MissingOutputFrames);
     }
@@ -55,30 +77,30 @@ public sealed class AudioDiagnosticsTests
     [Fact]
     public void EmptyDeliveryDoesNotInventSamples()
     {
-        var accounting = new AudioSampleAccounting(bytesPerOutputFrame: 4);
+        var accounting = new AudioSampleAccounting(bytesPerStreamFrame: 4);
 
         accounting.RecordSubmission(bytes: 0, accepted: true);
 
-        var snapshot = accounting.Snapshot(queuedOutputBytes: 0);
+        var snapshot = accounting.Snapshot(queuedInputBytes: 0);
 
-        Assert.Equal(0, snapshot.SubmittedOutputBytes);
-        Assert.Equal(0, snapshot.ConsumedOutputBytes);
+        Assert.Equal(0, snapshot.SubmittedInputBytes);
+        Assert.Equal(0, snapshot.DequeuedInputBytes);
         Assert.Equal(0, snapshot.MissingOutputBytes);
     }
 
     [Fact]
     public void ResamplingTotalsExposeTheMeasuredRatio()
     {
-        var accounting = new AudioSampleAccounting(bytesPerOutputFrame: 4);
+        var accounting = new AudioSampleAccounting(bytesPerStreamFrame: 4);
         accounting.RecordDecodedAndConverted(sourceFrames: 441, outputFrames: 480);
 
-        var snapshot = accounting.Snapshot(queuedOutputBytes: -1);
+        var snapshot = accounting.Snapshot(queuedInputBytes: -1);
 
         Assert.Equal(441, snapshot.ResamplerInputFrames);
         Assert.Equal(480, snapshot.ResamplerOutputFrames);
         Assert.Equal(480d / 441d, (double)snapshot.ResamplerOutputFrames /
             snapshot.ResamplerInputFrames, precision: 12);
-        Assert.Equal(-1, snapshot.ConsumedOutputFrames);
+        Assert.Equal(-1, snapshot.DequeuedInputFrames);
     }
 
     [Fact]
@@ -114,16 +136,16 @@ public sealed class AudioDiagnosticsTests
     [Fact]
     public void ResetAllowsARepeatedSessionToStartAtZero()
     {
-        var accounting = new AudioSampleAccounting(bytesPerOutputFrame: 4);
+        var accounting = new AudioSampleAccounting(bytesPerStreamFrame: 4);
         accounting.RecordDecodedAndConverted(48, 48);
         accounting.RecordSubmission(48 * 4, accepted: true);
 
         accounting.Reset();
-        var secondSession = accounting.Snapshot(queuedOutputBytes: 0);
+        var secondSession = accounting.Snapshot(queuedInputBytes: 0);
 
         Assert.Equal(0, secondSession.DecodedSourceFrames);
-        Assert.Equal(0, secondSession.SubmittedOutputFrames);
-        Assert.Equal(0, secondSession.ConsumedOutputFrames);
+        Assert.Equal(0, secondSession.SubmittedInputFrames);
+        Assert.Equal(0, secondSession.DequeuedInputFrames);
     }
 
     [Fact]
@@ -134,5 +156,25 @@ public sealed class AudioDiagnosticsTests
         Assert.True(budget.TryReserve());
         Assert.False(budget.TryReserve());
         Assert.False(budget.HasCapacity);
+    }
+
+    [Fact]
+    public void TraceWindowDoesNotResetCumulativeEmptyQueueObservations()
+    {
+        var counters = new AudioQueueObservationCounters();
+
+        counters.RecordDiagnosticObservation(queuedInputBytes: 0);
+        counters.RecordTraceSubmission(queuedInputBytes: 0);
+        counters.RecordDiagnosticObservation(queuedInputBytes: 0);
+        counters.RecordDiagnosticObservation(queuedInputBytes: 128);
+
+        Assert.Equal(2, counters.DiagnosticEmptyQueueObservations);
+        Assert.Equal(1, counters.TakeTraceWindowEmptyQueueObservations());
+        Assert.Equal(2, counters.DiagnosticEmptyQueueObservations);
+        Assert.Equal(0, counters.TakeTraceWindowEmptyQueueObservations());
+
+        counters.RecordDiagnosticObservation(queuedInputBytes: 0);
+
+        Assert.Equal(3, counters.DiagnosticEmptyQueueObservations);
     }
 }

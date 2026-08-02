@@ -115,7 +115,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private readonly int _streamId = Interlocked.Increment(ref _nextStreamId);
         private SDL_AudioStream* _stream;
         private bool _disposed;
-        private long _totalSubmittedBytes;
+        private long _totalSubmittedInputBytes;
         private string _diagnosticOwner = string.Empty;
         private string _diagnosticSource = string.Empty;
         private string _diagnosticPhase = "open";
@@ -133,7 +133,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private bool _queueIsEmpty;
         private long _clockReportAcceptedCount;
         private long _clockReportRejectedCount;
-        private double _lastStreamPlayedSeconds;
+        private double _lastEstimatedPlayedSeconds;
         private bool _hasDeviceState;
         private string _lastDeviceSignature = string.Empty;
         private long _deviceStateTransitionCount;
@@ -144,7 +144,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private long _submittedBytes;
         private long _blockedTicks;
         private long _overTargetSubmissions;
-        private long _emptyObservations;
+        private readonly AudioQueueObservationCounters? _queueObservationCounters;
         private int _minQueuedBytes = int.MaxValue;
         private int _maxQueuedBytes;
         private long _queuedByteSum;
@@ -165,6 +165,9 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             _diagnosticsEnabled = HostAudioDiagnostics.Enabled;
             _sampleAccounting = _diagnosticsEnabled
                 ? new AudioSampleAccounting(_bytesPerFrame)
+                : null;
+            _queueObservationCounters = _diagnosticsEnabled || _traceQueue
+                ? new AudioQueueObservationCounters()
                 : null;
             var spec = new SDL_AudioSpec
             {
@@ -278,20 +281,21 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 
                 if (submitted)
                 {
-                    // Everything handed over minus what the device still holds is
-                    // what the player has actually heard.
-                    _totalSubmittedBytes += pcm.Length;
+                    // This is only an estimate of input no longer queued in SDL's
+                    // input-format queue. SDL does not expose exact physical or
+                    // audible device consumption here.
+                    _totalSubmittedInputBytes += pcm.Length;
                     var bytesPerSecond = (double)_bytesPerFrame * _sampleRate;
                     if (bytesPerSecond > 0)
                     {
-                        var playedSeconds = Math.Max(
+                        var estimatedPlayedSeconds = Math.Max(
                             0,
-                            _totalSubmittedBytes - queued - pcm.Length) /
+                            _totalSubmittedInputBytes - queued - pcm.Length) /
                             bytesPerSecond;
-                        var reportAccepted = GuestAudioClock.Report(playedSeconds);
+                        var reportAccepted = GuestAudioClock.Report(estimatedPlayedSeconds);
                         if (_sampleAccounting is not null)
                         {
-                            _lastStreamPlayedSeconds = playedSeconds;
+                            _lastEstimatedPlayedSeconds = estimatedPlayedSeconds;
                             if (reportAccepted)
                             {
                                 _clockReportAcceptedCount++;
@@ -344,10 +348,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 _overTargetSubmissions++;
             }
 
-            if (queuedBytes == 0)
-            {
-                _emptyObservations++;
-            }
+            _queueObservationCounters!.RecordTraceSubmission(queuedBytes);
 
             var elapsedTicks = now - _windowStart;
             if (elapsedTicks < Stopwatch.Frequency)
@@ -367,13 +368,13 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 $"submits/s={_submissions / seconds:F0} " +
                 $"fill={_submittedBytes / seconds / bytesPerSecond * 100.0:F0}% " +
                 $"blocked={_blockedTicks * 100.0 / elapsedTicks:F0}% " +
-                $"empty={_emptyObservations} over_target={_overTargetSubmissions}");
+                $"empty={_queueObservationCounters!.TakeTraceWindowEmptyQueueObservations()} " +
+                $"over_target={_overTargetSubmissions}");
 
             _submissions = 0;
             _submittedBytes = 0;
             _blockedTicks = 0;
             _overTargetSubmissions = 0;
-            _emptyObservations = 0;
             _minQueuedBytes = int.MaxValue;
             _maxQueuedBytes = 0;
             _queuedByteSum = 0;
@@ -476,7 +477,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 
             if (queuedBytes == 0)
             {
-                _emptyObservations++;
+                _queueObservationCounters!.RecordDiagnosticObservation(queuedBytes);
                 if (!_queueIsEmpty)
                 {
                     _queueIsEmpty = true;
@@ -595,16 +596,17 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     ? -1
                     : queuedBytes / ((double)_bytesPerFrame * _sampleRate) * 1000.0,
                 ConvertedAvailableBytes = availableBytes,
-                SubmittedInputBytes = accountingSnapshot.SubmittedOutputBytes,
-                SubmittedInputFrames = accountingSnapshot.SubmittedOutputFrames,
-                ConsumedInputBytes = accountingSnapshot.ConsumedOutputBytes,
-                ConsumedInputFrames = accountingSnapshot.ConsumedOutputFrames,
+                SubmittedInputBytes = accountingSnapshot.SubmittedInputBytes,
+                SubmittedInputFrames = accountingSnapshot.SubmittedInputFrames,
+                DequeuedInputBytes = accountingSnapshot.DequeuedInputBytes,
+                DequeuedInputFrames = accountingSnapshot.DequeuedInputFrames,
                 FailedSubmissionBytes = accountingSnapshot.FailedSubmissionBytes,
                 FailedSubmissionFrames = accountingSnapshot.FailedSubmissionFrames,
                 SubmissionCount = _diagnosticSubmissionCount,
                 FailedSubmissionCount = _failedSubmissionCount,
                 OverTargetSubmissionCount = _overTargetSubmissionCount,
-                EmptyQueueObservations = _emptyObservations,
+                EmptyQueueObservations = _queueObservationCounters
+                    ?.DiagnosticEmptyQueueObservations ?? 0,
                 UnderrunCount = _underrunCount,
                 UnderrunDurationMilliseconds = underrunTicks * 1000.0 / Stopwatch.Frequency,
                 QueueQueryFailureCount = _queueQueryFailureCount,
@@ -627,7 +629,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 CallbackSuppliedFrames = 0,
                 ClockReportAcceptedCount = _clockReportAcceptedCount,
                 ClockReportRejectedCount = _clockReportRejectedCount,
-                LastStreamPlayedSeconds = _lastStreamPlayedSeconds,
+                LastEstimatedPlayedSeconds = _lastEstimatedPlayedSeconds,
                 GlobalGuestAudioClockSeconds = GuestAudioClock.PlayedSeconds,
             };
         }

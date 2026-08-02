@@ -10,19 +10,19 @@ namespace SharpEmu.HLE.Host;
 /// </summary>
 internal sealed class AudioSampleAccounting
 {
-    private readonly int _bytesPerOutputFrame;
+    private readonly int _bytesPerStreamFrame;
     private long _decodedSourceFrames;
     private long _convertedOutputFrames;
     private long _convertedOutputBytes;
-    private long _submittedOutputBytes;
+    private long _submittedInputBytes;
     private long _failedSubmissionBytes;
     private long _resamplerInputFrames;
     private long _resamplerOutputFrames;
 
-    internal AudioSampleAccounting(int bytesPerOutputFrame)
+    internal AudioSampleAccounting(int bytesPerStreamFrame)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytesPerOutputFrame);
-        _bytesPerOutputFrame = bytesPerOutputFrame;
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytesPerStreamFrame);
+        _bytesPerStreamFrame = bytesPerStreamFrame;
     }
 
     internal void RecordDecodedAndConverted(long sourceFrames, long outputFrames)
@@ -32,7 +32,7 @@ internal sealed class AudioSampleAccounting
         _decodedSourceFrames = checked(_decodedSourceFrames + sourceFrames);
         _convertedOutputFrames = checked(_convertedOutputFrames + outputFrames);
         _convertedOutputBytes = checked(
-            _convertedOutputBytes + outputFrames * (long)_bytesPerOutputFrame);
+            _convertedOutputBytes + outputFrames * (long)_bytesPerStreamFrame);
         _resamplerInputFrames = checked(_resamplerInputFrames + sourceFrames);
         _resamplerOutputFrames = checked(_resamplerOutputFrames + outputFrames);
     }
@@ -42,7 +42,7 @@ internal sealed class AudioSampleAccounting
         ArgumentOutOfRangeException.ThrowIfNegative(bytes);
         if (accepted)
         {
-            _submittedOutputBytes = checked(_submittedOutputBytes + bytes);
+            _submittedInputBytes = checked(_submittedInputBytes + bytes);
         }
         else
         {
@@ -50,37 +50,36 @@ internal sealed class AudioSampleAccounting
         }
     }
 
-    internal AudioSampleAccountingSnapshot Snapshot(long queuedOutputBytes)
+    internal AudioSampleAccountingSnapshot Snapshot(long queuedInputBytes)
     {
-        var consumedOutputBytes = queuedOutputBytes < 0
+        var dequeuedInputBytes = queuedInputBytes < 0
             ? -1
             : Math.Clamp(
-                _submittedOutputBytes - queuedOutputBytes,
+                _submittedInputBytes - queuedInputBytes,
                 0,
-                _submittedOutputBytes);
+                _submittedInputBytes);
         var missingOutputBytes = Math.Max(
-            0,
-            _convertedOutputBytes - _submittedOutputBytes);
+            0, _convertedOutputBytes - _submittedInputBytes);
 
         return new AudioSampleAccountingSnapshot
         {
-            BytesPerOutputFrame = _bytesPerOutputFrame,
+            BytesPerStreamFrame = _bytesPerStreamFrame,
             DecodedSourceFrames = _decodedSourceFrames,
             ConvertedOutputFrames = _convertedOutputFrames,
             ConvertedOutputBytes = _convertedOutputBytes,
-            SubmittedOutputFrames = _submittedOutputBytes / _bytesPerOutputFrame,
-            SubmittedOutputBytes = _submittedOutputBytes,
-            FailedSubmissionFrames = _failedSubmissionBytes / _bytesPerOutputFrame,
+            SubmittedInputFrames = _submittedInputBytes / _bytesPerStreamFrame,
+            SubmittedInputBytes = _submittedInputBytes,
+            FailedSubmissionFrames = _failedSubmissionBytes / _bytesPerStreamFrame,
             FailedSubmissionBytes = _failedSubmissionBytes,
-            QueuedOutputFrames = queuedOutputBytes < 0
+            QueuedInputFrames = queuedInputBytes < 0
                 ? -1
-                : queuedOutputBytes / _bytesPerOutputFrame,
-            QueuedOutputBytes = queuedOutputBytes,
-            ConsumedOutputFrames = consumedOutputBytes < 0
+                : queuedInputBytes / _bytesPerStreamFrame,
+            QueuedInputBytes = queuedInputBytes,
+            DequeuedInputFrames = dequeuedInputBytes < 0
                 ? -1
-                : consumedOutputBytes / _bytesPerOutputFrame,
-            ConsumedOutputBytes = consumedOutputBytes,
-            MissingOutputFrames = missingOutputBytes / _bytesPerOutputFrame,
+                : dequeuedInputBytes / _bytesPerStreamFrame,
+            DequeuedInputBytes = dequeuedInputBytes,
+            MissingOutputFrames = missingOutputBytes / _bytesPerStreamFrame,
             MissingOutputBytes = missingOutputBytes,
             ResamplerInputFrames = _resamplerInputFrames,
             ResamplerOutputFrames = _resamplerOutputFrames,
@@ -92,7 +91,7 @@ internal sealed class AudioSampleAccounting
         _decodedSourceFrames = 0;
         _convertedOutputFrames = 0;
         _convertedOutputBytes = 0;
-        _submittedOutputBytes = 0;
+        _submittedInputBytes = 0;
         _failedSubmissionBytes = 0;
         _resamplerInputFrames = 0;
         _resamplerOutputFrames = 0;
@@ -119,18 +118,18 @@ internal sealed class AudioSampleAccounting
 
 internal readonly record struct AudioSampleAccountingSnapshot
 {
-    internal int BytesPerOutputFrame { get; init; }
+    internal int BytesPerStreamFrame { get; init; }
     internal long DecodedSourceFrames { get; init; }
     internal long ConvertedOutputFrames { get; init; }
     internal long ConvertedOutputBytes { get; init; }
-    internal long SubmittedOutputFrames { get; init; }
-    internal long SubmittedOutputBytes { get; init; }
+    internal long SubmittedInputFrames { get; init; }
+    internal long SubmittedInputBytes { get; init; }
     internal long FailedSubmissionFrames { get; init; }
     internal long FailedSubmissionBytes { get; init; }
-    internal long QueuedOutputFrames { get; init; }
-    internal long QueuedOutputBytes { get; init; }
-    internal long ConsumedOutputFrames { get; init; }
-    internal long ConsumedOutputBytes { get; init; }
+    internal long QueuedInputFrames { get; init; }
+    internal long QueuedInputBytes { get; init; }
+    internal long DequeuedInputFrames { get; init; }
+    internal long DequeuedInputBytes { get; init; }
     internal long MissingOutputFrames { get; init; }
     internal long MissingOutputBytes { get; init; }
     internal long ResamplerInputFrames { get; init; }

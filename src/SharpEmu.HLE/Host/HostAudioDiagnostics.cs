@@ -301,8 +301,17 @@ public readonly record struct HostAudioStreamDiagnosticSnapshot
     public int ConvertedAvailableBytes { get; init; }
     public long SubmittedInputBytes { get; init; }
     public long SubmittedInputFrames { get; init; }
-    public long ConsumedInputBytes { get; init; }
-    public long ConsumedInputFrames { get; init; }
+    /// <summary>
+    /// Input bytes no longer reported in SDL's input queue. This is not a
+    /// physical-device or audible-playback count.
+    /// </summary>
+    public long DequeuedInputBytes { get; init; }
+
+    /// <summary>
+    /// Input frames no longer reported in SDL's input queue. This is not a
+    /// physical-device or audible-playback count.
+    /// </summary>
+    public long DequeuedInputFrames { get; init; }
     public long FailedSubmissionBytes { get; init; }
     public long FailedSubmissionFrames { get; init; }
     public long SubmissionCount { get; init; }
@@ -327,7 +336,7 @@ public readonly record struct HostAudioStreamDiagnosticSnapshot
     public int CallbackSuppliedFrames { get; init; }
     public long ClockReportAcceptedCount { get; init; }
     public long ClockReportRejectedCount { get; init; }
-    public double LastStreamPlayedSeconds { get; init; }
+    public double LastEstimatedPlayedSeconds { get; init; }
     public double GlobalGuestAudioClockSeconds { get; init; }
 }
 

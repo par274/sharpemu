@@ -282,9 +282,9 @@ The final movie totals reconciled identically in both diagnostic runs:
 | --- | ---: | --- |
 | Source audio frames decoded | 408,960 | FFmpeg audio frames, source 48 kHz |
 | Converted output frames | 408,960 | `swr_convert` output; 1.0000 ratio |
-| Submitted output frames | 408,960 | 1,635,840 bytes at 4 bytes/frame |
+| Submitted input frames | 408,960 | 1,635,840 bytes at 4 bytes/frame accepted by SDL |
 | Failed/unsubmitted frames | 0 | No SDL `PutAudioStreamData` failure and no converted output left unsubmitted |
-| Consumed frames at final snapshot | 408,960 | Queue and converted-available bytes both zero at disposal |
+| Dequeued input frames at final snapshot | 408,960 | Submitted input minus SDL-reported queued input; not physical playback |
 | Missing output frames | 0 | Converted output equals accepted submission |
 | Source audio time | 8.520000 s | `408,960 / 48,000` |
 | Last source timestamp | 8.48 s | FFmpeg audio-frame PTS observed |
@@ -293,14 +293,20 @@ The source asset is 8.500 s at 30 fps; the audio packet stream contributes
 8.520 s of 48 kHz samples. The movie completed once at frame 254 after
 13.896 s and 14.124 s of movie wall playback in the two diagnostic runs. The
 audio data was not stretched by a sample-count or resampling error: all source
-samples were converted, submitted, and consumed, but delivery was separated
-by host-time gaps. The final stream snapshots showed zero queued input and zero
-converted-available bytes, so the end-of-stream reconciliation is exact.
+samples were converted and accepted for submission, with no converted frames
+lost or rejected. At the final snapshot SDL reported zero queued input bytes
+and zero converted-available bytes. This proves that no pending data remained
+visible at those two SDL stream boundaries. It does not prove exact
+physical-device playback or that every frame was audible. `GuestAudioClock` is
+an estimate derived from accepted input minus SDL input-queue depth, not a
+direct measurement of samples heard by the user.
 
 The separate guest stream was the slow clock frontier. In run 2, the final
-AudioOut2 primary snapshot had a 10.667 ms queue, 2,912,000 submitted frames,
-2,911,488 consumed frames, 2,121 underruns, and 22.573 s accumulated empty
-time. The movie stream had 11 underruns and 12.650 s accumulated empty time;
+AudioOut2 primary snapshot had a 10.667 ms queue, 2,912,000 submitted input
+frames, 2,911,488 dequeued input frames, 2,121 underruns, and 22.573 s
+accumulated empty time. The dequeued count is SDL input-queue arithmetic, not
+a physical-device or audible-playback count. The movie stream had 11 underruns
+and 12.650 s accumulated empty time;
 the classic AudioOut stream had a 58 ms queue, one underrun, and 0.19 s of
 accumulated empty time. Queue caps were never exceeded and no stream recorded
 an over-target enqueue.
@@ -311,7 +317,10 @@ The interpretation uses the current official SDL3 and .NET contracts recorded
 in [`docs/SOURCES.md`](SOURCES.md): SDL reports stream queued bytes and
 converted availability separately, exposes stream/device formats and device
 identity, and a null callback selects push-mode delivery; SDL's frequency ratio
-of 1.0 is normal-rate conversion. `Stopwatch.GetTimestamp` and
+of 1.0 is normal-rate conversion. `SDL_GetAudioStreamQueued` reports input-format
+bytes still queued for conversion, while `SDL_GetAudioStreamAvailable` reports
+converted output available. Neither reports all device or hardware buffering.
+`Stopwatch.GetTimestamp` and
 `Stopwatch.GetElapsedTime` provide the host monotonic correlation used by the
 events. These API contracts do not identify the title's intended guest/movie
 clock owner.
@@ -339,9 +348,10 @@ The two diagnostic runs had no no-default-device warning and still reproduced
 the movie's empty queue and stretched completion. In the earlier warning-bearing
 run `20260801T061920689Z-c129d0f-trial-01`, every warning was explicitly
 `AudioOut2 primary backend unavailable: ... No default audio device available`.
-The movie stream was not the warning owner. The present evidence therefore
-rules out the warnings as the cause of this movie underrun; it does not rule
-out a separate AudioOut2 fallback effect in warning-bearing runs.
+The movie stream was not the warning owner. The present evidence proves that
+the warnings are not required to reproduce the movie-stream underrun. It does
+not establish that an AudioOut2 fallback in a warning-bearing run cannot
+contribute to that run's behavior.
 
 #### Unresolved questions and falsifiers
 
@@ -394,8 +404,8 @@ target completion shift relative to the clean control is a sensitivity signal,
 not an isolated instrumentation-overhead measurement; the broad memory
 diagnostic stream and physical-headroom stop prevent that claim.
 
-Focused diagnostics tests passed 8/8. The Fast lane passed all six runner and
-memory regressions and all 841 solution tests. `git diff --check` passed. The
+Focused diagnostics tests passed 10/10. The Fast lane passed all six runner and
+memory regressions and all 843 solution tests. `git diff --check` passed. The
 shader lane was not run because this investigation changes no shader or GPU
 semantics.
 

@@ -6,13 +6,15 @@ using System.Diagnostics;
 namespace SharpEmu.HLE.Host;
 
 /// <summary>
-/// How much guest audio the host device has actually played, in seconds.
+/// Estimated guest audio progress, in seconds.
 ///
-/// This is the only clock in the emulator that advances at the rate the player
-/// hears. Wall clock runs ahead of it whenever the guest cannot feed the device
-/// (the stream underruns and the missing time is never played), so anything
-/// that has to stay in step with the guest's audio — host-decoded video being
-/// the case that matters — has to follow this rather than <see cref="Stopwatch"/>.
+/// The estimate is derived from accepted input submitted to an SDL audio stream
+/// minus the input-format bytes still queued for conversion. SDL queue state
+/// does not expose all conversion, device, or hardware buffering, so this is
+/// not a direct measurement of samples physically played or heard by the user.
+/// Wall clock may run ahead of it when the guest cannot feed the device, so
+/// host-decoded video can use this estimate as a diagnostic timeline without
+/// treating it as a hardware playback measurement.
 ///
 /// Reported per stream and kept as the furthest-along value: the guest's ports
 /// all carry one mix, and the leading port is the one whose position the
@@ -23,7 +25,7 @@ public static class GuestAudioClock
     private static long _playedMicroseconds;
     private static long _lastAdvanceTimestamp;
 
-    /// <summary>Seconds of guest audio the device has played. Monotonic.</summary>
+    /// <summary>Monotonic seconds of estimated guest audio progress.</summary>
     public static double PlayedSeconds =>
         Interlocked.Read(ref _playedMicroseconds) / 1_000_000.0;
 
