@@ -30,3 +30,6 @@ Reaching a later screen or increasing frame rate does not complete a milestone w
 ## First investigation
 
 Reproduce and characterize native memory growth during the v1.004 startup route. Run at least three comparable trials, distinguish managed, native, driver, and Vulkan ownership, and produce evidence before changing behavior. The known upstream discussion is [sharpemu/sharpemu#639](https://github.com/sharpemu/sharpemu/issues/639).
+
+The startup movie timing and presentation boundary is recorded in
+[`docs/STARTUP_MOVIE_TEMPORAL_BOUNDARY.md`](STARTUP_MOVIE_TEMPORAL_BOUNDARY.md).

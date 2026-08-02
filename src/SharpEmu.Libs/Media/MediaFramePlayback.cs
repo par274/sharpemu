@@ -29,6 +29,7 @@ internal sealed class MediaFramePlayback : IDisposable
 
     private readonly object _gate = new();
     private readonly IMediaFrameDecoder _decoder;
+    private readonly long _diagnosticMovieInstanceId;
     private readonly Queue<byte[]> _freeBuffers = new();
     private readonly Queue<DecodedFrame> _decodedFrames = new();
     private readonly Thread _decoderThread;
@@ -39,15 +40,23 @@ internal sealed class MediaFramePlayback : IDisposable
     private long _playbackStartTimestamp;
     private double _audioStartSeconds;
     private long _lastSkewTraceTimestamp;
+    private long _diagnosticFramesAdvanced;
+    private long _diagnosticFramesHeld;
+    private long _diagnosticFramesSkipped;
+    private long _diagnosticFramesRetired;
+    private long _diagnosticFramesDiscarded;
     private bool _playbackClockStarted;
     private bool _decoderCompleted;
     private bool _stopRequested;
     private bool _finished;
     private int _disposed;
 
-    internal MediaFramePlayback(IMediaFrameDecoder decoder)
+    internal MediaFramePlayback(
+        IMediaFrameDecoder decoder,
+        long diagnosticMovieInstanceId = 0)
     {
         _decoder = decoder;
+        _diagnosticMovieInstanceId = diagnosticMovieInstanceId;
         Width = decoder.Width;
         Height = decoder.Height;
         FramesPerSecondNumerator = decoder.FramesPerSecondNumerator;
@@ -143,6 +152,12 @@ internal sealed class MediaFramePlayback : IDisposable
                 _playbackStartTimestamp = Stopwatch.GetTimestamp();
                 _audioStartSeconds = GuestAudioClock.PlayedSeconds;
                 _playbackClockStarted = true;
+                MovieDiagnostics.Start(
+                    _diagnosticMovieInstanceId,
+                    _audioStartSeconds,
+                    GuestAudioClock.PlayedSeconds,
+                    GuestAudioClock.IsRunning,
+                    _followGuestAudioClock);
             }
 
             var elapsedSeconds = CurrentPlaybackSecondsLocked();
@@ -155,6 +170,10 @@ internal sealed class MediaFramePlayback : IDisposable
                 if (replacement is { } skipped)
                 {
                     _freeBuffers.Enqueue(skipped.Pixels);
+                    if (MovieDiagnostics.Enabled)
+                    {
+                        _diagnosticFramesSkipped++;
+                    }
                 }
                 replacement = _decodedFrames.Dequeue();
             }
@@ -169,6 +188,10 @@ internal sealed class MediaFramePlayback : IDisposable
                 _currentFrame = next.Pixels;
                 _currentFrameIndex = next.Index;
                 advanced = true;
+                if (MovieDiagnostics.Enabled)
+                {
+                    _diagnosticFramesRetired++;
+                }
                 Monitor.PulseAll(_gate);
             }
 
@@ -184,6 +207,17 @@ internal sealed class MediaFramePlayback : IDisposable
             }
 
             pixels = _currentFrame;
+            if (MovieDiagnostics.Enabled)
+            {
+                if (advanced)
+                {
+                    _diagnosticFramesAdvanced++;
+                }
+                else
+                {
+                    _diagnosticFramesHeld++;
+                }
+            }
             return true;
         }
     }
@@ -234,7 +268,8 @@ internal sealed class MediaFramePlayback : IDisposable
     /// </summary>
     private void TraceClockSkewLocked()
     {
-        if (!_traceClockSkew || !_playbackClockStarted)
+        if ((!_traceClockSkew && !MovieDiagnostics.Enabled) ||
+            !_playbackClockStarted)
         {
             return;
         }
@@ -249,11 +284,39 @@ internal sealed class MediaFramePlayback : IDisposable
         _lastSkewTraceTimestamp = now;
         var wallSeconds = Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds;
         var audioSeconds = GuestAudioClock.PlayedSeconds - _audioStartSeconds;
-        Console.Error.WriteLine(
-            $"[PERF][MOVIE] wall_s={wallSeconds:F2} audio_s={audioSeconds:F2} " +
-            $"playback_s={CurrentPlaybackSecondsLocked():F2} " +
-            $"skew_s={wallSeconds - audioSeconds:F2} frame={_currentFrameIndex} " +
-            $"audio_running={GuestAudioClock.IsRunning}");
+        var selectedPlaybackSeconds = CurrentPlaybackSecondsLocked();
+        var targetFrameIndex = CurrentTargetFrameIndexLocked();
+        var audioRunning = GuestAudioClock.IsRunning;
+        if (_traceClockSkew)
+        {
+            Console.Error.WriteLine(
+                $"[PERF][MOVIE] wall_s={wallSeconds:F2} audio_s={audioSeconds:F2} " +
+                $"playback_s={selectedPlaybackSeconds:F2} " +
+                $"skew_s={wallSeconds - audioSeconds:F2} frame={_currentFrameIndex} " +
+                $"audio_running={audioRunning}");
+        }
+
+        MovieDiagnostics.Clock(
+            _diagnosticMovieInstanceId,
+            wallSeconds,
+            audioSeconds,
+            selectedPlaybackSeconds,
+            audioRunning,
+            _followGuestAudioClock,
+            _currentFrameIndex,
+            targetFrameIndex,
+            _nextDecodedFrameIndex,
+            _decodedFrames.Count,
+            _diagnosticFramesAdvanced,
+            _diagnosticFramesHeld,
+            _diagnosticFramesSkipped,
+            _diagnosticFramesRetired,
+            _diagnosticFramesDiscarded);
+        _diagnosticFramesAdvanced = 0;
+        _diagnosticFramesHeld = 0;
+        _diagnosticFramesSkipped = 0;
+        _diagnosticFramesRetired = 0;
+        _diagnosticFramesDiscarded = 0;
     }
 
     /// <summary>
@@ -319,6 +382,10 @@ internal sealed class MediaFramePlayback : IDisposable
                                _decodedFrames.Peek().Index <= targetFrameIndex)
                         {
                             _freeBuffers.Enqueue(_decodedFrames.Dequeue().Pixels);
+                            if (MovieDiagnostics.Enabled)
+                            {
+                                _diagnosticFramesDiscarded++;
+                            }
                         }
                     }
 

@@ -3566,6 +3566,7 @@ internal static unsafe class VulkanVideoPresenter
         private long _hostMovieLumaUploadedFrameSerial = -1;
         private long _hostMovieChromaUploadedFrameSerial = -1;
         private string? _hostMovieFramePath;
+        private long _hostMovieFrameInstanceId;
         private ulong _hostMovieLumaTextureAddress;
         private ulong _hostMovieChromaTextureAddress;
         private uint _hostMovieLumaDstSelect;
@@ -4476,6 +4477,14 @@ internal static unsafe class VulkanVideoPresenter
             }
             finally
             {
+                if (MovieDiagnostics.Enabled)
+                {
+                    MovieDiagnostics.PresenterShutdown(
+                        _hostMovieFramePath,
+                        _hostMovieFrameInstanceId,
+                        _hostMovieFrameSerial,
+                        HostMovieBridge.IsHostPlaybackActive);
+                }
                 try
                 {
                     _memoryDiagnosticsProvider?.Dispose();
@@ -7984,6 +7993,20 @@ internal static unsafe class VulkanVideoPresenter
                 }
 
                 var hostMovieTextures = FindHostMovieTextureBindings(draw.Textures);
+                if (MovieDiagnostics.Enabled)
+                {
+                    MovieDiagnostics.PresenterSelection(
+                        _hostMovieFramePath,
+                        _hostMovieFrameInstanceId,
+                        _hostMovieFramePixels is not null,
+                        HostMovieBridge.IsHostPlaybackActive,
+                        hostMovieTextures.Luma >= 0 && hostMovieTextures.Chroma >= 0,
+                        _hostMovieFrameSerial,
+                        _hostMovieLumaUploadedFrameSerial,
+                        _hostMovieChromaUploadedFrameSerial,
+                        hostMovieTextures.Luma,
+                        hostMovieTextures.Chroma);
+                }
                 for (var index = 0; index < draw.Textures.Count; index++)
                 {
                     var texture = draw.Textures[index];
@@ -8870,8 +8893,21 @@ internal static unsafe class VulkanVideoPresenter
                     out var height,
                     out var advanced,
                     out var frameSerial,
-                    out var hostPath))
+                    out var hostPath,
+                    out var movieInstanceId))
             {
+                if (MovieDiagnostics.Enabled)
+                {
+                    MovieDiagnostics.PresenterPump(
+                        _hostMovieFramePath,
+                        _hostMovieFrameInstanceId,
+                        _hostMovieFramePixels is not null,
+                        HostMovieBridge.IsHostPlaybackActive,
+                        false,
+                        _hostMovieFrameSerial,
+                        _hostMovieFrameWidth,
+                        _hostMovieFrameHeight);
+                }
                 // Keep the last decoded image until a replacement arrives.
                 // Movie sessions are queued asynchronously; clearing here
                 // exposes the guest decoder's neutral surfaces between the
@@ -8903,6 +8939,19 @@ internal static unsafe class VulkanVideoPresenter
             _hostMovieFrameWidth = width;
             _hostMovieFrameHeight = height;
             _hostMovieFrameSerial = frameSerial;
+            _hostMovieFrameInstanceId = movieInstanceId;
+            if (MovieDiagnostics.Enabled)
+            {
+                MovieDiagnostics.PresenterPump(
+                    _hostMovieFramePath,
+                    _hostMovieFrameInstanceId,
+                    true,
+                    HostMovieBridge.IsHostPlaybackActive,
+                    advanced,
+                    _hostMovieFrameSerial,
+                    _hostMovieFrameWidth,
+                    _hostMovieFrameHeight);
+            }
         }
 
         private readonly record struct HostMovieTextureBindings(int Luma, int Chroma)
@@ -16178,6 +16227,39 @@ internal static unsafe class VulkanVideoPresenter
                 FlushBatchedGuestCommands();
             }
 
+            var presentedHostMovie = false;
+            var presentedHostMovieFrameSerial = -1L;
+            if (translatedResources is not null && MovieDiagnostics.Enabled)
+            {
+                foreach (var texture in translatedResources.Textures)
+                {
+                    if (!texture.IsHostMovie)
+                    {
+                        continue;
+                    }
+
+                    presentedHostMovie = true;
+                    if (texture.HostMoviePlane == 0)
+                    {
+                        presentedHostMovieFrameSerial = texture.HostMovieFrameSerial;
+                        break;
+                    }
+                }
+            }
+            if (MovieDiagnostics.Enabled)
+            {
+                MovieDiagnostics.PresenterPresentation(
+                    _hostMovieFramePath,
+                    _hostMovieFrameInstanceId,
+                    presentedHostMovie,
+                    HostMovieBridge.IsHostPlaybackActive,
+                    presentedHostMovieFrameSerial,
+                    presentation.Sequence,
+                    presentation.TranslatedDraw is not null
+                        ? "translated"
+                        : presentation.DrawKind.ToString());
+            }
+
             uint imageIndex;
             Result acquireResult;
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Acquire))
@@ -16948,11 +17030,21 @@ internal static unsafe class VulkanVideoPresenter
                     {
                         _hostMovieImageInitialized = true;
                         _hostMovieLumaUploadedFrameSerial = texture.HostMovieFrameSerial;
+                        MovieDiagnostics.PresenterUpload(
+                            _hostMovieFramePath,
+                            _hostMovieFrameInstanceId,
+                            texture.HostMovieFrameSerial,
+                            plane: 0);
                     }
                     else if (texture.HostMoviePlane == 1)
                     {
                         _hostMovieChromaImageInitialized = true;
                         _hostMovieChromaUploadedFrameSerial = texture.HostMovieFrameSerial;
+                        MovieDiagnostics.PresenterUpload(
+                            _hostMovieFramePath,
+                            _hostMovieFrameInstanceId,
+                            texture.HostMovieFrameSerial,
+                            plane: 1);
                     }
                 }
             }
