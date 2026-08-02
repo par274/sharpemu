@@ -102,23 +102,48 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 
     private static int _nextStreamId;
 
-    private sealed class AudioStream : IHostAudioStream
+    private sealed class AudioStream : IHostAudioStream, IHostAudioStreamDiagnostics
     {
         private readonly object _gate = new();
         private readonly int _maximumQueuedBytes;
         private readonly int _bytesPerFrame;
         private readonly uint _sampleRate;
+        private readonly int _channels;
+        private readonly SDL_AudioFormat _inputFormat;
+        private readonly bool _diagnosticsEnabled;
+        private readonly AudioSampleAccounting? _sampleAccounting;
         private readonly int _streamId = Interlocked.Increment(ref _nextStreamId);
         private SDL_AudioStream* _stream;
         private bool _disposed;
         private long _totalSubmittedBytes;
+        private string _diagnosticOwner = string.Empty;
+        private string _diagnosticSource = string.Empty;
+        private string _diagnosticPhase = "open";
+        private long _diagnosticMovieInstanceId;
+        private long _diagnosticHostMovieGeneration;
+        private bool _diagnosticOpenRecorded;
+        private long _nextDiagnosticTimestamp;
+        private long _failedSubmissionCount;
+        private long _overTargetSubmissionCount;
+        private long _queueQueryFailureCount;
+        private long _diagnosticSubmissionCount;
+        private long _underrunCount;
+        private long _underrunTicks;
+        private long _emptySinceTimestamp;
+        private bool _queueIsEmpty;
+        private long _clockReportAcceptedCount;
+        private long _clockReportRejectedCount;
+        private double _lastStreamPlayedSeconds;
+        private bool _hasDeviceState;
+        private string _lastDeviceSignature = string.Empty;
+        private long _deviceStateTransitionCount;
 
         // Queue diagnostics for the current report window.
         private long _windowStart = Stopwatch.GetTimestamp();
         private long _submissions;
         private long _submittedBytes;
         private long _blockedTicks;
-        private long _drops;
+        private long _overTargetSubmissions;
         private long _emptyObservations;
         private int _minQueuedBytes = int.MaxValue;
         private int _maxQueuedBytes;
@@ -133,11 +158,17 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             var bytesPerSample = format == HostPcmFormat.Float32 ? sizeof(float) : sizeof(short);
             _bytesPerFrame = channels * bytesPerSample;
             _sampleRate = sampleRate;
+            _channels = channels;
+            _inputFormat = format == HostPcmFormat.Float32
+                ? SDL_AudioFormat.SDL_AUDIO_F32LE
+                : SDL_AudioFormat.SDL_AUDIO_S16LE;
+            _diagnosticsEnabled = HostAudioDiagnostics.Enabled;
+            _sampleAccounting = _diagnosticsEnabled
+                ? new AudioSampleAccounting(_bytesPerFrame)
+                : null;
             var spec = new SDL_AudioSpec
             {
-                format = format == HostPcmFormat.Float32
-                    ? SDL_AudioFormat.SDL_AUDIO_F32LE
-                    : SDL_AudioFormat.SDL_AUDIO_S16LE,
+                format = _inputFormat,
                 channels = checked((byte)channels),
                 freq = checked((int)sampleRate),
             };
@@ -174,9 +205,13 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     }
 
                     var bytesPerSecond = (double)_bytesPerFrame * _sampleRate;
+                    var queuedBytes = ReadQueuedBytesLocked();
+                    ObserveQueueLocked(queuedBytes, Stopwatch.GetTimestamp());
                     return bytesPerSecond <= 0
                         ? -1
-                        : (int)(SDL_GetAudioStreamQueued(_stream) / bytesPerSecond * 1000.0);
+                        : queuedBytes < 0
+                            ? -1
+                            : (int)(queuedBytes / bytesPerSecond * 1000.0);
                 }
             }
         }
@@ -188,6 +223,8 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 return true;
             }
 
+            HostAudioStreamDiagnosticSnapshot? diagnosticSnapshot = null;
+            var submitted = false;
             lock (_gate)
             {
                 if (_disposed || _stream is null)
@@ -198,9 +235,10 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 var blockStart = Stopwatch.GetTimestamp();
                 var deadline = blockStart +
                                (Stopwatch.Frequency * MaximumWaitMilliseconds / 1_000);
-                int queued;
+                var queued = ReadQueuedBytesLocked();
+                ObserveQueueLocked(queued, blockStart);
                 var overrun = false;
-                while ((queued = SDL_GetAudioStreamQueued(_stream)) > _maximumQueuedBytes)
+                while (queued > _maximumQueuedBytes)
                 {
                     if (Stopwatch.GetTimestamp() >= deadline)
                     {
@@ -213,13 +251,29 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     }
 
                     Thread.Sleep(1);
+                    queued = ReadQueuedBytesLocked();
+                    ObserveQueueLocked(queued, Stopwatch.GetTimestamp());
                 }
 
-                RecordSubmission(queued, blockStart, dropped: overrun, bytes: pcm.Length);
-                bool submitted;
+                RecordSubmission(queued, blockStart, overTarget: overrun, bytes: pcm.Length);
                 fixed (byte* data = pcm)
                 {
                     submitted = SDL_PutAudioStreamData(_stream, (nint)data, pcm.Length);
+                }
+
+                if (_sampleAccounting is not null)
+                {
+                    _sampleAccounting?.RecordSubmission(pcm.Length, submitted);
+                    _diagnosticSubmissionCount++;
+                    if (!submitted)
+                    {
+                        _failedSubmissionCount++;
+                    }
+
+                    if (overrun)
+                    {
+                        _overTargetSubmissionCount++;
+                    }
                 }
 
                 if (submitted)
@@ -230,13 +284,38 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     var bytesPerSecond = (double)_bytesPerFrame * _sampleRate;
                     if (bytesPerSecond > 0)
                     {
-                        GuestAudioClock.Report(
-                            Math.Max(0, _totalSubmittedBytes - queued - pcm.Length) / bytesPerSecond);
+                        var playedSeconds = Math.Max(
+                            0,
+                            _totalSubmittedBytes - queued - pcm.Length) /
+                            bytesPerSecond;
+                        var reportAccepted = GuestAudioClock.Report(playedSeconds);
+                        if (_sampleAccounting is not null)
+                        {
+                            _lastStreamPlayedSeconds = playedSeconds;
+                            if (reportAccepted)
+                            {
+                                _clockReportAcceptedCount++;
+                            }
+                            else
+                            {
+                                _clockReportRejectedCount++;
+                            }
+                        }
                     }
                 }
 
-                return submitted;
+                if (ShouldCaptureDiagnosticLocked(Stopwatch.GetTimestamp()))
+                {
+                    diagnosticSnapshot = CaptureDiagnosticSnapshotLocked();
+                }
             }
+
+            if (diagnosticSnapshot is { } snapshot)
+            {
+                HostAudioDiagnostics.RecordStreamSummary(snapshot);
+            }
+
+            return submitted;
         }
 
         /// <summary>
@@ -246,7 +325,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         /// of zero is a genuine underrun, which is what a crackle sounds like.
         /// Caller holds <see cref="_gate"/>.
         /// </summary>
-        private void RecordSubmission(int queuedBytes, long blockStart, bool dropped, int bytes)
+        private void RecordSubmission(int queuedBytes, long blockStart, bool overTarget, int bytes)
         {
             if (!_traceQueue)
             {
@@ -260,9 +339,9 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             _queuedByteSum += queuedBytes;
             _minQueuedBytes = Math.Min(_minQueuedBytes, queuedBytes);
             _maxQueuedBytes = Math.Max(_maxQueuedBytes, queuedBytes);
-            if (dropped)
+            if (overTarget)
             {
-                _drops++;
+                _overTargetSubmissions++;
             }
 
             if (queuedBytes == 0)
@@ -288,16 +367,269 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 $"submits/s={_submissions / seconds:F0} " +
                 $"fill={_submittedBytes / seconds / bytesPerSecond * 100.0:F0}% " +
                 $"blocked={_blockedTicks * 100.0 / elapsedTicks:F0}% " +
-                $"empty={_emptyObservations} drops={_drops}");
+                $"empty={_emptyObservations} over_target={_overTargetSubmissions}");
 
             _submissions = 0;
             _submittedBytes = 0;
             _blockedTicks = 0;
-            _drops = 0;
+            _overTargetSubmissions = 0;
             _emptyObservations = 0;
             _minQueuedBytes = int.MaxValue;
             _maxQueuedBytes = 0;
             _queuedByteSum = 0;
+        }
+
+        public void SetDiagnosticContext(
+            string owner,
+            string source,
+            long movieInstanceId,
+            long hostMovieGeneration)
+        {
+            if (!_diagnosticsEnabled || !HostAudioDiagnostics.Enabled)
+            {
+                return;
+            }
+
+            HostAudioStreamDiagnosticSnapshot? snapshot = null;
+            lock (_gate)
+            {
+                if (_disposed || _stream is null)
+                {
+                    return;
+                }
+
+                _diagnosticOwner = owner;
+                _diagnosticSource = HostAudioDiagnostics.Identity(source);
+                _diagnosticMovieInstanceId = movieInstanceId;
+                _diagnosticHostMovieGeneration = hostMovieGeneration;
+                if (!_diagnosticOpenRecorded)
+                {
+                    _diagnosticOpenRecorded = true;
+                    snapshot = CaptureDiagnosticSnapshotLocked();
+                }
+            }
+
+            if (snapshot is { } opened)
+            {
+                HostAudioDiagnostics.RecordStreamOpen(opened);
+            }
+        }
+
+        public void SetDiagnosticPhase(string phase)
+        {
+            if (!_diagnosticsEnabled || !HostAudioDiagnostics.Enabled)
+            {
+                return;
+            }
+
+            HostAudioStreamDiagnosticSnapshot? snapshot = null;
+            lock (_gate)
+            {
+                if (_disposed || _stream is null ||
+                    string.Equals(_diagnosticPhase, phase, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                _diagnosticPhase = phase;
+                snapshot = CaptureDiagnosticSnapshotLocked();
+            }
+
+            if (snapshot is { } phaseSnapshot)
+            {
+                HostAudioDiagnostics.RecordStreamPhase(phaseSnapshot);
+            }
+        }
+
+        public HostAudioStreamDiagnosticSnapshot GetDiagnosticSnapshot()
+        {
+            if (!_diagnosticsEnabled || !HostAudioDiagnostics.Enabled)
+            {
+                return default;
+            }
+
+            lock (_gate)
+            {
+                return _disposed || _stream is null
+                    ? default
+                    : CaptureDiagnosticSnapshotLocked();
+            }
+        }
+
+        private int ReadQueuedBytesLocked()
+        {
+            var queuedBytes = SDL_GetAudioStreamQueued(_stream);
+            if (queuedBytes < 0 && _sampleAccounting is not null)
+            {
+                _queueQueryFailureCount++;
+            }
+
+            return queuedBytes;
+        }
+
+        private void ObserveQueueLocked(int queuedBytes, long timestamp)
+        {
+            if (_sampleAccounting is null)
+            {
+                return;
+            }
+
+            if (queuedBytes == 0)
+            {
+                _emptyObservations++;
+                if (!_queueIsEmpty)
+                {
+                    _queueIsEmpty = true;
+                    _underrunCount++;
+                    _emptySinceTimestamp = timestamp;
+                }
+            }
+            else if (queuedBytes > 0 && _queueIsEmpty)
+            {
+                _queueIsEmpty = false;
+                _underrunTicks += Math.Max(0, timestamp - _emptySinceTimestamp);
+                _emptySinceTimestamp = 0;
+            }
+        }
+
+        private bool ShouldCaptureDiagnosticLocked(long timestamp)
+        {
+            if (!_diagnosticsEnabled || !HostAudioDiagnostics.Enabled)
+            {
+                return false;
+            }
+
+            if (_nextDiagnosticTimestamp != 0 &&
+                timestamp < _nextDiagnosticTimestamp)
+            {
+                return false;
+            }
+
+            _nextDiagnosticTimestamp = timestamp + Stopwatch.Frequency;
+            return true;
+        }
+
+        private HostAudioStreamDiagnosticSnapshot CaptureDiagnosticSnapshotLocked()
+        {
+            var queuedBytes = ReadQueuedBytesLocked();
+            var availableBytes = SDL_GetAudioStreamAvailable(_stream);
+            var deviceId = SDL_GetAudioStreamDevice(_stream);
+            var deviceIdValue = unchecked((uint)deviceId);
+            var deviceName = deviceIdValue == 0
+                ? string.Empty
+                : SDL_GetAudioDeviceName(deviceId) ?? string.Empty;
+            var devicePaused = deviceIdValue != 0 && SDL_AudioDevicePaused(deviceId);
+            var deviceSpec = default(SDL_AudioSpec);
+            var deviceBufferFrames = 0;
+            var hasDeviceFormat = deviceIdValue != 0 &&
+                                  SDL_GetAudioDeviceFormat(
+                                      deviceId,
+                                      &deviceSpec,
+                                      &deviceBufferFrames);
+            var inputSpec = default(SDL_AudioSpec);
+            var outputSpec = default(SDL_AudioSpec);
+            var hasStreamFormat = SDL_GetAudioStreamFormat(
+                _stream,
+                &inputSpec,
+                &outputSpec);
+            var streamFrequencyRatio = SDL_GetAudioStreamFrequencyRatio(_stream);
+            var accounting = _sampleAccounting?.Snapshot(queuedBytes);
+            var accountingSnapshot = accounting ?? default;
+            var now = Stopwatch.GetTimestamp();
+            var deviceSignature = string.Concat(
+                deviceIdValue,
+                ":",
+                deviceName,
+                ":",
+                devicePaused,
+                ":",
+                hasDeviceFormat ? deviceSpec.freq : 0,
+                ":",
+                hasDeviceFormat ? deviceSpec.channels : 0,
+                ":",
+                hasDeviceFormat ? deviceSpec.format.ToString() : string.Empty);
+            if (!_hasDeviceState ||
+                !string.Equals(_lastDeviceSignature, deviceSignature, StringComparison.Ordinal))
+            {
+                _hasDeviceState = true;
+                _lastDeviceSignature = deviceSignature;
+                _deviceStateTransitionCount++;
+            }
+
+            var underrunTicks = _underrunTicks;
+            if (_queueIsEmpty && _emptySinceTimestamp != 0)
+            {
+                underrunTicks += Math.Max(0, now - _emptySinceTimestamp);
+            }
+
+            return new HostAudioStreamDiagnosticSnapshot
+            {
+                StreamId = _streamId,
+                Owner = _diagnosticOwner,
+                Source = _diagnosticSource,
+                MovieInstanceId = _diagnosticMovieInstanceId,
+                HostMovieGeneration = _diagnosticHostMovieGeneration,
+                Phase = _diagnosticPhase,
+                InputSampleRate = _sampleRate,
+                InputChannels = _channels,
+                InputBytesPerFrame = _bytesPerFrame,
+                StreamInputFrequency = hasStreamFormat ? inputSpec.freq : 0,
+                StreamInputChannels = hasStreamFormat ? inputSpec.channels : 0,
+                StreamInputFormat = hasStreamFormat
+                    ? inputSpec.format.ToString()
+                    : _inputFormat.ToString(),
+                StreamOutputFrequency = hasStreamFormat ? outputSpec.freq : 0,
+                StreamOutputChannels = hasStreamFormat ? outputSpec.channels : 0,
+                StreamOutputFormat = hasStreamFormat
+                    ? outputSpec.format.ToString()
+                    : string.Empty,
+                MaximumQueuedBytes = _maximumQueuedBytes,
+                MaximumQueuedFrames = _maximumQueuedBytes / _bytesPerFrame,
+                MaximumQueuedMilliseconds = _maximumQueuedBytes /
+                    ((double)_bytesPerFrame * _sampleRate) * 1000.0,
+                QueuedInputBytes = queuedBytes,
+                QueuedInputFrames = queuedBytes < 0
+                    ? -1
+                    : queuedBytes / _bytesPerFrame,
+                QueuedInputMilliseconds = queuedBytes < 0
+                    ? -1
+                    : queuedBytes / ((double)_bytesPerFrame * _sampleRate) * 1000.0,
+                ConvertedAvailableBytes = availableBytes,
+                SubmittedInputBytes = accountingSnapshot.SubmittedOutputBytes,
+                SubmittedInputFrames = accountingSnapshot.SubmittedOutputFrames,
+                ConsumedInputBytes = accountingSnapshot.ConsumedOutputBytes,
+                ConsumedInputFrames = accountingSnapshot.ConsumedOutputFrames,
+                FailedSubmissionBytes = accountingSnapshot.FailedSubmissionBytes,
+                FailedSubmissionFrames = accountingSnapshot.FailedSubmissionFrames,
+                SubmissionCount = _diagnosticSubmissionCount,
+                FailedSubmissionCount = _failedSubmissionCount,
+                OverTargetSubmissionCount = _overTargetSubmissionCount,
+                EmptyQueueObservations = _emptyObservations,
+                UnderrunCount = _underrunCount,
+                UnderrunDurationMilliseconds = underrunTicks * 1000.0 / Stopwatch.Frequency,
+                QueueQueryFailureCount = _queueQueryFailureCount,
+                DeviceId = deviceIdValue,
+                DeviceName = deviceName,
+                DeviceState = deviceIdValue == 0
+                    ? "unavailable"
+                    : devicePaused
+                        ? "paused"
+                        : "running",
+                DevicePaused = devicePaused,
+                DeviceFrequency = hasDeviceFormat ? deviceSpec.freq : 0,
+                DeviceChannels = hasDeviceFormat ? deviceSpec.channels : 0,
+                DeviceFormat = hasDeviceFormat ? deviceSpec.format.ToString() : string.Empty,
+                DeviceBufferFrames = hasDeviceFormat ? deviceBufferFrames : 0,
+                DeviceStateTransitionCount = _deviceStateTransitionCount,
+                StreamFrequencyRatio = streamFrequencyRatio,
+                CallbackAvailable = false,
+                CallbackRequestedFrames = 0,
+                CallbackSuppliedFrames = 0,
+                ClockReportAcceptedCount = _clockReportAcceptedCount,
+                ClockReportRejectedCount = _clockReportRejectedCount,
+                LastStreamPlayedSeconds = _lastStreamPlayedSeconds,
+                GlobalGuestAudioClockSeconds = GuestAudioClock.PlayedSeconds,
+            };
         }
 
         private static double ToMilliseconds(int bytes, double bytesPerSecond) =>
@@ -305,11 +637,18 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 
         public void Dispose()
         {
+            HostAudioStreamDiagnosticSnapshot? diagnosticSnapshot = null;
             lock (_gate)
             {
                 if (_disposed)
                 {
                     return;
+                }
+
+                if (_diagnosticsEnabled && HostAudioDiagnostics.Enabled && _stream is not null)
+                {
+                    _diagnosticPhase = "disposed";
+                    diagnosticSnapshot = CaptureDiagnosticSnapshotLocked();
                 }
 
                 _disposed = true;
@@ -319,6 +658,11 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     SDL_DestroyAudioStream(_stream);
                     _stream = null;
                 }
+            }
+
+            if (diagnosticSnapshot is { } snapshot)
+            {
+                HostAudioDiagnostics.RecordStreamSummary(snapshot);
             }
         }
     }

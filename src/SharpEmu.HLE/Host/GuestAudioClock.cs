@@ -42,11 +42,11 @@ public static class GuestAudioClock
         }
     }
 
-    public static void Report(double playedSeconds)
+    public static bool Report(double playedSeconds)
     {
         if (double.IsNaN(playedSeconds) || playedSeconds < 0)
         {
-            return;
+            return false;
         }
 
         var microseconds = (long)(playedSeconds * 1_000_000.0);
@@ -60,10 +60,12 @@ public static class GuestAudioClock
             if (seen == current)
             {
                 Interlocked.Exchange(ref _lastAdvanceTimestamp, Stopwatch.GetTimestamp());
-                return;
+                return true;
             }
 
             current = seen;
         }
+
+        return false;
     }
 }
