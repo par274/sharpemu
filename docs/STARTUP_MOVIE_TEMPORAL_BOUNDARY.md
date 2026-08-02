@@ -5,13 +5,36 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Startup movie temporal boundary
 
-Status: experiment-only finding. This change adds authored state-machine tests
-and this contract record. It does not change retail decoder, audio, clock, or
-presenter behavior.
+Status: cumulative target finding with the stale-generation correction
+implemented, audio/timing ownership attributed, and the next timing design
+evaluated through authored experiments. This PR changes no retail decoder,
+audio, clock, presenter, or runner behavior.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
 PlayStation’s proprietary internal implementation.
+
+## Evidence provenance
+
+The consequential identifiers for the earlier target findings are:
+
+- Target: `PPSA01341`, Europe, version `1.004.000`.
+- Target eboot SHA-256:
+  `22ED8843917CB16438B7B780998E408321F5CEBE79DD10F388AE59CFCA588306`.
+- PR #18 control run:
+  `20260802T220619684Z-a7ee8a4-trial-01`.
+- PR #18 diagnostic runs:
+  `20260802T221008090Z-a7ee8a4-trial-01` and
+  `20260802T221703483Z-a7ee8a4-trial-01`.
+- Diagnostic Release executable SHA-256:
+  `FAA5F39B1A1395873DE5577770671421FF0A955DB0CADD716A7EC4C7280DAF47`.
+- PR #17 implemented host-generation invalidation at completion, guest close,
+  replacement, and shutdown. Attended validation showed the former stale-black
+  interval became grey; the remaining grey transition is a separate unresolved
+  output boundary.
+
+Raw target assets, traces, logs, manifests, source samples, movie fingerprints,
+and target paths remain outside Git.
 
 ## Established target evidence
 
@@ -54,6 +77,10 @@ The experiment is test-only in
 `MovieTimelineExperiment.cs`. It uses no retail content, FFmpeg-generated file,
 sleep, or wall-clock assertion. The timeline tests advance `FakeMonotonicTime`
 explicitly.
+
+This is not a parallel media architecture. Once production behavior is
+implemented and production-facing tests cover the distinct contracts, remove or
+collapse test-only model code that no longer protects a separate contract.
 
 The primary authored packet schedule is:
 
@@ -287,44 +314,38 @@ The next implementation must preserve all of these invariants:
 9. Diagnostics-disabled paths short-circuit before payload construction,
    formatting, event locking, or per-event accounting.
 
-## Implementation-ready next change
+## Selected design and remaining prerequisites
 
-This PR intentionally does not make this change. The next reviewed change
-should be limited to the host movie boundary:
+The selected mechanism is bounded compressed-video packet deferral within one
+demux context. The selected clock model is a generation-owned movie-local
+timeline: movie audio supplies only that movie's local progress, audio-less or
+failed playback uses the defined local fallback, and unrelated
+`GuestAudioClock` values are never inputs.
 
-1. Add one small internal decoder capability, separate from the existing frame
-   destination method, that lets `MediaFramePlayback` request audio/input pump
-   progress without supplying a video destination. Non-FFmpeg decoders retain
-   the current wait behavior.
-2. In `FfmpegVideoDecoder`, add a bounded compressed-video packet queue. On a
-   no-destination pump, consume audio packets immediately, retain video packets
-   with owned `AVPacket` references, and return a distinct backpressure result
-   when the packet or byte cap is full. Drain the oldest deferred packet before
-   reading later video packets when a destination becomes available.
-3. Keep decoded ownership at five buffers. Do not add a second decoded-frame
-   queue. Add synthetic tests for packet order, both bounds, full-boundary
-   backpressure, exact buffer reuse, EOF drain, audio failure, replacement, and
-   disposal before enabling the path for retail movies.
-4. Replace the movie's read of global `GuestAudioClock` with a generation-owned
-   movie timeline. Feed it only the movie stream's local audio-progress estimate
-   or the explicit no-audio/failure fallback. Keep `GuestAudioClock` unchanged
-   for unrelated guest audio.
-5. Make attach, pause, skip, complete, close, replacement, and disposal create
-   or terminate the timeline identity atomically with the existing host movie
-   generation. A same-path attach must clear all prior timeline state.
-6. Add explicit audio state transitions for unavailable, running, temporary
-   underrun, permanent failure, and normal audio end. The normal-end behavior
-   must use the anchored fallback if video still has work to present.
-7. Preserve the diagnostics short circuit and add no target-specific override.
-   Validate the implementation with the authored suite before any controlled
-   target run.
+The authored two-packet/eight-byte bound proves the ownership, ordering,
+backpressure, EOF, failure, replacement, and disposal behavior only. It is not a
+production packet-count or byte-cap value.
 
-The packet-count and byte-cap values are deliberately one small measured design
-choice, not a hidden unbounded fallback. This experiment proves the behavior at
-two packets/eight authored bytes; the next change must choose and record a finite
-production byte cap from a lawful packet-size trace before enabling retail
-behavior. If one packet is enough for the trace, use one. If not, increase only
-to the smallest cap that preserves the observed interleave.
+Production implementation requires these prerequisites first:
+
+1. Measure a lawful target packet-size/interleave trace and choose finite
+   compressed-video packet and byte caps from that evidence. A full bound must
+   apply backpressure; it must not become an unbounded queue or silently drop
+   input.
+2. Define the movie-local audio state/progress seam using only the movie's host
+   stream. It must not consume unrelated `AudioOut` or `AudioOut2` clock values.
+3. Define explicit decoder/device states for temporary underrun, normal audio
+   end, unavailable audio, and permanent failure. The transition must use those
+   states, not a timeout guess.
+4. Then implement the smallest host-movie change: a no-destination audio/input
+   pump capability, bounded referenced compressed-video packets, exact five
+   buffer ownership, generation-owned clock lifecycle, and production-facing
+   tests for the authored contracts.
+
+The next task is therefore implementation preparation plus implementation, not a
+fully specified patch that can be written without further measurement. This PR
+does not implement retail behavior, measure target packets, or choose the
+production cap.
 
 ## Remaining uncertainty
 
