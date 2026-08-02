@@ -3514,6 +3514,11 @@ internal static unsafe class VulkanVideoPresenter
         private bool[] _frameFencePending = [];
         private ulong[] _frameTimelines = [];
         private TranslatedDrawResources?[] _frameTranslatedResources = [];
+        // A translated presentation is not in a fence-owned frame slot until
+        // QueueSubmit succeeds. Keep the unsubmitted owner visible so an
+        // exceptional shutdown can release its generation reservation and
+        // staging resources without touching submitted work.
+        private TranslatedDrawResources? _unsubmittedPresentationResources;
         private GuestImageResource?[] _frameGuestImageVersions = [];
         private int _currentFrameSlot;
         // Monotonic submission/completion counters across every queue submit
@@ -3777,6 +3782,13 @@ internal static unsafe class VulkanVideoPresenter
             public GuestRasterState Raster = GuestRasterState.Default;
             public GuestDepthState Depth = GuestDepthState.Default;
             public bool HasDepthAttachment;
+            // A host-movie submission reservation is held from the final
+            // resource decision through QueueSubmit. It is null for ordinary
+            // guest draws and after a successful submission.
+            public HostMovieGenerationTracker.HostMovieGenerationSubmission?
+                HostMovieSubmission;
+            public long HostMovieSelectionActiveGeneration;
+            public bool HostMovieSelectionPlaybackActive;
             // Layout keys are needed twice per draw (pipeline lookup and
             // descriptor-layout lookup); cache the built strings.
             public string? ResourceLayoutKey;
@@ -5946,6 +5958,8 @@ internal static unsafe class VulkanVideoPresenter
         private int _batchDrawCount;
         private readonly List<TranslatedDrawResources> _batchResources = new();
         private readonly List<GuestImageResource> _batchTraceImages = new();
+        private HostMovieGenerationTracker.HostMovieGenerationSubmission?
+            _batchHostMovieSubmission;
 
         // Consecutive draws into the same target stay inside one render pass:
         // on MoltenVK every render pass is a Metal render encoder, and one
@@ -6017,10 +6031,10 @@ internal static unsafe class VulkanVideoPresenter
                 return;
             }
 
-            CloseOpenTranslatedRenderPass();
             _batchOpen = false;
             try
             {
+                CloseOpenTranslatedRenderPass();
                 Check(_vk.EndCommandBuffer(_batchCommandBuffer), "vkEndCommandBuffer(batch)");
                 SubmitGuestCommandBuffer(
                     _batchCommandBuffer,
@@ -6061,12 +6075,56 @@ internal static unsafe class VulkanVideoPresenter
             }
             finally
             {
+                ReleaseBatchedHostMovieSubmissionLease();
                 _batchResources.Clear();
                 _batchTraceImages.Clear();
                 _batchRetireBuffers.Clear();
                 _batchRetireDetile.Clear();
                 _diagnosticBatchTextureResourceIds?.Clear();
                 _batchCommandBuffer = default;
+            }
+        }
+
+        private void ReleaseBatchedHostMovieSubmissionLease()
+        {
+            if (_batchHostMovieSubmission is not { } submission)
+            {
+                return;
+            }
+
+            _batchHostMovieSubmission = null;
+            submission.Dispose();
+        }
+
+        private static void ReleaseHostMovieSubmissionLease(
+            TranslatedDrawResources? resources)
+        {
+            if (resources?.HostMovieSubmission is not { } submission)
+            {
+                return;
+            }
+
+            resources.HostMovieSubmission = null;
+            submission.Dispose();
+        }
+
+        private static void ReleaseHostMovieSubmissionLeases(
+            IReadOnlyList<TranslatedDrawResources> resources,
+            IReadOnlyList<TranslatedDrawResources>? referencedResources)
+        {
+            foreach (var resource in resources)
+            {
+                ReleaseHostMovieSubmissionLease(resource);
+            }
+
+            if (referencedResources is null)
+            {
+                return;
+            }
+
+            foreach (var resource in referencedResources)
+            {
+                ReleaseHostMovieSubmissionLease(resource);
             }
         }
 
@@ -6102,9 +6160,15 @@ internal static unsafe class VulkanVideoPresenter
             }
             catch
             {
+                ReleaseHostMovieSubmissionLeases(resources, referencedResources);
                 ReleaseGuestFence(fence, needsReset: false);
                 throw;
             }
+
+            // The command is successfully queued. Generation invalidation no
+            // longer needs to wait for this submission's fence; the resource
+            // lists below retain storage until normal Vulkan retirement.
+            ReleaseHostMovieSubmissionLeases(resources, referencedResources);
 
             _submitTimeline++;
             IReadOnlyList<long> submittedDiagnosticTextureIds = [];
@@ -8000,15 +8064,19 @@ internal static unsafe class VulkanVideoPresenter
                 }
 
                 var hostMovieTextures = FindHostMovieTextureBindings(draw.Textures);
+                resources.HostMovieSelectionActiveGeneration =
+                    hostMovieTextures.ActiveGeneration;
+                resources.HostMovieSelectionPlaybackActive =
+                    hostMovieTextures.HostPlaybackActive;
                 if (MovieDiagnostics.Enabled)
                 {
                     MovieDiagnostics.PresenterSelection(
                         _hostMovieFramePath,
                         _hostMovieFrameInstanceId,
-                        _hostMovieFrameLifetime.Generation,
-                        HostMovieBridge.ActiveHostMovieGeneration,
+                        hostMovieTextures.FrameGeneration,
+                        hostMovieTextures.ActiveGeneration,
                         _hostMovieFramePixels is not null,
-                        HostMovieBridge.IsHostPlaybackActive,
+                        hostMovieTextures.HostPlaybackActive,
                         hostMovieTextures.Luma >= 0 && hostMovieTextures.Chroma >= 0,
                         _hostMovieFrameSerial,
                         _hostMovieLumaUploadedFrameSerial,
@@ -8023,27 +8091,12 @@ internal static unsafe class VulkanVideoPresenter
                         ? CreateHostMovieTextureResource(texture, plane: 0)
                         : index == hostMovieTextures.Chroma
                             ? CreateHostMovieTextureResource(texture, plane: 1)
-                            : ResolveTextureResource(texture);
-                    var feedbackTarget = !texture.IsStorage
-                        ? feedbackTargets?.FirstOrDefault(target =>
-                            ReferenceEquals(resolved.GuestImage, target))
-                        : null;
-                    // ResolveTextureResource may deliberately decline an
-                    // address alias when the descriptor is incompatible with
-                    // the render-target image. Only snapshot an alias which
-                    // actually resolved to the target; a separately uploaded
-                    // texture has no Vulkan attachment feedback hazard.
-                    resources.Textures[index] =
-                        feedbackDepth is not null &&
-                        !texture.IsStorage &&
-                        ReferenceEquals(resolved.GuestDepth, feedbackDepth)
-                            ? CreateDepthFeedbackSnapshot(texture, feedbackDepth)
-                            :
-                        feedbackTarget is not null &&
-                        !texture.IsStorage &&
-                        ReferenceEquals(resolved.GuestImage, feedbackTarget)
-                            ? CreateRenderTargetFeedbackSnapshot(texture, feedbackTarget)
-                            : resolved;
+                            : null;
+                    resources.Textures[index] = ResolveTranslatedTextureResource(
+                        texture,
+                        feedbackTargets,
+                        feedbackDepth,
+                        resolved);
                 }
 
                 PrepareGuestBufferAllocations(draw.GlobalMemoryBuffers);
@@ -8359,6 +8412,26 @@ internal static unsafe class VulkanVideoPresenter
                 _vk.AllocateDescriptorSets(_device, &allocateInfo, out descriptorSet),
                 "vkAllocateDescriptorSets");
             resources.DescriptorSet = descriptorSet;
+            UpdateTranslatedDescriptorResources(resources);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void UpdateTranslatedDescriptorResources(
+            TranslatedDrawResources resources)
+        {
+            var textureCount = resources.Textures.Length;
+            var globalBufferCount = resources.GlobalMemoryBuffers.Length;
+            var bindingCount = textureCount + (globalBufferCount == 0 ? 0 : 1);
+            if (bindingCount == 0)
+            {
+                return;
+            }
+
+            if (resources.DescriptorSet.Handle == 0)
+            {
+                throw new InvalidOperationException(
+                    "Cannot update translated descriptors before allocation.");
+            }
 
             var imageInfos = new DescriptorImageInfo[textureCount];
             var bufferInfos = new DescriptorBufferInfo[globalBufferCount];
@@ -8393,24 +8466,22 @@ internal static unsafe class VulkanVideoPresenter
 
                 for (var index = 0; index < textureCount; index++)
                 {
-                    var isStorage = resources.Textures[index].IsStorage;
-                    if (!isStorage &&
-                        resources.Textures[index].Sampler.Handle == 0)
+                    var texture = resources.Textures[index];
+                    var isStorage = texture.IsStorage;
+                    if (!isStorage && texture.Sampler.Handle == 0)
                     {
-                        resources.Textures[index].Sampler =
-                            CreateSampler(resources.Textures[index].SamplerState);
+                        texture.Sampler = CreateSampler(texture.SamplerState);
                     }
 
                     imageInfoPointer[index] = new DescriptorImageInfo
                     {
-                        Sampler = isStorage ? default : resources.Textures[index].Sampler,
-                        ImageView = resources.Textures[index].View,
+                        Sampler = isStorage ? default : texture.Sampler,
+                        ImageView = texture.View,
                         ImageLayout = isStorage ||
-                            resources.Textures[index].GuestImage is { } guestImage &&
-                            resources.Textures.Any(
-                                texture =>
-                                    texture.IsStorage &&
-                                    texture.GuestImage == guestImage)
+                            texture.GuestImage is { } guestImage &&
+                            resources.Textures.Any(candidate =>
+                                candidate.IsStorage &&
+                                candidate.GuestImage == guestImage)
                                 ? ImageLayout.General
                                 : ImageLayout.ShaderReadOnlyOptimal,
                     };
@@ -9030,26 +9101,38 @@ internal static unsafe class VulkanVideoPresenter
             _hostMovieFrameInstanceId = 0;
         }
 
-        private readonly record struct HostMovieTextureBindings(int Luma, int Chroma)
-        {
-            public static HostMovieTextureBindings None { get; } = new(-1, -1);
-        }
+        private readonly record struct HostMovieTextureBindings(
+            int Luma,
+            int Chroma,
+            long FrameGeneration,
+            long ActiveGeneration,
+            bool HostPlaybackActive)
+        { }
 
         private HostMovieTextureBindings FindHostMovieTextureBindings(
             IReadOnlyList<GuestDrawTexture> textures)
         {
             var activeGeneration = HostMovieBridge.ActiveHostMovieGeneration;
+            var frameGeneration = _hostMovieFrameLifetime.Generation;
+            var hostPlaybackActive = MovieDiagnostics.Enabled &&
+                HostMovieBridge.IsHostPlaybackActive;
+            var none = new HostMovieTextureBindings(
+                -1,
+                -1,
+                frameGeneration,
+                activeGeneration,
+                hostPlaybackActive);
             if (!_hostMovieFrameLifetime.IsEligible(activeGeneration))
             {
                 InvalidateInactiveHostMovieFrame("draw-selection");
-                return HostMovieTextureBindings.None;
+                return none;
             }
 
             if (_hostMovieFramePixels is null ||
                 _hostMovieFrameWidth == 0 ||
                 _hostMovieFrameHeight == 0)
             {
-                return HostMovieTextureBindings.None;
+                return none;
             }
 
             if (_hostMovieLumaTextureAddress != 0 &&
@@ -9074,7 +9157,10 @@ internal static unsafe class VulkanVideoPresenter
                     return RememberHostMovieTextureMappings(
                         textures,
                         lumaIndex,
-                        chromaIndex);
+                        chromaIndex,
+                        frameGeneration,
+                        activeGeneration,
+                        hostPlaybackActive);
                 }
 
                 // Bluepoint alternates decoder output between multiple Y/UV
@@ -9114,7 +9200,7 @@ internal static unsafe class VulkanVideoPresenter
 
             if (bestLumaIndex < 0 || bestChromaIndex < 0)
             {
-                return HostMovieTextureBindings.None;
+                return none;
             }
 
             var lumaTexture = textures[bestLumaIndex];
@@ -9137,17 +9223,30 @@ internal static unsafe class VulkanVideoPresenter
                     $"host={_hostMovieFrameWidth}x{_hostMovieFrameHeight}.");
             }
 
-            return new HostMovieTextureBindings(bestLumaIndex, bestChromaIndex);
+            return new HostMovieTextureBindings(
+                bestLumaIndex,
+                bestChromaIndex,
+                frameGeneration,
+                activeGeneration,
+                hostPlaybackActive);
         }
 
         private HostMovieTextureBindings RememberHostMovieTextureMappings(
             IReadOnlyList<GuestDrawTexture> textures,
             int lumaIndex,
-            int chromaIndex)
+            int chromaIndex,
+            long frameGeneration,
+            long activeGeneration,
+            bool hostPlaybackActive)
         {
             _hostMovieLumaDstSelect = textures[lumaIndex].DstSelect;
             _hostMovieChromaDstSelect = textures[chromaIndex].DstSelect;
-            return new HostMovieTextureBindings(lumaIndex, chromaIndex);
+            return new HostMovieTextureBindings(
+                lumaIndex,
+                chromaIndex,
+                frameGeneration,
+                activeGeneration,
+                hostPlaybackActive);
         }
 
         private bool IsHostMovieLumaCandidate(GuestDrawTexture texture)
@@ -9187,6 +9286,147 @@ internal static unsafe class VulkanVideoPresenter
                    chroma.NumberType == 0 &&
                    luma.Width == chroma.Width * 2 &&
                    luma.Height == chroma.Height * 2;
+        }
+
+        private TextureResource ResolveTranslatedTextureResource(
+            GuestDrawTexture texture,
+            IReadOnlyList<GuestImageResource>? feedbackTargets,
+            GuestDepthResource? feedbackDepth,
+            TextureResource? prepared = null)
+        {
+            var resolved = prepared ?? ResolveTextureResource(texture);
+            var feedbackTarget = !texture.IsStorage
+                ? feedbackTargets?.FirstOrDefault(target =>
+                    ReferenceEquals(resolved.GuestImage, target))
+                : null;
+            // ResolveTextureResource may deliberately decline an address alias
+            // when the descriptor is incompatible with the render-target image.
+            // Only snapshot an alias which actually resolved to the target; a
+            // separately uploaded texture has no Vulkan attachment feedback
+            // hazard.
+            return feedbackDepth is not null &&
+                !texture.IsStorage &&
+                ReferenceEquals(resolved.GuestDepth, feedbackDepth)
+                    ? CreateDepthFeedbackSnapshot(texture, feedbackDepth)
+                    :
+                feedbackTarget is not null &&
+                !texture.IsStorage &&
+                ReferenceEquals(resolved.GuestImage, feedbackTarget)
+                    ? CreateRenderTargetFeedbackSnapshot(texture, feedbackTarget)
+                    : resolved;
+        }
+
+        /// <summary>
+        /// Commits the host/guest decision at the last CPU boundary before
+        /// command recording. A failed reservation means invalidation won;
+        /// host resources are replaced and the existing descriptor set is
+        /// rewritten for the ordinary guest resources.
+        /// </summary>
+        private void PrepareHostMovieSubmission(
+            TranslatedDrawResources resources,
+            IReadOnlyList<GuestDrawTexture> guestTextures,
+            IReadOnlyList<GuestImageResource>? feedbackTargets = null,
+            GuestDepthResource? feedbackDepth = null)
+        {
+            if (resources.HostMovieSubmission is not null)
+            {
+                return;
+            }
+
+            TextureResource? firstHostTexture = null;
+            var hostGeneration = 0L;
+            var mixedGenerations = false;
+            foreach (var texture in resources.Textures)
+            {
+                if (texture is null || !texture.IsHostMovie)
+                {
+                    continue;
+                }
+
+                firstHostTexture ??= texture;
+                if (hostGeneration == 0)
+                {
+                    hostGeneration = texture.HostMovieGeneration;
+                }
+                else if (hostGeneration != texture.HostMovieGeneration)
+                {
+                    mixedGenerations = true;
+                }
+            }
+
+            if (firstHostTexture is null)
+            {
+                return;
+            }
+
+            var activeGeneration = 0L;
+            if (!mixedGenerations &&
+                _batchHostMovieSubmission is { } batchSubmission)
+            {
+                if (batchSubmission.Generation == hostGeneration)
+                {
+                    resources.HostMovieSubmission =
+                        batchSubmission.AddReference();
+                    return;
+                }
+
+                // A batch reservation keeps its generation active until the
+                // batch is submitted, so another generation cannot be adopted
+                // into the same command buffer.
+                mixedGenerations = true;
+            }
+
+            if (!mixedGenerations &&
+                HostMovieBridge.TryBeginHostMovieSubmission(
+                    hostGeneration,
+                    out var submission,
+                    out activeGeneration))
+            {
+                resources.HostMovieSubmission = submission;
+                if (_batchOpen)
+                {
+                    _batchHostMovieSubmission = submission!.AddReference();
+                }
+                return;
+            }
+
+            activeGeneration = mixedGenerations
+                ? _batchHostMovieSubmission?.Generation ??
+                    HostMovieBridge.ActiveHostMovieGeneration
+                : activeGeneration;
+            MovieDiagnostics.PresenterRejection(
+                firstHostTexture.HostMoviePath,
+                firstHostTexture.HostMovieInstanceId,
+                firstHostTexture.HostMovieGeneration,
+                activeGeneration,
+                firstHostTexture.HostMovieFrameSerial,
+                mixedGenerations
+                    ? "mixed-host-movie-generations-before-submit"
+                    : "generation-inactive-before-submit");
+
+            if (guestTextures.Count != resources.Textures.Length)
+            {
+                throw new InvalidOperationException(
+                    "Translated draw texture sources do not match its resources.");
+            }
+
+            for (var index = 0; index < resources.Textures.Length; index++)
+            {
+                var hostTexture = resources.Textures[index];
+                if (hostTexture is null || !hostTexture.IsHostMovie)
+                {
+                    continue;
+                }
+
+                var guestTexture = ResolveTranslatedTextureResource(
+                    guestTextures[index],
+                    feedbackTargets,
+                    feedbackDepth);
+                DestroyTextureResource(hostTexture);
+                resources.Textures[index] = guestTexture;
+            }
+
+            UpdateTranslatedDescriptorResources(resources);
         }
 
         private TextureResource CreateHostMovieTextureResource(
@@ -13804,6 +14044,12 @@ internal static unsafe class VulkanVideoPresenter
                 commandBuffer = BeginBatchedGuestCommands();
                 _commandBuffer = commandBuffer;
 
+                PrepareHostMovieSubmission(
+                    resources,
+                    draw.Textures,
+                    targets,
+                    clearDepthSeparately ? null : depth);
+
                 // Lifetime: recorded commands reference these resources, so
                 // they join the batch before recording and are destroyed only
                 // after the batch's fence signals.
@@ -16299,6 +16545,7 @@ internal static unsafe class VulkanVideoPresenter
                         _renderPass,
                         [PresentationTargetFormat],
                         _extent);
+                    _unsubmittedPresentationResources = translatedResources;
                     if (ShouldTracePresentedGuestImageContentsForDiagnostics() &&
                         !_firstGuestDrawPresented &&
                         translatedResources.Textures is
@@ -16309,6 +16556,10 @@ internal static unsafe class VulkanVideoPresenter
                     {
                         TraceGuestImageContents(guestImage);
                     }
+
+                    PrepareHostMovieSubmission(
+                        translatedResources,
+                        translatedDraw.Textures);
                 }
                 catch (Exception exception)
                 {
@@ -16348,6 +16599,14 @@ internal static unsafe class VulkanVideoPresenter
             }
             if (MovieDiagnostics.Enabled)
             {
+                var presentationActiveGeneration =
+                    translatedResources?.HostMovieSubmission is { } hostSubmission
+                        ? hostSubmission.Generation
+                        : HostMovieBridge.ActiveHostMovieGeneration;
+                var presentationHostPlaybackActive =
+                    translatedResources?.HostMovieSubmission is not null
+                        ? translatedResources.HostMovieSelectionPlaybackActive
+                        : HostMovieBridge.IsHostPlaybackActive;
                 MovieDiagnostics.PresenterPresentation(
                     presentedHostMoviePath ?? _hostMovieFramePath,
                     presentedHostMovie
@@ -16356,9 +16615,9 @@ internal static unsafe class VulkanVideoPresenter
                     presentedHostMovie
                         ? presentedHostMovieGeneration
                         : _hostMovieFrameLifetime.Generation,
-                    HostMovieBridge.ActiveHostMovieGeneration,
+                    presentationActiveGeneration,
                     presentedHostMovie,
-                    HostMovieBridge.IsHostPlaybackActive,
+                    presentationHostPlaybackActive,
                     presentedHostMovieFrameSerial,
                     presentation.Sequence,
                     presentation.TranslatedDraw is not null
@@ -16498,15 +16757,29 @@ internal static unsafe class VulkanVideoPresenter
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.QueueSubmit))
             {
                 SetDiagnosticPhase("presentation.submit");
-                Check(
-                    _vk.QueueSubmit(_queue, 1, &submitInfo, _frameFences[frameSlot]),
-                    "vkQueueSubmit");
+                try
+                {
+                    Check(
+                        _vk.QueueSubmit(_queue, 1, &submitInfo, _frameFences[frameSlot]),
+                        "vkQueueSubmit");
+                }
+                catch
+                {
+                    ReleaseHostMovieSubmissionLease(translatedResources);
+                    throw;
+                }
             }
+
+            // QueueSubmit is the linearization point. The command now owns
+            // the resource through the frame fence; logical invalidation may
+            // proceed without waiting for GPU retirement.
+            ReleaseHostMovieSubmissionLease(translatedResources);
 
             _submitTimeline++;
             _frameTimelines[frameSlot] = _submitTimeline;
             _frameFencePending[frameSlot] = true;
             _frameTranslatedResources[frameSlot] = translatedResources;
+            _unsubmittedPresentationResources = null;
             if (translatedResources is not null)
             {
                 // CPU-side layout bookkeeping only; later command buffers are
@@ -16633,6 +16906,12 @@ internal static unsafe class VulkanVideoPresenter
         {
             if (translatedResources is not null)
             {
+                if (ReferenceEquals(
+                        _unsubmittedPresentationResources,
+                        translatedResources))
+                {
+                    _unsubmittedPresentationResources = null;
+                }
                 DestroyTranslatedDrawResources(translatedResources);
             }
 
@@ -17009,6 +17288,8 @@ internal static unsafe class VulkanVideoPresenter
             TranslatedDrawResources resources,
             PipelineStageFlags shaderStage)
         {
+            EnsureHostMovieSubmissionReserved(resources);
+            var hostMovieSubmission = resources.HostMovieSubmission;
             foreach (var texture in resources.Textures)
             {
                 if (texture.GuestDepth is { } depth)
@@ -17133,9 +17414,8 @@ internal static unsafe class VulkanVideoPresenter
                 if (texture.IsHostMovie)
                 {
                     var isCurrentHostMovieGeneration =
-                        texture.HostMovieGeneration == _hostMovieFrameLifetime.Generation &&
-                        HostMovieBridge.IsHostMovieGenerationActive(
-                            texture.HostMovieGeneration);
+                        hostMovieSubmission is not null &&
+                        texture.HostMovieGeneration == hostMovieSubmission.Generation;
                     if (texture.HostMoviePlane == 0)
                     {
                         _hostMovieImageInitialized = true;
@@ -17146,7 +17426,7 @@ internal static unsafe class VulkanVideoPresenter
                                 texture.HostMoviePath,
                                 texture.HostMovieInstanceId,
                                 texture.HostMovieGeneration,
-                                HostMovieBridge.ActiveHostMovieGeneration,
+                                hostMovieSubmission!.Generation,
                                 texture.HostMovieFrameSerial,
                                 plane: 0);
                         }
@@ -17161,7 +17441,7 @@ internal static unsafe class VulkanVideoPresenter
                                 texture.HostMoviePath,
                                 texture.HostMovieInstanceId,
                                 texture.HostMovieGeneration,
-                                HostMovieBridge.ActiveHostMovieGeneration,
+                                hostMovieSubmission!.Generation,
                                 texture.HostMovieFrameSerial,
                                 plane: 1);
                         }
@@ -18326,6 +18606,7 @@ internal static unsafe class VulkanVideoPresenter
             TranslatedDrawResources resources,
             Extent2D extent)
         {
+            EnsureHostMovieSubmissionReserved(resources);
             _vk.CmdBindPipeline(
                 _commandBuffer,
                 PipelineBindPoint.Graphics,
@@ -18449,8 +18730,35 @@ internal static unsafe class VulkanVideoPresenter
             }
         }
 
+        private static void EnsureHostMovieSubmissionReserved(
+            TranslatedDrawResources resources)
+        {
+            foreach (var texture in resources.Textures)
+            {
+                if (texture is null || !texture.IsHostMovie)
+                {
+                    continue;
+                }
+
+                if (resources.HostMovieSubmission is null ||
+                    resources.HostMovieSubmission.Generation !=
+                        texture.HostMovieGeneration)
+                {
+                    throw new InvalidOperationException(
+                        "Host movie texture reached command recording without " +
+                        "a generation submission reservation.");
+                }
+            }
+        }
+
         private void DestroyTranslatedDrawResources(TranslatedDrawResources resources)
         {
+            // A resource that never reached QueueSubmit may still hold the
+            // generation reservation. Release that logical reservation before
+            // destroying its unsubmitted storage; submitted resources already
+            // released it at QueueSubmit and remain fence-owned below.
+            ReleaseHostMovieSubmissionLease(resources);
+
             if (resources.TransientFramebuffer.Handle != 0)
             {
                 _vk.DestroyFramebuffer(_device, resources.TransientFramebuffer, null);
@@ -18463,41 +18771,7 @@ internal static unsafe class VulkanVideoPresenter
 
             foreach (var texture in resources.Textures)
             {
-                if (texture is null || texture.Cached)
-                {
-                    continue;
-                }
-
-                if (texture.OwnsStorage && texture.View.Handle != 0)
-                {
-                    _vk.DestroyImageView(_device, texture.View, null);
-                }
-
-                if (texture.OwnsStorage && texture.Image.Handle != 0)
-                {
-                    _vk.DestroyImage(_device, texture.Image, null);
-                }
-
-                if (texture.OwnsStorage && texture.ImageMemory.Handle != 0)
-                {
-                    VulkanMemoryDiagnostics.Free(_vk, _device, texture.ImageMemory);
-                }
-
-                if (texture.StagingBuffer.Handle != 0)
-                {
-                    _vk.DestroyBuffer(_device, texture.StagingBuffer, null);
-                }
-
-                if (texture.StagingMemory.Handle != 0)
-                {
-                    VulkanMemoryDiagnostics.Free(_vk, _device, texture.StagingMemory);
-                }
-
-                if (texture.NeedsUpload &&
-                    texture.GuestImage is { Initialized: false } guestImage)
-                {
-                    guestImage.InitialUploadPending = false;
-                }
+                DestroyTextureResource(texture);
             }
 
             foreach (var globalBuffer in resources.GlobalMemoryBuffers)
@@ -18549,6 +18823,45 @@ internal static unsafe class VulkanVideoPresenter
                 resources.DescriptorSetLayout.Handle != 0)
             {
                 _vk.DestroyDescriptorSetLayout(_device, resources.DescriptorSetLayout, null);
+            }
+        }
+
+        private void DestroyTextureResource(TextureResource? texture)
+        {
+            if (texture is null || texture.Cached)
+            {
+                return;
+            }
+
+            if (texture.OwnsStorage && texture.View.Handle != 0)
+            {
+                _vk.DestroyImageView(_device, texture.View, null);
+            }
+
+            if (texture.OwnsStorage && texture.Image.Handle != 0)
+            {
+                _vk.DestroyImage(_device, texture.Image, null);
+            }
+
+            if (texture.OwnsStorage && texture.ImageMemory.Handle != 0)
+            {
+                VulkanMemoryDiagnostics.Free(_vk, _device, texture.ImageMemory);
+            }
+
+            if (texture.StagingBuffer.Handle != 0)
+            {
+                _vk.DestroyBuffer(_device, texture.StagingBuffer, null);
+            }
+
+            if (texture.StagingMemory.Handle != 0)
+            {
+                VulkanMemoryDiagnostics.Free(_vk, _device, texture.StagingMemory);
+            }
+
+            if (texture.NeedsUpload &&
+                texture.GuestImage is { Initialized: false } guestImage)
+            {
+                guestImage.InitialUploadPending = false;
             }
         }
 
@@ -19517,6 +19830,11 @@ internal static unsafe class VulkanVideoPresenter
             }
             _vulkanReady = false;
             _vk.DeviceWaitIdle(_device);
+            if (_unsubmittedPresentationResources is { } unsubmittedPresentation)
+            {
+                _unsubmittedPresentationResources = null;
+                DestroyTranslatedDrawResources(unsubmittedPresentation);
+            }
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);

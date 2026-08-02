@@ -131,6 +131,12 @@ public sealed class VulkanResourceLifetimeDiagnosticsTests
         var generation = tracker.Activate();
         var frame = new HostMovieFrameLifetime();
         frame.Publish(generation);
+        Assert.True(tracker.TryBeginSubmission(
+            generation,
+            out var submission,
+            out var activeGeneration));
+        Assert.Equal(generation, activeGeneration);
+        Assert.NotNull(submission);
         var diagnostics = new VulkanResourceLifetimeDiagnostics();
         var resourceId = diagnostics.TrackCacheInsertion(
             Descriptor,
@@ -144,6 +150,10 @@ public sealed class VulkanResourceLifetimeDiagnosticsTests
 
         diagnostics.RecordCacheRemoval(resourceId, "generation-invalidated", 3, 12);
         diagnostics.RecordDeferredDestroy(resourceId, 12, 3);
+        // The command's submission reservation is released only after the
+        // queue accepts it. Logical invalidation then proceeds while storage
+        // remains deferred for the normal fence/timeline retirement.
+        submission!.Dispose();
         Assert.True(tracker.Invalidate(generation));
         Assert.True(frame.Invalidate(generation));
         Assert.False(frame.IsEligible(tracker.ActiveGeneration));

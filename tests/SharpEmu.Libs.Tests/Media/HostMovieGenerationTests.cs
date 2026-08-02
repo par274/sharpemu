@@ -124,6 +124,108 @@ public sealed class HostMovieGenerationTests
     }
 
     [Fact]
+    public void InvalidationBeforeSubmissionRejectsPreparedHostDrawForGuestFallback()
+    {
+        var tracker = new HostMovieGenerationTracker();
+        var generation = tracker.Activate();
+
+        // The draw is deliberately paused after resource preparation and
+        // before the final submission reservation.
+        Assert.True(tracker.Invalidate(generation));
+
+        var useHostTexture = tracker.TryBeginSubmission(
+            generation,
+            out var submission,
+            out var activeGeneration);
+
+        Assert.False(useHostTexture);
+        Assert.Null(submission);
+        Assert.Equal(0, activeGeneration);
+        Assert.Equal("guest", useHostTexture ? "host" : "guest");
+    }
+
+    [Fact]
+    public void SubmissionReservationKeepsGenerationIdentityUntilReleased()
+    {
+        var tracker = new HostMovieGenerationTracker();
+        var generation = tracker.Activate();
+
+        Assert.True(tracker.TryBeginSubmission(
+            generation,
+            out var submission,
+            out var activeGeneration));
+        Assert.NotNull(submission);
+        Assert.Equal(generation, activeGeneration);
+        Assert.Equal(generation, submission!.Generation);
+
+        submission.Dispose();
+        Assert.True(tracker.Invalidate(generation));
+        Assert.False(tracker.IsActive(generation));
+    }
+
+    [Fact]
+    public void BatchedDrawReferencesKeepOneGenerationReservationAlive()
+    {
+        var tracker = new HostMovieGenerationTracker();
+        var generation = tracker.Activate();
+        Assert.True(tracker.TryBeginSubmission(
+            generation,
+            out var submission,
+            out _));
+
+        var batchedReference = submission!.AddReference();
+        submission.Dispose();
+        Assert.True(tracker.IsActive(generation));
+
+        batchedReference.Dispose();
+        Assert.True(tracker.Invalidate(generation));
+    }
+
+    [Fact]
+    public void SubmissionReservationCannotBeReusedByAReplacementGeneration()
+    {
+        var tracker = new HostMovieGenerationTracker();
+        var previousGeneration = tracker.Activate();
+        Assert.True(tracker.Invalidate(previousGeneration));
+        var nextGeneration = tracker.Activate();
+
+        Assert.NotEqual(previousGeneration, nextGeneration);
+        Assert.False(tracker.TryBeginSubmission(
+            previousGeneration,
+            out var staleSubmission,
+            out var activeGeneration));
+        Assert.Null(staleSubmission);
+        Assert.Equal(nextGeneration, activeGeneration);
+
+        Assert.True(tracker.TryBeginSubmission(
+            nextGeneration,
+            out var nextSubmission,
+            out var nextActiveGeneration));
+        Assert.NotNull(nextSubmission);
+        Assert.Equal(nextGeneration, nextActiveGeneration);
+        nextSubmission!.Dispose();
+    }
+
+    [Fact]
+    public void LatePresenterRejectionPayloadKeepsBothGenerationIdentities()
+    {
+        var rejection = MovieDiagnostics.CreatePresenterRejectionDiagnostic(
+            "C:\\movies\\same-path.bk2",
+            instanceId: 7,
+            frameGeneration: 3,
+            activeGeneration: 4,
+            frameSerial: 19,
+            reason: "generation-inactive-before-submit");
+
+        Assert.Equal("same-path.bk2", rejection.Movie);
+        Assert.Equal(7, rejection.MovieInstanceId);
+        Assert.Equal(3, rejection.HostMovieGeneration);
+        Assert.Equal(4, rejection.ActiveHostMovieGeneration);
+        Assert.Equal(19, rejection.FrameSerial);
+        Assert.Equal("generation-inactive-before-submit", rejection.Reason);
+    }
+
+    [Fact]
     public void LateInvalidationCannotInvalidateTheReplacementGeneration()
     {
         var tracker = new HostMovieGenerationTracker();

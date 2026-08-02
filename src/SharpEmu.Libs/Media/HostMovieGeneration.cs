@@ -10,22 +10,36 @@ namespace SharpEmu.Libs.Media;
 internal sealed class HostMovieGenerationTracker
 {
     private readonly object _gate = new();
+    // Logical generation invalidation and the final Vulkan submission boundary
+    // are serialized separately from the bridge lock. The presenter holds
+    // this gate only from its final host-resource reservation through
+    // QueueSubmit; an invalidation that gets the gate first makes the
+    // presenter fall back to guest texture resolution.
+    private readonly SemaphoreSlim _submissionGate = new(1, 1);
     private long _nextGeneration;
     private long _activeGeneration;
 
     internal long Activate()
     {
-        lock (_gate)
+        _submissionGate.Wait();
+        try
         {
-            var generation = ++_nextGeneration;
-            if (generation <= 0)
+            lock (_gate)
             {
-                throw new InvalidOperationException(
-                    "Host movie generation counter overflowed.");
-            }
+                var generation = ++_nextGeneration;
+                if (generation <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "Host movie generation counter overflowed.");
+                }
 
-            Volatile.Write(ref _activeGeneration, generation);
-            return generation;
+                Volatile.Write(ref _activeGeneration, generation);
+                return generation;
+            }
+        }
+        finally
+        {
+            _submissionGate.Release();
         }
     }
 
@@ -34,16 +48,131 @@ internal sealed class HostMovieGenerationTracker
     internal bool IsActive(long generation) =>
         generation > 0 && Volatile.Read(ref _activeGeneration) == generation;
 
-    internal bool Invalidate(long generation) =>
-        generation > 0 &&
-        Interlocked.CompareExchange(ref _activeGeneration, 0, generation) == generation;
+    /// <summary>
+    /// Reserves the final host-movie submission boundary for <paramref
+    /// name="generation"/>. The caller owns the returned lease until the
+    /// Vulkan command has either been submitted or discarded.
+    /// </summary>
+    internal bool TryBeginSubmission(
+        long generation,
+        out HostMovieGenerationSubmission? submission,
+        out long activeGeneration)
+    {
+        submission = null;
+        activeGeneration = 0;
+        if (generation <= 0)
+        {
+            return false;
+        }
+
+        _submissionGate.Wait();
+        var keepGate = false;
+        try
+        {
+            activeGeneration = Volatile.Read(ref _activeGeneration);
+            if (activeGeneration != generation)
+            {
+                return false;
+            }
+
+            submission = new HostMovieGenerationSubmission(this, generation);
+            keepGate = true;
+            return true;
+        }
+        finally
+        {
+            if (!keepGate)
+            {
+                _submissionGate.Release();
+            }
+        }
+    }
+
+    internal bool Invalidate(long generation)
+    {
+        if (generation <= 0)
+        {
+            return false;
+        }
+
+        _submissionGate.Wait();
+        try
+        {
+            lock (_gate)
+            {
+                if (_activeGeneration != generation)
+                {
+                    return false;
+                }
+
+                Volatile.Write(ref _activeGeneration, 0);
+                return true;
+            }
+        }
+        finally
+        {
+            _submissionGate.Release();
+        }
+    }
+
+    private void ReleaseSubmission() => _submissionGate.Release();
+
+    internal sealed class HostMovieGenerationSubmission : IDisposable
+    {
+        private HostMovieGenerationTracker? _owner;
+        private int _references = 1;
+
+        internal HostMovieGenerationSubmission(
+            HostMovieGenerationTracker owner,
+            long generation)
+        {
+            _owner = owner;
+            Generation = generation;
+        }
+
+        internal long Generation { get; }
+
+        internal HostMovieGenerationSubmission AddReference()
+        {
+            while (true)
+            {
+                var references = Volatile.Read(ref _references);
+                if (references <= 0)
+                {
+                    throw new ObjectDisposedException(
+                        nameof(HostMovieGenerationSubmission));
+                }
+
+                if (Interlocked.CompareExchange(
+                        ref _references,
+                        references + 1,
+                        references) == references)
+                {
+                    return this;
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Decrement(ref _references) != 0)
+            {
+                return;
+            }
+
+            var owner = Interlocked.Exchange(ref _owner, null);
+            owner?.ReleaseSubmission();
+        }
+    }
 }
 
 /// <summary>
 /// Tracks the presenter copy of a host frame separately from its CPU and
-/// Vulkan storage. Invalidation changes selection eligibility only; resources
-/// already owned by a submitted command remain under the presenter's normal
-/// fence-based retirement rules.
+/// Vulkan storage. Logical invalidation changes selection eligibility at the
+/// generation tracker boundary. A submission reservation prevents that
+/// boundary from passing while the presenter is committing a command; once
+/// the command is submitted, its resources remain under the presenter's
+/// normal fence-based retirement rules.
 /// </summary>
 internal struct HostMovieFrameLifetime
 {

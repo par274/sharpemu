@@ -84,6 +84,21 @@ internal static class HostMovieBridge
         }
     }
 
+    /// <summary>
+    /// Reserves the presenter's final host-movie submission boundary without
+    /// taking <see cref="Gate"/>. The presenter must not call back into the
+    /// bridge while it owns the reservation because a guest close may hold
+    /// <see cref="Gate"/> while waiting for that reservation to finish.
+    /// </summary>
+    internal static bool TryBeginHostMovieSubmission(
+        long generation,
+        out HostMovieGenerationTracker.HostMovieGenerationSubmission? submission,
+        out long activeGeneration) =>
+        HostMovieGenerations.TryBeginSubmission(
+            generation,
+            out submission,
+            out activeGeneration);
+
     private static bool HasActiveHostMovieLocked() =>
         _playback is not null || _frameBuffer is not null;
 

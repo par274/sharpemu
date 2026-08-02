@@ -5,8 +5,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Startup movie temporal boundary
 
-Status: diagnostic finding with the host-generation eligibility correction
-implemented and target-validated for stale host selection; a separate grey
+Status: diagnostic finding with the host-generation eligibility correction and
+the final presenter submission-boundary hardening implemented. The target
+evidence below validates the earlier stale-selection correction; the hardening
+is covered by deterministic lifetime/resource tests. A separate grey
 transition output remains unresolved.
 
 This finding covers the startup movie sequence of Demon’s Souls v1.004.000
@@ -174,12 +176,26 @@ and upload serials, including when the path is unchanged. A stale binding
 snapshot falls through to ordinary guest texture resolution.
 
 Host texture resources retain their creation generation and instance identity.
-Logical invalidation does not destroy shared Vulkan images or storage owned by
-submitted work; the existing fence/timeline retirement path still owns that
-destruction. An already submitted command may therefore complete, but a later
-guest draw cannot select the inactive generation. Target observation showed
-that the stale black host output was replaced by a grey transition, leaving a
-separate output owner unresolved.
+Their preparation is provisional until the presenter reserves that exact
+generation at the final CPU boundary before command recording. If completion,
+guest close, or replacement wins first, the presenter rejects the late host
+candidate, discards its unsubmitted staging state, rewrites the descriptor set
+to the ordinary guest texture resources, and emits a bounded late-rejection
+diagnostic. If the presenter reserves first, bridge invalidation waits only
+until `QueueSubmit` succeeds. The reservation is then released; the submitted
+command may complete normally and its storage remains owned by the existing
+frame-fence/timeline retirement path. Logical invalidation never destroys
+resources that submitted GPU work may still reference. The presenter does not
+call back into the bridge while holding the reservation, avoiding an inverse
+bridge-lock dependency. Multiple host draws in one shared guest command batch
+share reference-counted ownership of that one generation reservation, which is
+released only after the batch submission.
+
+This is a synchronization guarantee, not a claim that the presenter and
+bridge are globally serialized: work prepared before the reservation may be
+rejected, while work whose reservation precedes invalidation may be submitted
+and later retired. Target observation showed that the stale black host output
+was replaced by a grey transition, leaving a separate output owner unresolved.
 
 #### After correction: target observation
 
@@ -263,16 +279,23 @@ clock/presenter inputs to verify:
    the completed generation, with shutdown clearing presenter selection;
 4. next-generation attachment, including the same path, not exposing the
    previous generation’s frame or binding state;
-5. invalidation falling through to ordinary guest texture resolution while
-   in-flight Vulkan storage remains fence-owned.
+5. a prepared host draw rejected after invalidation wins the final submission
+   boundary, with descriptor/resource fallback to ordinary guest texture
+   resolution;
+6. a reservation acquired before invalidation releasing only after successful
+   submission, while in-flight Vulkan storage remains fence-owned;
+7. same-path replacement retaining distinct generation identity and bounded
+   late-rejection diagnostics, including the disabled diagnostics path.
 
-Target validation used the default native-Bink run under the same controlled
-safety policy, correlated generation-end, presenter-invalidation, upload, and
-guest-draw-selection events, and included direct visual observation. The
-invariant held in the pilot and confirmation evidence, and the direct visual
-result was grey rather than black at the handoff. Timing variance requires
-three comparable trials for a timing claim; this correction did not alter
-timing.
+Target validation of the earlier correction used the default native-Bink run
+under the same controlled safety policy, correlated generation-end,
+presenter-invalidation, upload, and guest-draw-selection events, and included
+direct visual observation. That evidence held the logical stale-selection
+invariant, and the direct visual result was grey rather than black at the
+handoff. The final submission-boundary race is validated synthetically because
+an attended target run does not deterministically place invalidation between
+resource preparation and command submission. Timing variance requires three
+comparable trials for a timing claim; this correction did not alter timing.
 
 The correction is incomplete if a completed generation remains selected by a
 later guest draw, if a new generation inherits the previous frame or binding

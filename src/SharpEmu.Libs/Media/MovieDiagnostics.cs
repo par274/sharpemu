@@ -6,6 +6,14 @@ using SharpEmu.Logging;
 
 namespace SharpEmu.Libs.Media;
 
+internal readonly record struct MoviePresenterRejectionDiagnostic(
+    string Movie,
+    long MovieInstanceId,
+    long HostMovieGeneration,
+    long ActiveHostMovieGeneration,
+    long FrameSerial,
+    string Reason);
+
 /// <summary>
 /// Bounded, opt-in movie lifecycle diagnostics written to the existing JSONL
 /// memory-diagnostics stream. The default path is a short-circuiting set of
@@ -604,6 +612,45 @@ internal static class MovieDiagnostics
             reason,
         });
     }
+
+    internal static void PresenterRejection(
+        string? path,
+        long instanceId,
+        long frameGeneration,
+        long activeGeneration,
+        long frameSerial,
+        string reason)
+    {
+        if (!TryReserveEvent())
+        {
+            return;
+        }
+
+        WriteReserved(
+            "presenter-rejection",
+            CreatePresenterRejectionDiagnostic(
+                path,
+                instanceId,
+                frameGeneration,
+                activeGeneration,
+                frameSerial,
+                reason));
+    }
+
+    internal static MoviePresenterRejectionDiagnostic CreatePresenterRejectionDiagnostic(
+        string? path,
+        long instanceId,
+        long frameGeneration,
+        long activeGeneration,
+        long frameSerial,
+        string reason) =>
+        new(
+            MovieIdentity(path),
+            instanceId,
+            frameGeneration,
+            activeGeneration,
+            frameSerial,
+            reason);
 
     internal static void PresenterUpload(
         string? path,
