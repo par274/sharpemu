@@ -5,475 +5,383 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Startup movie temporal boundary
 
-Status: diagnostic finding with the host-generation eligibility correction and
-the final presenter submission-boundary hardening implemented. The target
-evidence below validates the earlier stale-selection correction; the hardening
-is covered by deterministic lifetime/resource tests. A separate grey
-transition output remains unresolved.
+Status: experiment-only finding. This change adds authored state-machine tests
+and this contract record. It does not change retail decoder, audio, clock, or
+presenter behavior.
 
-This finding covers the startup movie sequence of Demon’s Souls v1.004.000
-(`PPSA01341`, Europe) after the splash screen. It does not replace the current
-compatibility frontier: the title has already been observed reaching the main
-menu, the offline prompt, and name/class/starting-gift customization.
+The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
+startup route. It is an emulator-owned contract. It does not claim to know the
+PlayStation’s proprietary internal implementation.
 
-## Source sequence
+## Established target evidence
 
-The lawful local Bink assets were inspected with the repository’s existing
-FFmpeg-compatible probe. Only metadata, private samples, and scalar diagnostic
-results were retained locally; no game-derived artifacts are tracked.
+The following facts were established before this experiment and are treated as
+inputs, not as results inferred from the authored model:
 
-| Asset | Source facts | Relevant material |
+- PR #17 fixed stale completed host-frame selection by invalidating the host
+  movie generation at completion, close, replacement, and shutdown.
+- PR #18 established the audio ownership and starvation boundary. The
+  PlayStation Studios movie is a separate stream from AudioOut2 primary.
+- Movie stream 2 decoded 408,960 source frames, converted 408,960 output
+  frames, submitted all 408,960 frames to SDL, used 48 kHz stereo S16 input and
+  48 kHz stereo F32 device output, used a 1.0 frequency ratio, and recorded no
+  failed submission or conversion loss.
+- `GuestAudioClock` was driven by `audio-out2-primary` stream 1. All 213
+  reports from the movie stream were rejected because the shared furthest-value
+  clock already retained the other stream's position.
+- `MediaFramePlayback` enters `frame-buffer-wait` while all five RGBA frame
+  buffers are owned. While it waits, `FfmpegVideoDecoder.TryDecodeNextFrame`
+  cannot read more interleaved packets and therefore cannot pump later movie
+  audio packets.
+- Two measured waits began with approximately 100–130 ms of movie audio queued
+  and resumed after the queue emptied. The consumer holding the fifth buffer was
+  not isolated.
+- `attract_movie.bk2` has no audio, but its host video follows the unrelated
+  shared AudioOut2 clock and is heavily stretched. Wall-clock mode proves the
+  shared-clock cause of the stretch; wall-clock mode alone is not an accepted
+  correction.
+- SDL queue arithmetic is an input-queue estimate, not a direct physical-device
+  playback measurement. The grey transition and intermittent flashing remain
+  separate rendering problems.
+
+The target assets, raw traces, logs, manifests, and game-derived data remain
+outside Git.
+
+## Authored experiment
+
+The experiment is test-only in
+`tests/SharpEmu.Libs.Tests/Media/MovieAudioPumpExperiment.cs` and
+`MovieTimelineExperiment.cs`. It uses no retail content, FFmpeg-generated file,
+sleep, or wall-clock assertion. The timeline tests advance `FakeMonotonicTime`
+explicitly.
+
+The primary authored packet schedule is:
+
+```text
+V1 V2 V3 V4 V5 A6 V7 A8 V9 A10
+```
+
+`V1`–`V5` fill the five video destinations. The later audio packets are
+deliberately interleaved with video packets after the destination pool is full.
+The bound-pressure schedule is:
+
+```text
+V1 V2 V3 V4 V5 V6(4) V7(4) V8(5) A9
+```
+
+where the parenthesized values are authored compressed-packet byte sizes. The
+candidate bound is two deferred video packets and eight retained bytes. The
+model records packet identity, buffer identity, retained packet count, retained
+bytes, EOF, failure, and disposal state.
+
+Two current-behavior checks are intentionally separate from the candidate:
+
+1. An actual `MediaFramePlayback` instance is rendezvoused after its fifth
+   authored video frame. Its decoder has made five calls, submitted no later
+   audio, and still has `A6 V7 A8` unread.
+2. A deterministic replay of the current `MediaFramePlayback` and
+   `IMediaFrameDecoder` contract makes the same boundary explicit without
+   relying on thread scheduling.
+
+The current shared-clock expression is also replayed separately: an unrelated
+stream can supply the selected progress when it is ahead, or hold the selection
+back when it is slow. The candidate movie-local clock tests must reject both
+outcomes.
+
+## Tested facts
+
+### Current packet behavior
+
+The current production contract is:
+
+```text
+if no free RGBA destination:
+    wait
+else:
+    acquire one destination
+    call TryDecodeNextFrame(destination)
+```
+
+`FfmpegVideoDecoder.TryFeedPacket` reads audio packets only inside that decoder
+call. Consequently, after `V1`–`V5` are owned, the current decoder cannot reach
+`A6`, `V7`, or any following packet. This is the measured starvation boundary;
+it is not a conversion-loss, SDL-submit, or device-format finding.
+
+### Candidate packet behavior
+
+The authored candidate demonstrates that one demux context can continue
+processing audio while all five video destinations are owned if it has a finite
+compressed-video deferral queue:
+
+- `A6`, `A8`, and `A10` are submitted while five decoded video buffers remain
+  owned.
+- `V7` and `V9` remain compressed and ordered in the deferral queue; no second
+  decoded-frame queue is created.
+- The queue never exceeds two packets or eight bytes in the authored bound
+  test.
+- When the count or byte bound is full, the next video packet is not consumed;
+  the pump returns backpressure. A later audio packet behind that video packet
+  is intentionally not skipped or reordered around the full boundary.
+- Releasing buffer 0 decodes the oldest deferred packet into buffer 0; the
+  experiment rejects any attempt to overwrite an owned buffer. The same holds
+  for the next deferred packet and its released buffer.
+- EOF is not completion until deferred compressed packets are drained. A
+  device submission failure marks audio failed but does not create an unbounded
+  video queue or prevent later video drain.
+- Disposal clears all retained compressed packets, disposes the audio sink once,
+  rejects further pump work, and leaves externally owned video buffers
+  untouched.
+
+These facts establish the narrow mechanism that can address the measured
+startup audio starvation. They do not yet establish the target's final clock
+owner.
+
+### Candidate timeline behavior
+
+The authored clock tests establish these emulator-owned rules:
+
+1. A movie with its own audio uses that movie's local audio-progress estimate.
+2. An audio-less movie uses its own monotonic wall-time origin.
+3. Unrelated AudioOut and AudioOut2 progress is not an input to either policy.
+4. A temporary movie-audio underrun holds the last movie-local audio position;
+   it does not silently switch to wall time or to another stream.
+5. A permanent audio-open or audio-device failure enters an explicit local
+   wall-time fallback anchored at the last selected position, so it cannot
+   freeze or jump at the transition.
+6. Pause holds the selected position. Resume rebases a wall/fallback origin;
+   audio is expected to be paused by the owning audio stream as well.
+7. Completion, skip, replacement, and disposal terminate the old timeline.
+8. Every host movie generation receives a new clock identity, including a
+   same-path replacement.
+9. Values are monotonic within one generation, even if an audio estimate
+   regresses.
+10. When timeline diagnostics are disabled, no authored diagnostic payload or
+    event is constructed.
+
+The tests cover a movie with audio, an audio-less movie, an unrelated AudioOut2
+clock that is ahead, temporary underrun, permanent audio failure, pause, skip,
+completion, replacement, same-path replacement, disposal, monotonicity, and
+diagnostics-disabled execution.
+
+## Evaluated alternatives
+
+### A. Bounded compressed-video packet deferral in one demux context — selected
+
+Ownership is unchanged for decoded video: exactly five RGBA destinations are
+owned by the playback/consumer boundary, and a destination is returned only by
+the consumer that owns it. A video packet encountered without a free
+destination is retained as a referenced compressed packet, not decoded into a
+new frame queue. Audio remains owned by the movie's audio decoder and host
+stream.
+
+The authored maximum is two packets and eight bytes of compressed payload. The
+production implementation must use both a finite packet-count cap and a finite
+byte cap; the exact production byte value is not claimed by this experiment
+because a target packet-size histogram was not collected. At the bound, the
+next video packet causes backpressure before `av_read_frame` consumes it. The
+decoder resumes only after a video destination is released. This is a bounded
+memory contract, not permission to grow the queue until EOF.
+
+Demux/decode ordering is:
+
+```text
+oldest deferred video packet → oldest video destination when available
+audio packet                → audio decoder/host stream immediately
+new video packet             → defer if both bounds allow, otherwise backpressure
+```
+
+Video order is preserved within the video stream, audio order within the audio
+stream, and no packet is dropped. Cross-stream execution intentionally permits
+audio work after a deferred video packet; that is the behavior needed to cross
+the measured starvation boundary. Movie video synchronization is supplied by
+the separate movie-local clock contract above.
+
+At EOF, the demux is marked exhausted, the audio decoder is drained, and
+completion waits for the deferred video packets to acquire destinations and
+drain. Cancellation wakes the pump, unreferences every retained packet, stops
+audio submission, and does not reuse any externally owned destination. The
+additional `FfmpegVideoDecoder` complexity is one bounded packet queue, one
+full-boundary result, and a pump path that can run without a video destination.
+Opening the asset twice is not required.
+
+This is the smallest model that directly addresses the measured target wait.
+Its important failure modes are a cap too small for an observed run of video
+packets, leaked `AVPacket` references, decoding a deferred packet out of order,
+or treating a full queue as EOF instead of backpressure. Those are all
+synthetic-testable.
+
+### B. Separate audio demux/decode context
+
+The audio context would own its own `AVFormatContext`, audio codec, resampler,
+and input progression. Video would retain the current five-buffer contract, so
+there is no compressed-video deferral in the video context. Audio could continue
+until its bounded host stream is full.
+
+This requires opening the asset twice or creating a second independent input
+context. Its memory cost is a second format/codec/resampler stack plus codec
+buffers and the existing bounded audio stream; an exact byte cost was not
+measured in this authored experiment. It has simpler per-context packet order
+but two EOF/drain/cancel paths and a new synchronization problem between
+independently positioned inputs. It would likely remove the measured starvation,
+but adds duplicate file I/O, duplicated probing, and failure modes where the
+audio and video contexts disagree about seek/EOF or cleanup. It is larger than
+the selected one-queue change and is not required by the current evidence.
+
+### C. Unbounded decoded-frame or packet queue
+
+This would keep reading and put video frames or packets into a queue with no
+finite bound. It could pump audio, but its memory cost is unbounded, its
+ownership contract becomes harder to audit, and a slow consumer can turn a
+temporary presentation delay into native memory growth. It is rejected.
+
+### D. Wall clock as the timing correction
+
+Wall clock explains why the current shared clock stretches `attract_movie.bk2`,
+but it does not preserve the movie's own audio relationship and does not fix
+the frame-buffer starvation. It remains a diagnostic comparison, not the
+selected production contract.
+
+## Selected clock contract
+
+The movie-local timeline is owned by the active host movie generation. It is
+created at attach/start and is never a static global clock. The timeline source
+state is explicit:
+
+| State | Source | Behavior |
 | --- | --- | --- |
-| `ps_studios_logo.bk2` | 8.500 s, 30 fps, 255 frames, 3840×2160, one Bink audio track at 48 kHz stereo | Blue PlayStation Studios animation, symbols, logo, and a black final frame |
-| `attract_movie.bk2` | 117.3667 s, 30 fps, 3,521 frames, 3840×2160, no audio stream | Starts with a black fade and the first title-card material, including “On the first day” in the opening section |
-| `logo_intro.bk2` | 12.000 s, 30 fps, 360 frames, 3840×2160, no audio stream | Demon’s Souls title animation |
-| `logo_intro_loop.bk2` | 8.000 s, 30 fps, 240 frames, 3840×2160, no audio stream | Looping Demon’s Souls title animation |
-| `main_menu.bk2`, `main_menu_ngp.bk2` | 20.000 s, 30 fps, 600 header frames, 3840×2160, no audio stream | Main-menu background candidates |
+| Movie audio running | This movie's host audio progress estimate | Advance monotonically, capped at the movie's local wall origin so future audio cannot select future video. |
+| Temporary underrun | Last movie-local audio value | Hold video; do not read AudioOut or AudioOut2 progress. |
+| Audio unavailable or permanently failed | Movie-local monotonic wall time | Switch once to a wall fallback anchored at the last value; never freeze on a dead audio source. |
+| No audio stream | Movie-local monotonic wall time | Advance independently of every guest audio stream. |
+| Paused | Last selected value | Hold until the owning playback resumes; resume rebases wall/fallback time. |
+| Completed or skipped | Terminal value | Stop selecting frames and tear down the generation. |
+| Replaced or disposed | Old identity terminated | New playback always receives a new identity, even for the same path. |
 
-Sampling did not locate the “Sony Interactive Entertainment presents” card in
-the host-attached PlayStation Studios movie or in the title/menu candidate
-movies sampled for this sequence. The card is therefore outside the host Bink
-pixel stream observed here. Its exact guest resource/draw producer remains
-unclassified.
+An unrelated AudioOut or AudioOut2 stream can never legitimately advance a host
+movie under this contract. The contract is intentionally narrower than the
+current `GuestAudioClock` and does not assert that the PS5 uses the same model.
 
-The PlayStation Studios source order is monotonic: the opening blue imagery is
-followed by the logo and then the black final frame. The repeated-looking
-material is not a second section inside this source asset.
+## Lifecycle and synchronization invariants
 
-## Controlled evidence
+The next implementation must preserve all of these invariants:
 
-The target identity used for the runs was:
+1. A decoded RGBA destination has one owner. It is not overwritten, reused, or
+   returned to the free pool until that owner releases it.
+2. A deferred compressed packet has one queue owner. The queue holds a bounded
+   `AVPacket` reference and releases it exactly once on decode, EOF drain,
+   cancellation, replacement, or disposal.
+3. The retained compressed packet count and bytes never exceed their hard caps.
+   A full bound applies backpressure; it does not drop a packet or declare EOF.
+4. Deferred video packets are decoded in packet order before later video input is
+   accepted. Audio packets may be pumped while video is deferred.
+5. EOF means demux exhaustion, not playback completion. Deferred video and
+   decoder drain work must finish before completion is published.
+6. Audio-device failure is observable to the movie timeline. A temporary
+   underrun is not treated as permanent failure without an explicit state
+   transition.
+7. Pause, skip, completion, replacement, and disposal wake/cancel all pump
+   waiters. No audio submission or packet read occurs after disposal wins.
+8. The movie clock identity, audio source, frame ownership, and diagnostics all
+   belong to the same host movie generation. A late callback from an old
+   generation cannot update a replacement.
+9. Diagnostics-disabled paths short-circuit before payload construction,
+   formatting, event locking, or per-event accounting.
 
-- title ID `PPSA01341`;
-- region Europe;
-- version `1.004.000`;
-- eboot SHA-256 `22ED8843917CB16438B7B780998E408321F5CEBE79DD10F388AE59CFCA588306`.
+## Implementation-ready next change
 
-The default control used native Bink behavior, the guest-audio-aware movie
-clock, `SHARPEMU_LOG_MOVIE_SYNC=1`, and the unchanged controlled-runner safety
-policy. The focused diagnostic used the same behavior plus the opt-in bounded
-movie JSONL stream. A wall-clock comparison changed only
-`SHARPEMU_MOVIE_CLOCK=wall`.
+This PR intentionally does not make this change. The next reviewed change
+should be limited to the host movie boundary:
 
-The direct visual observation from the no-recording control was:
+1. Add one small internal decoder capability, separate from the existing frame
+   destination method, that lets `MediaFramePlayback` request audio/input pump
+   progress without supplying a video destination. Non-FFmpeg decoders retain
+   the current wait behavior.
+2. In `FfmpegVideoDecoder`, add a bounded compressed-video packet queue. On a
+   no-destination pump, consume audio packets immediately, retain video packets
+   with owned `AVPacket` references, and return a distinct backpressure result
+   when the packet or byte cap is full. Drain the oldest deferred packet before
+   reading later video packets when a destination becomes available.
+3. Keep decoded ownership at five buffers. Do not add a second decoded-frame
+   queue. Add synthetic tests for packet order, both bounds, full-boundary
+   backpressure, exact buffer reuse, EOF drain, audio failure, replacement, and
+   disposal before enabling the path for retail movies.
+4. Replace the movie's read of global `GuestAudioClock` with a generation-owned
+   movie timeline. Feed it only the movie stream's local audio-progress estimate
+   or the explicit no-audio/failure fallback. Keep `GuestAudioClock` unchanged
+   for unrelated guest audio.
+5. Make attach, pause, skip, complete, close, replacement, and disposal create
+   or terminate the timeline identity atomically with the existing host movie
+   generation. A same-path attach must clear all prior timeline state.
+6. Add explicit audio state transitions for unavailable, running, temporary
+   underrun, permanent failure, and normal audio end. The normal-end behavior
+   must use the anchored fallback if video still has work to present.
+7. Preserve the diagnostics short circuit and add no target-specific override.
+   Validate the implementation with the authored suite before any controlled
+   target run.
 
-- the Demon’s Souls splash appeared at approximately 6–10 s;
-- after it disappeared, the window remained black for more than 20 s;
-- the first “Sony Interactive Entertainment presents” card and blue
-  PlayStation Studios animation completed by approximately 55 s;
-- the window then remained solid black, with no observed flashing, until about
-  1:50;
-- the card appeared again around 1:50 and the next cinematic began around
-  1:58 with “On the first day”;
-- the user closed the window after reaching that next cinematic.
+The packet-count and byte-cap values are deliberately one small measured design
+choice, not a hidden unbounded fallback. This experiment proves the behavior at
+two packets/eight authored bytes; the next change must choose and record a finite
+production byte cap from a lawful packet-size trace before enabling retail
+behavior. If one packet is enough for the trace, use one. If not, increase only
+to the smallest cap that preserves the observed interleave.
 
-This observation is treated separately from earlier runs that showed flashing.
-It proves the solid-black outcome for one run, not that every visual outcome has
-the same immediate cause.
+## Remaining uncertainty
 
-## Finding
+- The exact guest/render consumer holding the fifth buffer is still unknown.
+- This experiment models packet ownership and ordering; it does not yet call
+  FFmpeg against a committed synthetic media file. A local lawful FFmpeg probe
+  may confirm packet interleave, but it is not a CI dependency.
+- The target compressed-packet size distribution and the smallest production
+  byte cap are not measured here.
+- SDL queue arithmetic remains an estimate, so the local movie-audio progress
+  source needs a precise host-stream contract in the implementation change.
+- The criterion for distinguishing temporary audio underrun from permanent
+  device/decoder failure must be tied to explicit host error/state transitions,
+  not an arbitrary elapsed-time guess.
+- The title's intended proprietary clock ownership remains unknown. The
+  selected contract is justified by emulator ownership, target observations,
+  and bounded behavior, not by a claim about Sony internals.
 
-### Temporal behavior
+## Falsifiers
 
-The default movie clock follows `GuestAudioClock` while `IsRunning` is true.
-During the focused default run, the clock stayed running and progressed much
-more slowly than wall time:
+The selected model or timeline hypothesis must be revisited if any of these
+occur:
 
-| Movie instance | Wall observation | Guest audio / selected playback | Result |
-| --- | ---: | ---: | --- |
-| `ps_studios_logo.bk2` | 12.169 s at the last clock sample; host completion at 12.680 s | 8.145 s | Completed once at source frame 254 |
-| `attract_movie.bk2` | 170.174 s at the last sample | 95.721 s | Reached frame 2,871 of 3,521 before the 300 s runner limit |
+- An authored or synthetic FFmpeg fixture requires audio packets after a full
+  compressed-video bound but cannot make progress without an unbounded queue.
+- A deferred packet is observed duplicated, dropped, decoded out of order, or
+  released more than once.
+- A full bound overwrites/reuses an owned RGBA destination or reports EOF before
+  deferred packets drain.
+- A target packet trace shows a required audio run consistently behind a bound
+  that cannot be raised within the stated memory budget; this would reopen the
+  separate-audio-context comparison.
+- A controlled target run shows movie-local audio and video remain correctly
+  synchronized while the global AudioOut2 clock is ahead/slow, or shows that a
+  no-audio movie must follow a guest stream. That would falsify the selected
+  clock owner.
+- A temporary underrun demonstrably advances the title's expected movie video
+  rather than holding, or permanent failure cannot transition to the anchored
+  fallback without a jump.
+- Completion, same-path replacement, skip, or disposal allows an old generation
+  to advance a new generation's timeline.
+- Diagnostics-disabled execution constructs payloads or performs event work.
 
-The sampled current and target frame indices were monotonic for both movie
-instances. There was no index restart, regression, or second host start.
+## Verification
 
-The wall-clock control selected wall time while the guest audio estimate was
-still slow. The PlayStation Studios movie completed at 9.87 s, and the attract
-movie completed at 131.73 s at frame 3,520, close to the source duration but
-with the expected diagnostic audio-clock desynchronization. This establishes
-that the slow guest-audio progression explains the stretched host playback.
-It does not establish that wall time is the correct guest-observable contract.
+This experiment's focused lane is:
 
-### Lifecycle behavior
-
-The focused default run observed this host lifecycle, using anonymous instance
-IDs and private basenames:
-
-```text
-43.477 s  attach/open  ps_studios_logo.bk2       instance 1
-44.301 s  start       ps_studios_logo.bk2       instance 1
-56.982 s  complete    ps_studios_logo.bk2       frame 254, 12.680 s playback
-56.983 s  dispose     ps_studios_logo.bk2       reason complete
-118.781 s guest close ps_studios_logo.bk2       no active host instance
-130.254 s attach/open attract_movie.bk2          instance 2
-130.369 s start       attract_movie.bk2          instance 2
+```powershell
+dotnet test tests\SharpEmu.Libs.Tests\SharpEmu.Libs.Tests.csproj -c Release --filter "FullyQualifiedName~MovieAudioPumpContractTests|FullyQualifiedName~MovieTimelineContractTests"
 ```
 
-There was one descriptor/open event for each observed host movie, no duplicate
-active-path attach, no queue duplicate, no reattach of the same source, and no
-second host start for `ps_studios_logo.bk2`. The late guest close was not a
-restart: host playback had already completed and disposed instance 1, so the
-close produced a non-active stop notification.
+The requested repository verification remains:
 
-The guest path is still alive at the same time. `TryTakeOverGuestMovie` keeps
-the real Bink header and guest draw alive; host pixels replace the sampled image
-when the presenter identifies the Bink Y/UV bindings. Thus host decoding and
-guest Bink/render work coexist. The evidence rules out a second host movie
-instance, but it does not identify which ordinary guest draw produces the later
-title card.
-
-### Frame behavior
-
-The decoder produces changing frames while the host instance is active. In the
-focused default stream, instance 1 advanced through sampled frame indices
-0–243 and completed at frame 254; instance 2 advanced through 0–2,871 in the
-300-second sample. Frames were held between target-time changes and some late
-frames were skipped, which is expected at the observed presentation rate.
-
-The host frame serial and uploads advanced while each movie was active. After
-the first movie completed, the presenter retained the last host frame and its
-serial: the frame remained available while host playback was inactive, and the
-same inactive instance was still selected by some Bink-shaped guest draws for
-more than a minute. This is stale-frame eligibility, not a decoder restart.
-
-### Presentation behavior
-
-The presenter does not put a host movie directly on the final swapchain. It
-uses host-decoded Y/UV resources as replacements for the guest Bink textures in
-translated guest draws; the final swapchain presentation remains an ordinary
-guest/translated presentation.
-
-The focused stream therefore crosses the following boundary:
-
-```text
-host decoder advances/uploads
-        → guest Bink-shaped draw may select host Y/UV resources
-        → translated guest draw reaches ordinary swapchain presentation
+```powershell
+./scripts/verify.ps1 -Lane Fast
+git diff --check
 ```
 
-#### Before the correction
-
-After host completion, `VulkanVideoPresenter` deliberately kept
-`_hostMovieFramePixels` and its serial while the next movie was not ready. The
-diagnostic showed that completed host data remained eligible for selection even
-though `HostMovieBridge.IsHostPlaybackActive` was false. The local source’s
-final PlayStation Studios frame is black, and the direct run showed a
-solid-black interval at this boundary. The narrowest proven black-output
-boundary was the completed host frame remaining selectable during the
-guest/host handoff.
-
-#### Implemented host-generation correction
-
-Each successfully attached host movie now receives a monotonically increasing
-generation. Completion, guest close, replacement, and failed queued
-continuation invalidate the bridge generation before the host instance is
-disposed or cleared. Presenter shutdown clears its retained generation and
-frame state. The presenter retains the generation with its frame and requires
-an exact match among the retained frame, the active bridge generation, and the
-host binding before selecting host Y/UV resources. A generation change clears
-the retained CPU frame, converted planes, binding addresses, frame serials,
-and upload serials, including when the path is unchanged. A stale binding
-snapshot falls through to ordinary guest texture resolution.
-
-Host texture resources retain their creation generation and instance identity.
-Their preparation is provisional until the presenter reserves that exact
-generation at the final CPU boundary before command recording. If completion,
-guest close, or replacement wins first, the presenter rejects the late host
-candidate, discards its unsubmitted staging state, rewrites the descriptor set
-to the ordinary guest texture resources, and emits a bounded late-rejection
-diagnostic. If the presenter reserves first, bridge invalidation waits only
-until `QueueSubmit` succeeds. The reservation is then released; the submitted
-command may complete normally and its storage remains owned by the existing
-frame-fence/timeline retirement path. Logical invalidation never destroys
-resources that submitted GPU work may still reference. The presenter does not
-call back into the bridge while holding the reservation, avoiding an inverse
-bridge-lock dependency. Multiple host draws in one shared guest command batch
-share reference-counted ownership of that one generation reservation, which is
-released only after the batch submission.
-
-This is a synchronization guarantee, not a claim that the presenter and
-bridge are globally serialized: work prepared before the reservation may be
-rejected, while work whose reservation precedes invalidation may be submitted
-and later retired. Target observation showed that the stale black host output
-was replaced by a grey transition, leaving a separate output owner unresolved.
-
-#### After correction: target observation
-
-The attended pilot and comparable confirmations observed the corrected
-boundary: generation 1 completed once, the presenter invalidated it, and later
-guest draws did not select or upload generation 1. The direct visual result was
-consistent across the runs: the former solid-black interval became grey, while
-the slow animation audio continued. The later startup route remained usable
-through the main menu. This validates stale host-generation selection as one
-cause of the old black output, but it does not identify the producer of the
-remaining grey transition or establish a timing correction.
-
-The intermittent flashing reports are not collapsed into this finding. They
-may be a different selection or transition race between the stale host input
-and ordinary guest output. The present evidence proves the stale-selection
-condition and the solid-black outcome, but does not prove that it explains every
-flashing run.
-
-### Audio and movie-clock attribution
-
-This section records the 2026-08-03 attribution pass. It is an investigation
-finding only: no compatibility correction was implemented.
-
-#### Direct observations
-
-The exact stream ownership is now established. On both diagnostic runs the
-streams were:
-
-| Stream | Owner/source | Input and queue | Device observation | Clock reports |
-| ---: | --- | --- | --- | --- |
-| 1 | `audio-out2-primary` / `guest-audio-out2-primary` | 48 kHz, 2-channel S16; 682.667 ms cap | SDL device 25, 48 kHz 2-channel F32, 480-frame buffer, running | Accepted reports; this stream advances the global clock |
-| 2 | `movie` / `ps_studios_logo.bk2`, movie instance 1, generation 1 | 48 kHz, 2-channel S16; 170.667 ms cap | SDL device 29, 48 kHz 2-channel F32, 480-frame buffer, running | 0 accepted, 213 rejected in each run |
-| 3 | `audio-out` / `port-1` | 48 kHz, 8-channel S16; 60 ms cap | SDL device 33, 48 kHz 2-channel F32, 480-frame buffer, running | Rejected because its local position lagged stream 1 |
-
-The three SDL device IDs are distinct logical device associations with the same
-reported physical device name. Each stream observed one initial running-state
-transition, then remained running. No queue query failure, device-unavailable
-state, pause, frequency-ratio change, or SDL submission failure was recorded.
-The push streams reported no application callback: callback availability was
-false and requested/supplied callback frames remained zero.
-
-The movie path is:
-
-```text
-Bink packet demux/decode
-  → FfmpegVideoDecoder.SubmitAudioFrame
-  → swr_convert to 48 kHz stereo S16
-  → SdlHostAudio.AudioStream.Submit
-  → SDL_PutAudioStreamData (SDL input queue)
-  → SDL device conversion to 48 kHz stereo F32
-  → device consumption
-```
-
-The decoder-open event reported source `AV_SAMPLE_FMT_FLTP`, 48 kHz stereo,
-output `AV_SAMPLE_FMT_S16`, 48 kHz stereo, and an FFmpeg declared audio
-duration of 0 s. The independent source metadata is 8.500 s; the zero FFmpeg
-duration did not prevent draining the measured 8.520 s of samples.
-
-`SdlHostAudio.Submit` is also the only caller of `GuestAudioClock.Report`.
-It reports accepted submitted samples minus the queue depth; the movie stream
-reports its own local position, but the shared furthest-value clock rejects it
-because the guest AudioOut2 stream is already farther ahead. At movie start the
-global value was 26.506666 s in diagnostic run 1 and 28.286 s in run 2. The
-movie stream ended at 8.47/8.48 local seconds while its reports remained
-0 accepted/213 rejected. Stream 1 was the accepted clock source throughout the
-movie interval.
-
-The first starvation boundary is in the host movie decoder, before SDL
-submission. In diagnostic run 1 the movie decoder entered `frame-buffer-wait`
-at 45.278 s with 100 ms queued and resumed `video-decode` at 45.975 s with an
-empty queue. In run 2 it entered the same wait at 44.503 s with 130 ms queued
-and resumed at 45.018 s empty. `MediaFramePlayback.DecodeLoop` cannot call
-`FfmpegVideoDecoder.TryDecodeNextFrame` while all five frame buffers are held;
-the decoder therefore cannot read the next interleaved audio packets during
-that wait. Later short waits repeat after the queue is empty. The measured
-boundary is the frame-buffer wait; the component that delays releasing a frame
-buffer is not yet isolated.
-
-#### Calculated values
-
-The final movie totals reconciled identically in both diagnostic runs:
-
-| Quantity | Value | Calculation/meaning |
-| --- | ---: | --- |
-| Source audio frames decoded | 408,960 | FFmpeg audio frames, source 48 kHz |
-| Converted output frames | 408,960 | `swr_convert` output; 1.0000 ratio |
-| Submitted input frames | 408,960 | 1,635,840 bytes at 4 bytes/frame accepted by SDL |
-| Failed/unsubmitted frames | 0 | No SDL `PutAudioStreamData` failure and no converted output left unsubmitted |
-| Dequeued input frames at final snapshot | 408,960 | Submitted input minus SDL-reported queued input; not physical playback |
-| Missing output frames | 0 | Converted output equals accepted submission |
-| Source audio time | 8.520000 s | `408,960 / 48,000` |
-| Last source timestamp | 8.48 s | FFmpeg audio-frame PTS observed |
-
-The source asset is 8.500 s at 30 fps; the audio packet stream contributes
-8.520 s of 48 kHz samples. The movie completed once at frame 254 after
-13.896 s and 14.124 s of movie wall playback in the two diagnostic runs. The
-audio data was not stretched by a sample-count or resampling error: all source
-samples were converted and accepted for submission, with no converted frames
-lost or rejected. At the final snapshot SDL reported zero queued input bytes
-and zero converted-available bytes. This proves that no pending data remained
-visible at those two SDL stream boundaries. It does not prove exact
-physical-device playback or that every frame was audible. `GuestAudioClock` is
-an estimate derived from accepted input minus SDL input-queue depth, not a
-direct measurement of samples heard by the user.
-
-The separate guest stream was the slow clock frontier. In run 2, the final
-AudioOut2 primary snapshot had a 10.667 ms queue, 2,912,000 submitted input
-frames, 2,911,488 dequeued input frames, 2,121 underruns, and 22.573 s
-accumulated empty time. The dequeued count is SDL input-queue arithmetic, not
-a physical-device or audible-playback count. The movie stream had 11 underruns
-and 12.650 s accumulated empty time;
-the classic AudioOut stream had a 58 ms queue, one underrun, and 0.19 s of
-accumulated empty time. Queue caps were never exceeded and no stream recorded
-an over-target enqueue.
-
-#### Source-backed behavior
-
-The interpretation uses the current official SDL3 and .NET contracts recorded
-in [`docs/SOURCES.md`](SOURCES.md): SDL reports stream queued bytes and
-converted availability separately, exposes stream/device formats and device
-identity, and a null callback selects push-mode delivery; SDL's frequency ratio
-of 1.0 is normal-rate conversion. `SDL_GetAudioStreamQueued` reports input-format
-bytes still queued for conversion, while `SDL_GetAudioStreamAvailable` reports
-converted output available. Neither reports all device or hardware buffering.
-`Stopwatch.GetTimestamp` and
-`Stopwatch.GetElapsedTime` provide the host monotonic correlation used by the
-events. These API contracts do not identify the title's intended guest/movie
-clock owner.
-
-#### Inferences
-
-- The movie stream starves because Bink audio production is bursty and coupled
-  to the video decoder's five-buffer availability. The first measured cause is
-  the decoder's `frame-buffer-wait`, not slow sample conversion.
-- The slow movie presentation is causally explained by two measured facts:
-  movie frame selection follows the shared `GuestAudioClock`, and the accepted
-  clock source is the underrunning AudioOut2 primary stream. The movie stream's
-  own audio does not drive that clock.
-- The current implementation does not establish that the movie's host audio
-  and the guest AudioOut2 stream are intended to share one timeline. Therefore
-  changing the global clock owner, making it per-movie, or moving audio packet
-  pumping off the video decoder would be a semantic correction, not an
-  instrumentation-only change.
-- The historical 683 ms queue attribution to the movie stream was incorrect.
-  That cap belongs to AudioOut2 primary; the movie cap is 170.667 ms.
-
-#### No-default-device warnings
-
-The two diagnostic runs had no no-default-device warning and still reproduced
-the movie's empty queue and stretched completion. In the earlier warning-bearing
-run `20260801T061920689Z-c129d0f-trial-01`, every warning was explicitly
-`AudioOut2 primary backend unavailable: ... No default audio device available`.
-The movie stream was not the warning owner. The present evidence proves that
-the warnings are not required to reproduce the movie-stream underrun. It does
-not establish that an AudioOut2 fallback in a warning-bearing run cannot
-contribute to that run's behavior.
-
-#### Unresolved questions and falsifiers
-
-The following remain open: which guest/render phase holds the fifth movie frame
-buffer, whether the intended startup contract couples movie video to the movie
-audio or to guest AudioOut2, and whether SDL's input-queue/converted-available
-boundary needs a device-level consumption probe for sub-interval accounting.
-
-The attribution would be falsified if a repeat run shows movie stream clock
-reports accepted while AudioOut2 reports are rejected, if movie audio totals
-contain failed/unsubmitted samples or a non-1.0 ratio, if the movie queue stays
-non-empty across the measured frame-buffer waits, if device state transitions
-precede the gaps, or if decoupling frame-buffer availability in a synthetic
-authored decoder leaves the same starvation pattern. A correction proposal also
-requires a proof of the intended guest/movie timeline and ownership.
-
-#### Narrowest correction boundary
-
-No implementation-ready compatibility correction exists from this pass. The
-narrowest measured boundary is the host `MediaFramePlayback` frame-buffer wait
-that prevents `FfmpegVideoDecoder` from pumping interleaved audio packets. The
-smallest plausible future experiment is an authored synthetic decoder that
-continues audio packet pumping while the video frame pool is exhausted; it must
-preserve the observed frame ownership and prove the guest/movie clock contract
-before any target behavior is changed. Wall-clock playback remains diagnostic
-only.
-
-#### Runs, hashes, safety, and instrumentation overhead
-
-| Run | Mode/result | Movie checkpoint |
-| --- | --- | --- |
-| `20260802T220619684Z-a7ee8a4-trial-01` | Clean control, diagnostics disabled; physical-headroom stop at 204.420 s | `ps_studios_logo.bk2` attached and completed at 11.13 s/frame 254; `attract_movie.bk2` attached; no nickname checkpoint inferred |
-| `20260802T221008090Z-a7ee8a4-trial-01` | Diagnostic; physical-headroom stop at 70.781 s; no cleanup failures | Logo attached at 44.454 s, started at 45.800 s, completed at 13.896 s/frame 254 |
-| `20260802T221703483Z-a7ee8a4-trial-01` | Diagnostic repeat; physical-headroom stop at 93.151 s; no cleanup failures | Logo attached at 43.707 s, started at 44.936 s, completed at 14.124 s/frame 254 |
-
-The Release executable SHA-256 was
-`FAA5F39B1A1395873DE5577770671421FF0A955DB0CADD716A7EC4C7280DAF47`.
-The target `eboot.bin` SHA-256 was
-`22ED8843917CB16438B7B780998E408321F5CEBE79DD10F388AE59CFCA588306`.
-The fixed page file remained `C:\pagefile.sys`, 32,768 MB initial and maximum;
-the runner's physical-headroom, commit-headroom, process-tree cleanup, and
-sampling policies were unchanged. All three manifests recorded empty cleanup
-failures, and no SharpEmu process remained after each run.
-
-With diagnostics disabled, the audio path performs no diagnostic payload
-construction, formatting, diagnostic locking, or per-frame accounting. Enabled
-runs emitted 411 and 408 bounded audio events respectively and produced 5.1 MB
-and 6.5 MB JSONL artifacts, alongside the runner's other memory events. The
-target completion shift relative to the clean control is a sensitivity signal,
-not an isolated instrumentation-overhead measurement; the broad memory
-diagnostic stream and physical-headroom stop prevent that claim.
-
-Focused diagnostics tests passed 10/10. The Fast lane passed all six runner and
-memory regressions and all 843 solution tests. `git diff --check` passed. The
-shader lane was not run because this investigation changes no shader or GPU
-semantics.
-
-### Later progression and safety
-
-The movie behavior is independent of the already-proven route through the main
-menu, offline prompt, body-type screen, and name/class/starting-gift
-customization. The user-controlled run reached the next attract cinematic and
-was closed by the user; that is not a runner safety termination.
-
-Other controlled runs terminated at the configured physical-headroom or
-wall-time boundaries, or by normal process exit; cleanup succeeded in each
-case. No visual checkpoint is inferred from any safety termination.
-
-## Implemented correction and remaining frontier
-
-The first semantic correction is now owned by the host movie/presenter lifetime
-boundary: once a movie generation completes or is closed, its host frame is no
-longer eligible for a guest Bink draw. The generation/active handoff keeps the
-guest surface available for the ordinary guest path during the transition.
-
-Do not switch the movie clock to wall time as the timing correction. This change
-does not alter `GuestAudioClock`, `MediaFramePlayback`, or frame pacing.
-
-The timing correction is a separate boundary. Establish the guest-observable
-audio-clock contract with a synthetic audio/movie experiment before changing
-`CurrentPlaybackSecondsLocked`. The expected result is source-duration timing
-without losing the ordered guest audio relationship; a wall-clock improvement
-alone is insufficient.
-
-Expected visible improvement from the first change: the completed black host
-frame cannot persist as a selectable movie input during the handoff. Whether the
-screen becomes guest-owned, remains black for another reason, or still flashes
-requires direct target observation. Expected timing change: none by itself;
-timing should change only after the audio-clock contract is corrected.
-
-Synthetic regression coverage should use authored decoders and fake guest
-clock/presenter inputs to verify:
-
-1. monotonic target/current frame selection with late-frame retirement;
-2. audio-clock and wall-clock selection as separate policies;
-3. completion, guest close, and replacement invalidating host selection for
-   the completed generation, with shutdown clearing presenter selection;
-4. next-generation attachment, including the same path, not exposing the
-   previous generation’s frame or binding state;
-5. a prepared host draw rejected after invalidation wins the final submission
-   boundary, with descriptor/resource fallback to ordinary guest texture
-   resolution;
-6. a reservation acquired before invalidation releasing only after successful
-   submission, while in-flight Vulkan storage remains fence-owned;
-7. same-path replacement retaining distinct generation identity and bounded
-   late-rejection diagnostics, including the disabled diagnostics path.
-
-Target validation of the earlier correction used the default native-Bink run
-under the same controlled safety policy, correlated generation-end,
-presenter-invalidation, upload, and guest-draw-selection events, and included
-direct visual observation. That evidence held the logical stale-selection
-invariant, and the direct visual result was grey rather than black at the
-handoff. The final submission-boundary race is validated synthetically because
-an attended target run does not deterministically place invalidation between
-resource preparation and command submission. Timing variance requires three
-comparable trials for a timing claim; this correction did not alter timing.
-
-The correction is incomplete if a completed generation remains selected by a
-later guest draw, if a new generation inherits the previous frame or binding
-identity, or if the ordinary guest texture path is not available after
-invalidation. The earlier diagnosis remains separate if the stale generation
-is excluded but the screen remains black or flashing.
-
-Raw logs, manifests, source samples, movie fingerprints, and target paths remain
-outside Git under the ignored local artifact root.
+Shader verification is unnecessary because this change touches no shader or
+GPU semantics. No retail target run is required for this experiment.
