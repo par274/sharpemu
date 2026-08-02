@@ -3145,8 +3145,72 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
         // Large Gen5 executables can keep valid code well past the first 32 MiB.
         // Astro Bot, for example, has an FS:[0] TLS load near +0x70A0000.
         const ulong MaxScanBytes = 134217728uL;
-		ulong num = _entryPoint;
-		ulong num2 = num + MaxScanBytes;
+
+		// _entryPoint is NOT necessarily inside the main game image: PS5 titles commonly
+		// run a small bootstrap/runtime module first (loaded at its own base, e.g.
+		// 0x804000000) that then jumps into the actual game module -- confirmed live on
+		// Demon's Souls (PPSA01342): "EntryPoint: 0x0000000804000010" belongs to the
+		// SECOND loaded image, while the main ~59 MiB game module sits at the standard
+		// base 0x800000000 (SelfLoader.Ps5MainImageBase) and was never scanned at all,
+		// leaving its FS:[0] TLS loads unpatched -> hardware fault reading absolute
+		// address 0 the first time guest code executed one (std::locale::_Init's
+		// Locinfo teardown, import #110). VirtualQuery's AllocationBase gives the true
+		// start of whichever allocation _entryPoint happens to live in, but the main
+		// module can be a wholly separate allocation -- always fold in the standard
+		// PS5/PS4 main-image base as a floor so the primary game module is covered
+		// regardless of where the runtime happened to start execution.
+		const ulong Ps5MainImageBase = 0x0000000800000000UL;
+		const ulong Ps4MainImageBase = 0x0000000000400000UL;
+		ulong scanStart = _entryPoint;
+		if (VirtualQuery((void*)_entryPoint, out var entryRegion, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0 &&
+			entryRegion.AllocationBase != 0 &&
+			entryRegion.AllocationBase <= _entryPoint)
+		{
+			scanStart = entryRegion.AllocationBase;
+		}
+
+		PatchTlsPatternsInRange(scanStart, scanStart + MaxScanBytes, announce: true);
+
+		// _entryPoint's own allocation (scanned above) is not necessarily the main
+		// game module: PS5 titles commonly run a small bootstrap/runtime module
+		// first (its own separate allocation) that then jumps into the actual game
+		// module elsewhere -- confirmed live on Demon's Souls (PPSA01342), whose
+		// bootstrap entry point sits at its own small allocation while the ~59 MiB
+		// main module sits at the standard base and was never scanned at all.
+		// A numeric-only "_entryPoint >= standard base -> redirect scanStart there"
+		// check is not a safe stand-in for this: any host-arbitrary fallback
+		// allocation (e.g. a relocatable module whose preferred base failed and
+		// landed far outside the guest range, such as libc.prx doing so on Ghost of
+		// Yotei) is numerically >= the standard base too, and redirecting away from
+		// its own real region there discarded that module's own TLS loads entirely
+		// (1671 -> 0, reproduced live). Scan both windows unconditionally instead of
+		// picking one: the entry's own region above, and this second, independent
+		// pass over the standard main-image window whenever the first pass didn't
+		// already cover it. TryPatchTlsLoadInstruction only matches the original
+		// unpatched instruction bytes, so scanning an overlapping range twice is
+		// inherently idempotent -- already-patched bytes simply stop matching.
+		var mainImageBase = _entryPoint >= Ps5MainImageBase ? Ps5MainImageBase : Ps4MainImageBase;
+		if (mainImageBase < scanStart)
+		{
+			PatchTlsPatternsInRange(mainImageBase, mainImageBase + MaxScanBytes, announce: false);
+		}
+	}
+
+	// Pages that are still MEM_RESERVE (not yet committed) at PatchTlsPatterns' one-shot
+	// scan time are invisible to VirtualQuery-as-committed and get skipped -- large,
+	// lazily-committed executable segments (common on big Gen5 titles) can therefore
+	// leave FS:[0]-relative TLS loads unpatched if they live on a page nobody has
+	// touched yet. Those pages get their real (unpatched) bytes only later, when
+	// TryHandleLazyCommittedPage commits them on first fault -- so re-run the same
+	// scan, scoped to just the newly committed window, right after that commit
+	// succeeds. Confirmed live on Demon's Souls (PPSA01342): a `mov rax, fs:[0]`
+	// inside std::locale::_Init's Locinfo teardown crashed reading absolute address 0
+	// (FS.base never applied to real hardware) because its page was reserved-only at
+	// the initial scan and got its original bytes only via this exact lazy-commit path.
+	private unsafe void PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd, bool announce)
+	{
+		ulong num = rangeStart;
+		ulong num2 = rangeEnd;
 		int num3 = 0;
 		int num4 = 0;
 		int num9 = 0;
@@ -3195,7 +3259,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			num = num6 > num ? num6 : num + 4096uL;
 		}
-		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends");
+		if (announce || num3 + num4 + num9 + sse4aPatchCount > 0)
+		{
+			Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends" +
+				(announce ? string.Empty : $" (lazy-commit rescan 0x{rangeStart:X16}-0x{rangeEnd:X16})"));
+		}
 	}
 
 	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
