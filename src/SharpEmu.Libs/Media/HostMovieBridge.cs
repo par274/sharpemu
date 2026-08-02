@@ -37,7 +37,9 @@ internal static class HostMovieBridge
     }
 
     private static readonly object Gate = new();
+    private static readonly HostMovieGenerationTracker HostMovieGenerations = new();
     private static string? _activePath;
+    private static long _activeMovieGeneration;
     private static long _activeMovieInstanceId;
     private static Bink2MovieInfo _activeInfo;
     private static byte[]? _frameBuffer;
@@ -53,10 +55,37 @@ internal static class HostMovieBridge
         {
             lock (Gate)
             {
-                return _playback is not null || _frameBuffer is not null;
+                return HasActiveHostMovieLocked();
             }
         }
     }
+
+    internal static long ActiveHostMovieGeneration
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return (HasActiveHostMovieLocked() &&
+                        HostMovieGenerations.IsActive(_activeMovieGeneration))
+                    ? _activeMovieGeneration
+                    : 0;
+            }
+        }
+    }
+
+    internal static bool IsHostMovieGenerationActive(long generation)
+    {
+        lock (Gate)
+        {
+            return HasActiveHostMovieLocked() &&
+                   HostMovieGenerations.IsActive(generation) &&
+                   _activeMovieGeneration == generation;
+        }
+    }
+
+    private static bool HasActiveHostMovieLocked() =>
+        _playback is not null || _frameBuffer is not null;
 
     internal static void SetPresentationSize(uint width, uint height)
     {
@@ -102,7 +131,7 @@ internal static class HostMovieBridge
                     _activeMovieInstanceId,
                     _activeMovieInstanceId,
                     pending: false);
-                return _playback is not null || _frameBuffer is not null;
+                return HasActiveHostMovieLocked();
             }
 
             var mode = ResolveMode();
@@ -117,7 +146,7 @@ internal static class HostMovieBridge
                 return false;
             }
 
-            if (_playback is not null || _frameBuffer is not null)
+            if (HasActiveHostMovieLocked())
             {
                 var added = PendingMoviePathSet.Add(hostPath);
                 if (added)
@@ -145,7 +174,7 @@ internal static class HostMovieBridge
                 _activeMovieInstanceId,
                 pending: false);
             return string.Equals(_activePath, hostPath, StringComparison.OrdinalIgnoreCase) &&
-                   (_playback is not null || _frameBuffer is not null);
+                   HasActiveHostMovieLocked();
         }
     }
 
@@ -157,7 +186,8 @@ internal static class HostMovieBridge
         out bool advanced,
         out long frameSerial,
         out string hostPath,
-        out long movieInstanceId)
+        out long movieInstanceId,
+        out long movieGeneration)
     {
         lock (Gate)
         {
@@ -168,6 +198,7 @@ internal static class HostMovieBridge
             frameSerial = _frameSerial;
             hostPath = _activePath ?? string.Empty;
             movieInstanceId = _activeMovieInstanceId;
+            movieGeneration = _activeMovieGeneration;
 
             if (_playback is not null)
             {
@@ -177,10 +208,12 @@ internal static class HostMovieBridge
                     {
                         var completedPath = _activePath;
                         var completedInstanceId = _activeMovieInstanceId;
+                        var completedGeneration = _activeMovieGeneration;
                         var progress = _playback.PlaybackProgress;
                         MovieDiagnostics.Complete(
                             completedPath ?? string.Empty,
                             completedInstanceId,
+                            completedGeneration,
                             progress.Seconds,
                             progress.FrameIndex);
                         CloseActiveLocked("complete");
@@ -188,7 +221,10 @@ internal static class HostMovieBridge
                             "[LOADER][INFO] Bink2 bridge completed: " +
                             $"{Path.GetFileName(completedPath)} after " +
                             $"{progress.Seconds:F2}s at frame {progress.FrameIndex}");
-                        AttachNextQueuedMovieLocked(completedPath, completedInstanceId);
+                        AttachNextQueuedMovieLocked(
+                            completedPath,
+                            completedInstanceId,
+                            completedGeneration);
                     }
                     return false;
                 }
@@ -318,6 +354,7 @@ internal static class HostMovieBridge
 
         CloseActiveLocked("replace");
         _activePath = hostPath;
+        _activeMovieGeneration = HostMovieGenerations.Activate();
         _activeMovieInstanceId = MovieDiagnostics.NewMovieInstanceId();
         _activeInfo = info;
         _frameBuffer = GC.AllocateUninitializedArray<byte>(GetFrameBufferLength(info));
@@ -329,6 +366,7 @@ internal static class HostMovieBridge
         MovieDiagnostics.Attach(
             hostPath,
             _activeMovieInstanceId,
+            _activeMovieGeneration,
             info.Width,
             info.Height,
             info.FramesPerSecondNumerator,
@@ -343,12 +381,14 @@ internal static class HostMovieBridge
     {
         CloseActiveLocked("replace");
         _activePath = hostPath;
+        _activeMovieGeneration = HostMovieGenerations.Activate();
         _activeMovieInstanceId = MovieDiagnostics.NewMovieInstanceId();
         _activeInfo = info;
         _playback = new MediaFramePlayback(decoder, _activeMovieInstanceId);
         MovieDiagnostics.Attach(
             hostPath,
             _activeMovieInstanceId,
+            _activeMovieGeneration,
             info.Width,
             info.Height,
             info.FramesPerSecondNumerator,
@@ -404,11 +444,23 @@ internal static class HostMovieBridge
     {
         if (_activePath is not null)
         {
-            MovieDiagnostics.Dispose(_activePath, _activeMovieInstanceId, reason);
+            var generation = _activeMovieGeneration;
+            HostMovieGenerations.Invalidate(generation);
+            MovieDiagnostics.GenerationEnd(
+                _activePath,
+                generation,
+                _activeMovieInstanceId,
+                reason);
+            MovieDiagnostics.Dispose(
+                _activePath,
+                _activeMovieInstanceId,
+                generation,
+                reason);
         }
         _playback?.Dispose();
         _playback = null;
         _activePath = null;
+        _activeMovieGeneration = 0;
         _activeMovieInstanceId = 0;
         _activeInfo = default;
         _frameBuffer = null;
@@ -453,7 +505,8 @@ internal static class HostMovieBridge
         new(StringComparer.OrdinalIgnoreCase);
     private static void AttachNextQueuedMovieLocked(
         string? previousPath = null,
-        long previousInstanceId = 0)
+        long previousInstanceId = 0,
+        long previousGeneration = 0)
     {
         while (PendingMoviePaths.Count > 0)
         {
@@ -465,13 +518,15 @@ internal static class HostMovieBridge
             }
 
             AttachMovieLocked(path, ResolveMode());
-            if (_playback is not null || _frameBuffer is not null)
+            if (HasActiveHostMovieLocked())
             {
                 MovieDiagnostics.Reattach(
                     previousPath,
                     previousInstanceId,
+                    previousGeneration,
                     path,
-                    _activeMovieInstanceId);
+                    _activeMovieInstanceId,
+                    _activeMovieGeneration);
                 return;
             }
         }
@@ -557,18 +612,30 @@ internal static class HostMovieBridge
 
             if (!string.Equals(_activePath, hostPath, StringComparison.OrdinalIgnoreCase))
             {
-                MovieDiagnostics.Stop(hostPath, 0, "guest-close-non-active");
+                MovieDiagnostics.Stop(
+                    hostPath,
+                    0,
+                    0,
+                    "guest-close-non-active");
                 Monitor.PulseAll(Gate);
                 return;
             }
 
             var stoppedInstanceId = _activeMovieInstanceId;
+            var stoppedGeneration = _activeMovieGeneration;
             Console.Error.WriteLine(
                 "[LOADER][INFO] Bink2 bridge stopped by guest close: " +
                 Path.GetFileName(hostPath));
-            MovieDiagnostics.Stop(hostPath, stoppedInstanceId, "guest-close");
+            MovieDiagnostics.Stop(
+                hostPath,
+                stoppedInstanceId,
+                stoppedGeneration,
+                "guest-close");
             CloseActiveLocked("guest-close");
-            AttachNextQueuedMovieLocked(hostPath, stoppedInstanceId);
+            AttachNextQueuedMovieLocked(
+                hostPath,
+                stoppedInstanceId,
+                stoppedGeneration);
         }
     }
 

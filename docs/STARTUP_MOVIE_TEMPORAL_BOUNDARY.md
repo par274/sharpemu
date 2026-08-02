@@ -5,7 +5,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Startup movie temporal boundary
 
-Status: diagnostic finding. No compatibility correction is included here.
+Status: diagnostic finding with the host-generation eligibility correction
+implemented; target visual validation remains pending.
 
 This finding covers the startup movie sequence of Demon’s Souls v1.004.000
 (`PPSA01341`, Europe) after the splash screen. It does not replace the current
@@ -147,13 +148,37 @@ host decoder advances/uploads
         → translated guest draw reaches ordinary swapchain presentation
 ```
 
-After host completion, `VulkanVideoPresenter` deliberately keeps
-`_hostMovieFramePixels` and its serial while the next movie is not ready. The
-diagnostic shows that completed host data remains eligible for selection even
-though `HostMovieBridge.IsHostPlaybackActive` is false. The local source’s final
-PlayStation Studios frame is black, and the direct run showed a solid-black
-interval at this boundary. The narrowest proven black-output boundary is thus
-the completed host frame remaining selectable during the guest/host handoff.
+#### Before the correction
+
+After host completion, `VulkanVideoPresenter` deliberately kept
+`_hostMovieFramePixels` and its serial while the next movie was not ready. The
+diagnostic showed that completed host data remained eligible for selection even
+though `HostMovieBridge.IsHostPlaybackActive` was false. The local source’s
+final PlayStation Studios frame is black, and the direct run showed a
+solid-black interval at this boundary. The narrowest proven black-output
+boundary was the completed host frame remaining selectable during the
+guest/host handoff.
+
+#### Implemented host-generation correction
+
+Each successfully attached host movie now receives a monotonically increasing
+generation. Completion, guest close, replacement, and failed queued
+continuation invalidate the bridge generation before the host instance is
+disposed or cleared. Presenter shutdown clears its retained generation and
+frame state. The presenter retains the generation with its frame and requires
+an exact match among the retained frame, the active bridge generation, and the
+host binding before selecting host Y/UV resources. A generation change clears
+the retained CPU frame, converted planes, binding addresses, frame serials,
+and upload serials, including when the path is unchanged. A stale binding
+snapshot falls through to ordinary guest texture resolution.
+
+Host texture resources retain their creation generation and instance identity.
+Logical invalidation does not destroy shared Vulkan images or storage owned by
+submitted work; the existing fence/timeline retirement path still owns that
+destruction. An already submitted command may therefore complete, but a later
+guest draw cannot select the inactive generation. Target observation will
+determine whether this removes the observed solid-black interval or leaves a
+separate black-output owner.
 
 The intermittent flashing reports are not collapsed into this finding. They
 may be a different selection or transition race between the stale host input
@@ -195,15 +220,15 @@ Other controlled runs terminated at the configured physical-headroom or
 wall-time boundaries, or by normal process exit; cleanup succeeded in each
 case. No visual checkpoint is inferred from any safety termination.
 
-## Implementation-ready next change
+## Implemented correction and remaining frontier
 
-Do not switch the movie clock to wall time as the compatibility correction.
-The first semantic change should be owned by the host movie/presenter lifetime
-boundary: once a movie instance completes or is closed, its host frame must no
-longer be eligible for a guest Bink draw unless that same instance is still the
-guest-observable active surface. A generation/active handoff or equivalent
-invalidation should make this invariant explicit. The guest surface must remain
-available for the ordinary guest path during the transition.
+The first semantic correction is now owned by the host movie/presenter lifetime
+boundary: once a movie generation completes or is closed, its host frame is no
+longer eligible for a guest Bink draw. The generation/active handoff keeps the
+guest surface available for the ordinary guest path during the transition.
+
+Do not switch the movie clock to wall time as the timing correction. This change
+does not alter `GuestAudioClock`, `MediaFramePlayback`, or frame pacing.
 
 The timing correction is a separate boundary. Establish the guest-observable
 audio-clock contract with a synthetic audio/movie experiment before changing
@@ -212,28 +237,35 @@ without losing the ordered guest audio relationship; a wall-clock improvement
 alone is insufficient.
 
 Expected visible improvement from the first change: the completed black host
-frame cannot persist as a selectable movie input during the handoff. Expected
-timing change: none by itself; timing should change only after the audio-clock
-contract is corrected.
+frame cannot persist as a selectable movie input during the handoff. Whether the
+screen becomes guest-owned, remains black for another reason, or still flashes
+requires direct target observation. Expected timing change: none by itself;
+timing should change only after the audio-clock contract is corrected.
 
 Synthetic regression coverage should use authored decoders and fake guest
 clock/presenter inputs to verify:
 
 1. monotonic target/current frame selection with late-frame retirement;
 2. audio-clock and wall-clock selection as separate policies;
-3. completion invalidating host selection for the completed instance;
-4. next-instance attachment not exposing the previous instance’s frame.
+3. completion, guest close, and replacement invalidating host selection for
+   the completed generation, with shutdown clearing presenter selection;
+4. next-generation attachment, including the same path, not exposing the
+   previous generation’s frame or binding state;
+5. invalidation falling through to ordinary guest texture resolution while
+   in-flight Vulkan storage remains fence-owned.
 
 Target validation should repeat the default native-Bink run under the same
-controlled safety policy, correlate the host instance, active-generation,
+controlled safety policy, correlate generation-end, presenter-invalidation,
 upload, and guest-draw-selection events, and use direct visual observation.
-Timing variance requires three comparable trials; no blind three-run matrix is
-needed to re-prove the current boundary.
+The pilot must validate the invariant before two comparable confirmation trials
+are run. Timing variance requires three comparable trials; this correction is
+not expected to change timing.
 
-The diagnosis would be falsified if a completed host instance remains excluded
-from all guest movie selection, if default playback reaches source duration
-despite the measured audio-clock lag, or if a second active attachment/start of
-the same source is observed.
+The correction is incomplete if a completed generation remains selected by a
+later guest draw, if a new generation inherits the previous frame or binding
+identity, or if the ordinary guest texture path is not available after
+invalidation. The earlier diagnosis remains separate if the stale generation
+is excluded but the screen remains black or flashing.
 
 Raw logs, manifests, source samples, movie fingerprints, and target paths remain
 outside Git under the ignored local artifact root.

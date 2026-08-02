@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Tests.Diagnostics;
+using SharpEmu.Libs.Media;
 using SharpEmu.Libs.VideoOut;
 using Xunit;
 
@@ -120,6 +121,35 @@ public sealed class VulkanResourceLifetimeDiagnosticsTests
         var entry = Assert.Single(diagnostics.GetSnapshot().Entries);
         Assert.Equal("vulkan-device-teardown", entry.ActualDestructionReason);
         Assert.False(entry.Retained);
+        Assert.Equal(0, diagnostics.GetSnapshot().DeferredDestructionBytes);
+    }
+
+    [Fact]
+    public void GenerationInvalidationLeavesInFlightStorageDeferredUntilRetirement()
+    {
+        var tracker = new HostMovieGenerationTracker();
+        var generation = tracker.Activate();
+        var frame = new HostMovieFrameLifetime();
+        frame.Publish(generation);
+        var diagnostics = new VulkanResourceLifetimeDiagnostics();
+        var resourceId = diagnostics.TrackCacheInsertion(
+            Descriptor,
+            guestWorkSequence: 1,
+            queue: "graphics",
+            insertionMilliseconds: 2,
+            imageMemoryBytes: 100,
+            stagingMemoryBytes: 40,
+            stagingMapped: false,
+            uploadRecorded: true);
+
+        diagnostics.RecordCacheRemoval(resourceId, "generation-invalidated", 3, 12);
+        diagnostics.RecordDeferredDestroy(resourceId, 12, 3);
+        Assert.True(tracker.Invalidate(generation));
+        Assert.True(frame.Invalidate(generation));
+        Assert.False(frame.IsEligible(tracker.ActiveGeneration));
+        Assert.Equal(140, diagnostics.GetSnapshot().DeferredDestructionBytes);
+
+        diagnostics.RecordActualDestroy(resourceId, 12, 4, "deferred-retire");
         Assert.Equal(0, diagnostics.GetSnapshot().DeferredDestructionBytes);
     }
 
