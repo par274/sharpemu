@@ -12225,34 +12225,25 @@ internal static unsafe class VulkanVideoPresenter
                             }
 
                             // Highly fragmented pages make precise per-run
-                            // copying counterproductive. Measured live on
-                            // Ghost of Yotei (SHARPEMU_TRACE_WRITEBACK_MERGE_SIM,
-                            // not left wired up): one buffer hit up to 1024
-                            // runs on a single 4KB page (~400 runs/page
-                            // average across 5096 dirty pages, 2,041,716
-                            // runs total) and cost 2.3s of scan_ms against
-                            // io_ms under 10ms for the same 20MB range --
-                            // the per-run bookkeeping (list entries, bounds
-                            // math) dominates, not the byte-copy throughput.
-                            // Above FragmentationRunThreshold runs on one
-                            // page, collapse it to a single run spanning its
-                            // first-to-last changed byte instead -- the same
-                            // envelope-merge idea the unreadable-page
+                            // copying counterproductive: per-run bookkeeping
+                            // (list entries, bounds math) can dominate scan
+                            // cost far more than the byte-copy throughput
+                            // itself. Above FragmentationRunThreshold runs on
+                            // one page, collapse it to a single run spanning
+                            // its first-to-last changed byte instead -- the
+                            // same envelope-merge idea the unreadable-page
                             // fallback below already uses at a much tighter
-                            // 16-byte gap, just applied across the whole
-                            // page once it's already this fragmented.
-                            // Measured effect on that same buffer: 2,041,716
-                            // runs collapse to 5,096 (one per page), bytes
-                            // copied grow from 7.5MB to 20.7MB -- trivial
-                            // against io_ms. Bytes strictly outside every
-                            // page's own envelope are never touched (still
-                            // read from live guest memory, not overwritten),
-                            // so live CPU writes elsewhere on the same
-                            // allocation are unaffected; only CPU writes
-                            // landing inside an already-GPU-dirty page's own
-                            // gaps -- between two changed runs the GPU
-                            // itself already touched this same sync window
-                            // -- lose precision the same way the pre-existing
+                            // 16-byte gap, just applied across the whole page
+                            // once it's already this fragmented. Bytes
+                            // strictly outside every page's own envelope are
+                            // never touched (still read from live guest
+                            // memory, not overwritten), so live CPU writes
+                            // elsewhere on the same allocation are
+                            // unaffected; only CPU writes landing inside an
+                            // already-GPU-dirty page's own gaps -- between
+                            // two changed runs the GPU itself already
+                            // touched this same sync window -- lose
+                            // precision the same way the pre-existing
                             // 16-byte-gap merge below already accepts.
                             List<(int Start, int Length)> runsToWrite;
                             if (pageRuns.Count > FragmentationRunThreshold)
