@@ -1556,6 +1556,18 @@ public static partial class KernelMemoryCompatExports
                 }
             }
 
+            if (observedBinkMovie)
+            {
+                if (MovieDiagnostics.Enabled)
+                {
+                    MovieDiagnostics.GuestOpen(
+                        fd,
+                        hostPath,
+                        HostMovieBridge.GetMovieInstanceId(hostPath),
+                        useBinkCompletionShim);
+                }
+            }
+
             if (useBinkCompletionShim)
             {
                 LogOpenTrace(
@@ -2228,7 +2240,26 @@ public static partial class KernelMemoryCompatExports
 
         if (notifyBinkClose)
         {
+            if (MovieDiagnostics.Enabled)
+            {
+                MovieDiagnostics.GuestClose(
+                    fd,
+                    observedBinkPath!,
+                    HostMovieBridge.GetMovieInstanceId(observedBinkPath!),
+                    notifiedBridge: true);
+            }
             HostMovieBridge.NotifyGuestMovieClosed(observedBinkPath!);
+        }
+        else if (observedBinkPath is not null)
+        {
+            if (MovieDiagnostics.Enabled)
+            {
+                MovieDiagnostics.GuestClose(
+                    fd,
+                    observedBinkPath,
+                    HostMovieBridge.GetMovieInstanceId(observedBinkPath),
+                    notifiedBridge: false);
+            }
         }
         stream.Dispose();
         ctx[CpuRegister.Rax] = 0;
