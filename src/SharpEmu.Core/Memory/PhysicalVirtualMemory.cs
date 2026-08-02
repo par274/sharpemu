@@ -20,6 +20,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly Dictionary<(ulong DesiredAddress, ulong Alignment, bool Executable), ulong> _allocationSearchHints = new();
     private readonly Dictionary<ulong, ProgramHeaderFlags> _pageProtections = new();
     private bool _disposed;
+    private readonly bool _guestResidencyDiagnosticAttached;
     private int _diagnosticMappingEventCount;
     private int _diagnosticDroppedMappingEvents;
 
@@ -127,6 +128,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     public PhysicalVirtualMemory(IHostMemory? hostMemory = null)
     {
         _hostMemory = hostMemory ?? CrossPlatformHostMemory.Instance;
+        _guestResidencyDiagnosticAttached = GuestResidencyDiagnosticsSession.TryAttach(this);
     }
 
     private sealed class CrossPlatformHostMemory : IHostMemory
@@ -1009,6 +1011,31 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
+    internal GuestHostMappingDiagnosticRange[] SnapshotGuestHostMappingsForDiagnostics()
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            var snapshot = new GuestHostMappingDiagnosticRange[_regions.Count];
+            for (var index = 0; index < _regions.Count; index++)
+            {
+                var region = _regions[index];
+                snapshot[index] = new GuestHostMappingDiagnosticRange(
+                    region.VirtualAddress,
+                    region.Size,
+                    checked((ulong)Volatile.Read(ref region.CommittedBytes)),
+                    region.IsExecutable,
+                    region.IsReservedOnly);
+            }
+
+            return snapshot;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
     public bool TryRead(ulong virtualAddress, Span<byte> destination)
     {
         var requiresExclusiveAccess = false;
@@ -1839,6 +1866,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             Clear();
             _disposed = true;
+            if (_guestResidencyDiagnosticAttached)
+            {
+                GuestResidencyDiagnosticsSession.DetachMemory(this);
+            }
         }
     }
 
