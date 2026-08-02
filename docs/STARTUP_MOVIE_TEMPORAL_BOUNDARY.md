@@ -6,7 +6,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
 # Startup movie temporal boundary
 
 Status: diagnostic finding with the host-generation eligibility correction
-implemented; target visual validation remains pending.
+implemented and target-validated for stale host selection; a separate grey
+transition output remains unresolved.
 
 This finding covers the startup movie sequence of Demon’s Souls v1.004.000
 (`PPSA01341`, Europe) after the splash screen. It does not replace the current
@@ -176,9 +177,20 @@ Host texture resources retain their creation generation and instance identity.
 Logical invalidation does not destroy shared Vulkan images or storage owned by
 submitted work; the existing fence/timeline retirement path still owns that
 destruction. An already submitted command may therefore complete, but a later
-guest draw cannot select the inactive generation. Target observation will
-determine whether this removes the observed solid-black interval or leaves a
-separate black-output owner.
+guest draw cannot select the inactive generation. Target observation showed
+that the stale black host output was replaced by a grey transition, leaving a
+separate output owner unresolved.
+
+#### After correction: target observation
+
+The attended pilot and comparable confirmations observed the corrected
+boundary: generation 1 completed once, the presenter invalidated it, and later
+guest draws did not select or upload generation 1. The direct visual result was
+consistent across the runs: the former solid-black interval became grey, while
+the slow animation audio continued. The later startup route remained usable
+through the main menu. This validates stale host-generation selection as one
+cause of the old black output, but it does not identify the producer of the
+remaining grey transition or establish a timing correction.
 
 The intermittent flashing reports are not collapsed into this finding. They
 may be a different selection or transition race between the stale host input
@@ -254,12 +266,13 @@ clock/presenter inputs to verify:
 5. invalidation falling through to ordinary guest texture resolution while
    in-flight Vulkan storage remains fence-owned.
 
-Target validation should repeat the default native-Bink run under the same
-controlled safety policy, correlate generation-end, presenter-invalidation,
-upload, and guest-draw-selection events, and use direct visual observation.
-The pilot must validate the invariant before two comparable confirmation trials
-are run. Timing variance requires three comparable trials; this correction is
-not expected to change timing.
+Target validation used the default native-Bink run under the same controlled
+safety policy, correlated generation-end, presenter-invalidation, upload, and
+guest-draw-selection events, and included direct visual observation. The
+invariant held in the pilot and confirmation evidence, and the direct visual
+result was grey rather than black at the handoff. Timing variance requires
+three comparable trials for a timing claim; this correction did not alter
+timing.
 
 The correction is incomplete if a completed generation remains selected by a
 later guest draw, if a new generation inherits the previous frame or binding
