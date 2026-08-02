@@ -28,6 +28,7 @@ public static class Ngs2Exports
     // receive only the rack handle, so per-system IDs would collide here.
     // Keep them monotonic so a destroyed handle cannot alias a later rack.
     private static ulong _nextRackHandle;
+    private static bool _rackZeroBootstrapAvailable = true;
     private static long _renderCount;
 
     // NGS2 renders one grain of interleaved float32 per sceNgs2SystemRender.
@@ -185,6 +186,11 @@ public static class Ngs2Exports
             }
 
             _nextRackHandle++;
+            if (handle == 0)
+            {
+                _rackZeroBootstrapAvailable = false;
+            }
+
             Racks[handle] = new RackState(systemHandle, rackId);
         }
 
@@ -216,6 +222,10 @@ public static class Ngs2Exports
             }
 
             RemoveRackLocked(handle);
+            if (handle == 0)
+            {
+                _rackZeroBootstrapAvailable = false;
+            }
         }
 
         return SetReturn(ctx, 0);
@@ -233,7 +243,12 @@ public static class Ngs2Exports
         var outHandleAddress = ctx[CpuRegister.Rdx];
         lock (StateGate)
         {
-            if (!Racks.ContainsKey(rackHandle))
+            // Some titles request voices for rack zero before issuing the
+            // explicit rack-create call. Rack zero is the ABI's first-rack
+            // sentinel, so allow that bootstrap order while keeping every
+            // other unknown rack handle strict.
+            if (!Racks.ContainsKey(rackHandle) &&
+                (rackHandle != 0 || !_rackZeroBootstrapAvailable))
             {
                 return SetReturn(ctx, OrbisNgs2ErrorInvalidRackHandle);
             }
@@ -928,6 +943,7 @@ public static class Ngs2Exports
             Voices.Clear();
             _nextUid = 0;
             _nextRackHandle = 0;
+            _rackZeroBootstrapAvailable = true;
             _renderCount = 0;
         }
     }

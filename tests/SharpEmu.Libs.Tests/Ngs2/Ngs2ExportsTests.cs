@@ -77,6 +77,23 @@ public sealed class Ngs2ExportsTests : IDisposable
     }
 
     [Fact]
+    public void VoiceRequestForZeroRackBeforeExplicitRackCreationIsAccepted()
+    {
+        using var memory = new PhysicalVirtualMemory();
+        var context = new CpuContext(memory, Generation.Gen5);
+        var outputPage = memory.AllocateAt(0, 0x1000, executable: false);
+        Assert.NotEqual(0UL, outputPage);
+        var voiceOut = outputPage + 0x110;
+
+        Assert.Equal(
+            0,
+            Ngs2Exports.Ngs2RackGetVoiceHandle(
+                Reg(context, rdi: 0, rsi: 0, rdx: voiceOut)));
+        Assert.True(context.TryReadUInt64(voiceOut, out var voiceHandle));
+        Assert.NotEqual(0UL, voiceHandle);
+    }
+
+    [Fact]
     public void RackCreation_WhenHandleIdsAreExhausted_PreservesOutputAndRax()
     {
         using var memory = new PhysicalVirtualMemory();
