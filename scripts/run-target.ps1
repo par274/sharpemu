@@ -32,6 +32,7 @@ Set-StrictMode -Version Latest
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 . (Join-Path $PSScriptRoot "vmmap-capture-lifecycle.ps1")
 . (Join-Path $PSScriptRoot "target-memory-safety.ps1")
+. (Join-Path $PSScriptRoot "runner-supervision.ps1")
 
 function Resolve-RepositoryPath {
     param(
@@ -60,64 +61,6 @@ function Get-RequiredProperty {
     }
 
     return $property.Value
-}
-
-function Get-ProcessTree {
-    param(
-        [Parameter(Mandatory = $true)]
-        [int]$RootProcessId
-    )
-
-    $processes = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId)
-    $ids = [System.Collections.Generic.HashSet[int]]::new()
-    [void]$ids.Add($RootProcessId)
-
-    do {
-        $added = $false
-        foreach ($process in $processes) {
-            if ($ids.Contains([int]$process.ParentProcessId) -and $ids.Add([int]$process.ProcessId)) {
-                $added = $true
-            }
-        }
-    } while ($added)
-
-    $running = foreach ($processId in $ids) {
-        Get-Process -Id $processId -ErrorAction SilentlyContinue
-    }
-
-    return @($running)
-}
-
-function Get-ActualEmulationProcess {
-    param(
-        [Parameter(Mandatory = $true)]
-        [object[]]$ProcessTree
-    )
-
-    $treeIds = [System.Collections.Generic.HashSet[int]]::new()
-    foreach ($treeProcess in $ProcessTree) {
-        [void]$treeIds.Add([int]$treeProcess.Id)
-    }
-
-    $processes = @(Get-CimInstance Win32_Process -Property ProcessId, Name, CommandLine)
-    $child = $processes |
-        Where-Object {
-            $treeIds.Contains([int]$_.ProcessId) -and
-            $_.Name -eq "SharpEmu.exe" -and
-            $_.CommandLine -like "*--sharpemu-mitigated-child*"
-        } |
-        Select-Object -First 1
-    if ($null -ne $child) {
-        return $child
-    }
-
-    # A directly launched Release executable is already the emulation process;
-    # this fallback still excludes the PowerShell runner and any dotnet host.
-    return $processes |
-        Where-Object {
-            $treeIds.Contains([int]$_.ProcessId) -and $_.Name -eq "SharpEmu.exe"
-        } |
-        Select-Object -First 1
 }
 
 function Get-DiagnosticState {
@@ -204,25 +147,6 @@ function Get-DiagnosticState {
     }
 }
 
-function Get-ProcessCounters {
-    param(
-        [Parameter(Mandatory = $true)]
-        [int]$ProcessId
-    )
-
-    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-    if ($null -eq $process) {
-        return $null
-    }
-
-    $process.Refresh()
-    return [ordered]@{
-        processId = $ProcessId
-        workingSetBytes = [long]$process.WorkingSet64
-        privateBytes = [long]$process.PrivateMemorySize64
-    }
-}
-
 function Start-VmMapCapture {
     param(
         [Parameter(Mandatory = $true)]
@@ -231,6 +155,8 @@ function Start-VmMapCapture {
         [string]$OutputPath,
         [Parameter(Mandatory = $true)]
         [int]$ProcessId,
+        [Parameter(Mandatory = $true)]
+        [object]$ProcessIdentity,
         [Parameter(Mandatory = $true)]
         [string]$Reason,
         [Parameter(Mandatory = $true)]
@@ -275,6 +201,7 @@ function Start-VmMapCapture {
         $capture = [pscustomobject]@{
             process = $vmMapProcess
             processId = $ProcessId
+            processIdentity = $ProcessIdentity
             runId = $RunId
             repositoryCommit = $RepositoryCommit
             targetEbootSha256 = $TargetHash
@@ -323,32 +250,6 @@ function Start-VmMapCapture {
     }
 }
 
-function Stop-ProcessTree {
-    param(
-        [Parameter(Mandatory = $true)]
-        [int]$RootProcessId
-    )
-
-    & taskkill.exe /PID $RootProcessId /T /F 2>$null | Out-Null
-    $taskkillExitCode = $LASTEXITCODE
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
-
-    do {
-        $remaining = @(Get-ProcessTree -RootProcessId $RootProcessId)
-        if ($remaining.Count -eq 0) {
-            return
-        }
-
-        foreach ($remainingProcess in $remaining) {
-            Stop-Process -Id $remainingProcess.Id -Force -ErrorAction SilentlyContinue
-        }
-        Start-Sleep -Milliseconds 250
-    } while ([DateTimeOffset]::UtcNow -lt $deadline)
-
-    $remainingIds = @(Get-ProcessTree -RootProcessId $RootProcessId | ForEach-Object { $_.Id })
-    throw "Failed to stop SharpEmu process tree within 10 seconds. taskkill exit code: $taskkillExitCode; remaining PIDs: $($remainingIds -join ', ')"
-}
-
 if (-not $IsWindows) {
     throw "The controlled target runner supports Windows only."
 }
@@ -387,6 +288,12 @@ if (-not (Test-Path -LiteralPath $ebootPath -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $emulatorPath -PathType Leaf)) {
     throw "The configured emulator executable was not found. Publish the Release win-x64 CLI first."
 }
+
+$mitigationDisableEnvironmentValue = [Environment]::GetEnvironmentVariable("SHARPEMU_DISABLE_MITIGATION_RELAUNCH")
+$expectedSupervisionMode = Get-ControlledSupervisionMode `
+    -ExecutablePath $emulatorPath `
+    -WindowsHost $IsWindows `
+    -MitigationDisableEnvironmentValue $mitigationDisableEnvironmentValue
 
 $actualEbootHash = (Get-FileHash -LiteralPath $ebootPath -Algorithm SHA256).Hash.ToUpperInvariant()
 if ($expectedEbootHash -notmatch "^[0-9A-F]{64}$") {
@@ -477,6 +384,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $sampleCount = 0
     $exitCode = $null
     $processStarted = $false
+    $supervisionState = $null
     $emulationProcessIds = [System.Collections.Generic.HashSet[int]]::new()
     $comparisonArguments = @($arguments + $AdditionalArguments)
     $launchAdditionalArguments = @($AdditionalArguments | ForEach-Object {
@@ -512,7 +420,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $texturePlateauSamples = 0
 
     $manifest = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         runId = $runId
         status = "running"
         startedAtUtc = $startedAt.ToString("O")
@@ -551,6 +459,29 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         diagnostics = [ordered]@{
             path = $diagnosticsPath
             enabled = $null -ne $diagnosticsPath
+        }
+        supervision = [ordered]@{
+            expectedMode = $expectedSupervisionMode
+            mitigationRelaunchDisabled = [string]::Equals(
+                $mitigationDisableEnvironmentValue,
+                "1",
+                [StringComparison]::Ordinal)
+            launcher = $null
+            actualEmulation = $null
+            actualChild = $null
+            childDiscoveredAtUtc = $null
+            launcherExitedAtUtc = $null
+            monitoringContinuedAfterLauncherExit = $false
+            finalChildDiscoveryAttempted = $false
+            finalChildDiscoveryAtUtc = $null
+            expectedChildNeverConfirmed = $false
+            knownSupervisedIdentities = @()
+            samples = @()
+            identityMismatches = @()
+            lookupFailures = @()
+            cleanupTargets = @()
+            cleanupEnumerationIncomplete = @()
+            cleanupFailures = @()
         }
         vmmap = if ($vmMapEnabled) {
             [ordered]@{
@@ -593,6 +524,8 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     $process.StartInfo = $startInfo
     Write-Host "Starting trial $trial of ${Runs}: $runId"
     $primaryFailure = $null
+    $supervisionSamples = [System.Collections.Generic.List[object]]::new()
+    $supervisionEarlyFailures = [System.Collections.Generic.List[object]]::new()
 
     try {
         if (-not $process.Start()) {
@@ -600,11 +533,89 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         }
         $processStarted = $true
 
+        $launcherObservedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+        # Capture the root directly from the exact Process object returned by
+        # Start(), before the first CIM inventory can fail or lose the root.
+        $launcherIdentity = New-SupervisedProcessIdentityFromProcess `
+            -Process $process `
+            -ConfiguredExecutablePath $emulatorPath
+        $supervisionState = New-SupervisionState `
+            -LauncherIdentity $launcherIdentity `
+            -ObservedAtUtc $launcherObservedAtUtc `
+            -ExpectedMode $expectedSupervisionMode
+        $manifest.supervision.launcher = $launcherIdentity
+        $manifest.supervision.actualEmulation = [ordered]@{
+            mode = $supervisionState.actualEmulation.mode
+            identity = $supervisionState.actualEmulation.identity
+        }
+        $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        while (-not $process.HasExited) {
-            $processTree = @(Get-ProcessTree -RootProcessId $process.Id)
-            $workingSetBytes = [long](($processTree | Measure-Object -Property WorkingSet64 -Sum).Sum)
-            $privateBytes = [long](($processTree | Measure-Object -Property PrivateMemorySize64 -Sum).Sum)
+        while ($true) {
+            $observedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+            $processInventory = @(Get-TargetProcessInventory)
+            $supervisionSample = Get-SupervisionSample `
+                -State $supervisionState `
+                -ProcessRecords $processInventory `
+                -ObservedAtUtc $observedAtUtc
+
+            $loopDecision = Get-SupervisionLoopDecision `
+                -State $supervisionState `
+                -Sample $supervisionSample
+            if ($loopDecision -eq "final-child-discovery") {
+                # The launcher can disappear between child creation and the
+                # ordinary promotion sample.  Spend exactly one strict
+                # inventory attempt on the launcher-associated child.
+                $finalDiscoveryObservedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+                try {
+                    $finalProcessInventory = @(Get-TargetProcessInventory)
+                }
+                catch {
+                    $supervisionState.finalChildDiscoveryAttempted = $true
+                    $supervisionState.finalChildDiscoveryAtUtc = $finalDiscoveryObservedAtUtc
+                    throw
+                }
+                $finalChildResult = Invoke-SupervisionFinalChildDiscovery `
+                    -State $supervisionState `
+                    -ProcessRecords $finalProcessInventory `
+                    -ObservedAtUtc $finalDiscoveryObservedAtUtc
+                if ($finalChildResult.status -eq "found") {
+                    $supervisionSample = Get-SupervisionSample `
+                        -State $supervisionState `
+                        -ProcessRecords $finalProcessInventory `
+                        -ObservedAtUtc $finalDiscoveryObservedAtUtc
+                    $loopDecision = Get-SupervisionLoopDecision `
+                        -State $supervisionState `
+                        -Sample $supervisionSample
+                }
+                else {
+                    $terminationReason = "supervision-failure"
+                    $terminationBoundary = [ordered]@{
+                        reason = "supervision-failure"
+                        boundary = "expected-child-confirmation"
+                        expectedMode = $supervisionState.expectedMode
+                        detail = "Expected mitigated child was never safely confirmed before launcher exit."
+                        discoveryStatus = $finalChildResult.status
+                    }
+                    throw "Expected mitigated child was never safely confirmed: $($finalChildResult.reason)"
+                }
+            }
+            if ($loopDecision -eq "supervision-failure") {
+                $terminationReason = "supervision-failure"
+                $terminationBoundary = [ordered]@{
+                    reason = "supervision-failure"
+                    boundary = "expected-child-confirmation"
+                    expectedMode = $supervisionState.expectedMode
+                    detail = "Expected mitigated child was never safely confirmed before launcher exit."
+                }
+                throw "Expected mitigated child was never safely confirmed."
+            }
+            if ($loopDecision -eq "process-exited") {
+                break
+            }
+
+            $workingSetBytes = [long]$supervisionSample.workingSetBytes
+            $privateBytes = [long]$supervisionSample.privateBytes
             $hostMemory = Get-HostMemorySnapshot
             $lastHostMemory = $hostMemory
             if ([UInt64]$hostMemory.physicalAvailableBytes -lt $minimumPhysicalAvailableBytes) {
@@ -618,10 +629,15 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 -WorkingSetLimitBytes ([UInt64]$workingSetLimitBytes) `
                 -HostMemorySample $hostMemory `
                 -HostMemoryThresholds $hostMemoryThresholds
-            $emulationProcessId = $null
-            $emulationProcess = Get-ActualEmulationProcess -ProcessTree $processTree
-            if ($null -ne $emulationProcess) {
-                $emulationProcessId = [int]$emulationProcess.ProcessId
+            $emulationProcessIdentity = $supervisionSample.actualEmulationIdentity
+            $emulationProcessId = if ($null -eq $emulationProcessIdentity -or
+                $null -eq $supervisionSample.actualEmulationCounters) {
+                $null
+            }
+            else {
+                [int]$emulationProcessIdentity.processId
+            }
+            if ($null -ne $emulationProcessId) {
                 [void]$emulationProcessIds.Add($emulationProcessId)
             }
             $peakWorkingSetBytes = [Math]::Max($peakWorkingSetBytes, $workingSetBytes)
@@ -631,10 +647,23 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             $sample = [ordered]@{
                 timestampUtc = [DateTimeOffset]::UtcNow.ToString("O")
                 elapsedMilliseconds = [long]$stopwatch.Elapsed.TotalMilliseconds
-                processCount = $processTree.Count
+                processCount = [int]$supervisionSample.processCount
                 emulationProcessId = $emulationProcessId
                 workingSetBytes = $workingSetBytes
                 privateBytes = $privateBytes
+                privateMemoryBytes = $privateBytes
+                launcherAlive = $supervisionSample.launcherAlive
+                actualChildAlive = $supervisionSample.actualChildAlive
+                supervisedProcessIds = @($supervisionSample.supervisedProcessIds)
+                supervisedIdentities = @($supervisionSample.supervisedIdentities)
+                counterSources = @($supervisionSample.counterSources)
+                launcherTree = $supervisionSample.launcherTree
+                childTree = $supervisionSample.childTree
+                childWorkingSetBytes = if ($null -eq $supervisionSample.actualChildCounters) { $null } else { [UInt64]$supervisionSample.actualChildCounters.workingSetBytes }
+                childPrivateBytes = if ($null -eq $supervisionSample.actualChildCounters) { $null } else { [UInt64]$supervisionSample.actualChildCounters.privateBytes }
+                aggregateWorkingSetBytes = [UInt64]$supervisionSample.workingSetBytes
+                aggregatePrivateBytes = [UInt64]$supervisionSample.privateBytes
+                monitoringContinuedAfterLauncherExit = $supervisionSample.monitoringContinuedAfterLauncherExit
                 pageSizeBytes = [UInt64]$hostMemory.pageSizeBytes
                 physicalTotalBytes = [UInt64]$hostMemory.physicalTotalBytes
                 physicalAvailableBytes = [UInt64]$hostMemory.physicalAvailableBytes
@@ -643,6 +672,18 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 commitHeadroomBytes = [UInt64]$hostMemory.commitHeadroomBytes
             }
             Add-Content -LiteralPath $metricsPath -Value ($sample | ConvertTo-Json -Compress) -Encoding utf8
+            [void]$supervisionSamples.Add([ordered]@{
+                    timestampUtc = $sample.timestampUtc
+                    elapsedMilliseconds = $sample.elapsedMilliseconds
+                    launcherAlive = $sample.launcherAlive
+                    actualChildAlive = $sample.actualChildAlive
+                    supervisedProcessIds = @($sample.supervisedProcessIds)
+                    counterSources = @($sample.counterSources)
+                    workingSetBytes = $sample.workingSetBytes
+                    privateBytes = $sample.privateBytes
+                    childWorkingSetBytes = $sample.childWorkingSetBytes
+                    childPrivateBytes = $sample.childPrivateBytes
+                })
 
             if ($vmMapEnabled) {
                 if ($null -ne $diagnosticsPath) {
@@ -650,12 +691,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                 }
 
                 [void](Complete-VmMapCaptures -Pending $vmMapPending -Completed $vmMapCompleted)
-                $actualCounters = if ($null -ne $emulationProcessId) {
-                    Get-ProcessCounters -ProcessId $emulationProcessId
-                }
-                else {
-                    $null
-                }
+                $actualCounters = $supervisionSample.actualEmulationCounters
 
                 if ($null -ne $emulationProcessId -and $null -ne $vmMapRunDirectory) {
                     $captureStartedThisSample = $false
@@ -669,6 +705,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                             -ToolPath $resolvedVmMapPath `
                             -OutputPath (Join-Path $vmMapRunDirectory "vmmap-corrected-dispatch.csv") `
                             -ProcessId $emulationProcessId `
+                            -ProcessIdentity $emulationProcessIdentity `
                             -Reason "corrected-dispatch" `
                             -RunId $runId `
                             -RepositoryCommit $repositoryCommit `
@@ -721,6 +758,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                                 -ToolPath $resolvedVmMapPath `
                                 -OutputPath (Join-Path $vmMapRunDirectory "vmmap-cache-plateau.csv") `
                                 -ProcessId $emulationProcessId `
+                                -ProcessIdentity $emulationProcessIdentity `
                                 -Reason "cache-plateau" `
                                 -RunId $runId `
                                 -RepositoryCommit $repositoryCommit `
@@ -744,6 +782,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                             -ToolPath $resolvedVmMapPath `
                             -OutputPath (Join-Path $vmMapRunDirectory "vmmap-near-cutoff.csv") `
                             -ProcessId $emulationProcessId `
+                            -ProcessIdentity $emulationProcessIdentity `
                             -Reason "near-cutoff" `
                             -RunId $runId `
                             -RepositoryCommit $repositoryCommit `
@@ -762,7 +801,9 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             if ($null -ne $hostBoundary) {
                 $terminationReason = [string]$hostBoundary.reason
                 $terminationBoundary = $hostBoundary
-                Stop-ProcessTree -RootProcessId $process.Id
+                Stop-SupervisedRoots `
+                    -State $supervisionState `
+                    -Reason $terminationReason | Out-Null
                 break
             }
 
@@ -774,12 +815,13 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
                     thresholdSeconds = $wallTimeSeconds
                     sampledElapsedMilliseconds = [long]$stopwatch.Elapsed.TotalMilliseconds
                 }
-                Stop-ProcessTree -RootProcessId $process.Id
+                Stop-SupervisedRoots `
+                    -State $supervisionState `
+                    -Reason $terminationReason | Out-Null
                 break
             }
 
             Start-Sleep -Milliseconds $sampleIntervalMilliseconds
-            $process.Refresh()
         }
 
         if (-not $process.WaitForExit(5000)) {
@@ -814,6 +856,27 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
     }
     catch {
         $primaryFailure = $_
+        if ($null -ne $supervisionState -and
+            ($supervisionState.identityMismatches.Count -gt 0 -or
+                $supervisionState.lookupFailures.Count -gt 0 -or
+                $supervisionState.expectedChildNeverConfirmed)) {
+            $terminationReason = "supervision-failure"
+        }
+        if ($_.Exception.Message -like "SharpEmu process lookup failed:*" -or
+            $_.Exception.Message -like "SharpEmu launcher identity could not be captured*") {
+            $terminationReason = "supervision-failure"
+            $failureRecord = [ordered]@{
+                process = "process-inventory"
+                reason = $_.Exception.Message
+                observedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+            }
+            if ($null -ne $supervisionState) {
+                [void]$supervisionState.lookupFailures.Add($failureRecord)
+            }
+            else {
+                [void]$supervisionEarlyFailures.Add($failureRecord)
+            }
+        }
         throw
     }
     finally {
@@ -834,15 +897,71 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         }
 
         try {
-            if ($processStarted -and -not $process.HasExited) {
-                Stop-ProcessTree -RootProcessId $process.Id
-                if (-not $process.WaitForExit(5000)) {
-                    throw "SharpEmu did not report exit within five seconds after forced termination."
+            if ($null -ne $supervisionState) {
+                # Always retry both retained roots independently.  The
+                # launcher may already be gone and the child may no longer be
+                # reachable through its former parent relationship.
+                Stop-SupervisedRoots `
+                    -State $supervisionState `
+                    -Reason "finally-cleanup" | Out-Null
+                if ($processStarted -and -not $process.WaitForExit(5000)) {
+                    throw "SharpEmu launcher did not report exit within five seconds after cleanup."
                 }
+            }
+            elseif ($processStarted) {
+                throw "SharpEmu cleanup was not attempted because launcher identity was never confirmed."
             }
         }
         catch {
             [void]$cleanupFailures.Add($_)
+        }
+
+        if ($null -ne $supervisionState) {
+            $manifest.supervision.launcher = $supervisionState.launcher.identity
+            $manifest.supervision.actualEmulation = [ordered]@{
+                mode = $supervisionState.actualEmulation.mode
+                identity = $supervisionState.actualEmulation.identity
+            }
+            $manifest.supervision.expectedMode = $supervisionState.expectedMode
+            $manifest.supervision.finalChildDiscoveryAttempted = $supervisionState.finalChildDiscoveryAttempted
+            $manifest.supervision.finalChildDiscoveryAtUtc = $supervisionState.finalChildDiscoveryAtUtc
+            $manifest.supervision.expectedChildNeverConfirmed = $supervisionState.expectedChildNeverConfirmed
+            $manifest.supervision.actualChild = if ($null -eq $supervisionState.actualChild) {
+                $null
+            }
+            else {
+                [ordered]@{
+                    identity = $supervisionState.actualChild.identity
+                    discoveredAtUtc = $supervisionState.actualChild.discoveredAtUtc
+                    exitedAtUtc = $supervisionState.actualChild.exitedAtUtc
+                    lastCounters = $supervisionState.actualChild.lastCounters
+                }
+            }
+            $manifest.supervision.childDiscoveredAtUtc = if ($null -eq $supervisionState.actualChild) {
+                $null
+            }
+            else {
+                $supervisionState.actualChild.discoveredAtUtc
+            }
+            $manifest.supervision.launcherExitedAtUtc = $supervisionState.launcher.exitedAtUtc
+            $manifest.supervision.monitoringContinuedAfterLauncherExit = $supervisionState.monitoringContinuedAfterLauncherExit
+            $manifest.supervision.knownSupervisedIdentities = @($supervisionState.knownSupervisedIdentities | ForEach-Object {
+                    [ordered]@{
+                        identity = $_.identity
+                        firstObservedAtUtc = $_.firstObservedAtUtc
+                        lastObservedAtUtc = $_.lastObservedAtUtc
+                        sources = @($_.sources)
+                    }
+                })
+            $manifest.supervision.samples = @($supervisionSamples)
+            $manifest.supervision.identityMismatches = @($supervisionState.identityMismatches)
+            $manifest.supervision.lookupFailures = @($supervisionState.lookupFailures)
+            $manifest.supervision.cleanupTargets = @($supervisionState.cleanupTargets)
+            $manifest.supervision.cleanupEnumerationIncomplete = @($supervisionState.cleanupEnumerationIncomplete)
+            $manifest.supervision.cleanupFailures = @($supervisionState.cleanupFailures)
+        }
+        else {
+            $manifest.supervision.lookupFailures = @($supervisionEarlyFailures)
         }
 
         $completedAt = [DateTimeOffset]::UtcNow
@@ -862,14 +981,24 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
         $manifest.result = [ordered]@{
             terminationReason = $terminationReason
             terminationBoundary = $terminationBoundary
+            primaryError = if ($null -eq $primaryFailure) { $null } else { $primaryFailure.Exception.Message }
             exitCode = $exitCode
             durationMilliseconds = [long]($completedAt - $startedAt).TotalMilliseconds
             sampleCount = $sampleCount
             peakWorkingSetBytes = $peakWorkingSetBytes
             peakPrivateBytes = $peakPrivateBytes
             emulationProcessIds = @($emulationProcessIds | Sort-Object)
+            emulationProcessIdentity = if ($null -eq $supervisionState) {
+                $null
+            }
+            else {
+                $supervisionState.actualEmulation.identity
+            }
             checkpointObserved = $null
             notes = "Record the observed checkpoint after reviewing the run. Do not infer it from process exit."
+        }
+        if ($supervisionEarlyFailures.Count -gt 0) {
+            $manifest.result.earlySupervisionFailures = @($supervisionEarlyFailures)
         }
         if ($cleanupFailures.Count -gt 0) {
             $manifest.result.cleanupErrors = @($cleanupFailures | ForEach-Object {
@@ -880,6 +1009,7 @@ for ($trial = 1; $trial -le $Runs; $trial++) {
             $manifest.vmmap.captures = @($vmMapCompleted | ForEach-Object {
                 [ordered]@{
                     processId = $_.processId
+                    processIdentity = $_.processIdentity
                     runId = $_.runId
                     repositoryCommit = $_.repositoryCommit
                     targetEbootSha256 = $_.targetEbootSha256
