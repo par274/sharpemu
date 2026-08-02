@@ -202,6 +202,9 @@ The corrected pilot's preflight was 10.02 GiB available physical memory and
 The corrected validation pilot used the schema-2 executable published from the
 instrumentation working tree at commit `30babd7` with SHA-256
 `EBB56C3AB65824539277313CAE1E9514C5B7C5CBAB2892B77F4B03879638BC1E`.
+A clean post-commit publication after `6f450a9` hashed to
+`A4BF4A34E874EA4518C8E6C7666476DFCC94F7BDE4A78833091980E5EBA79577`; it was
+not launched for another target trial.
 
 ## Conclusions and next boundary
 
