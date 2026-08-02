@@ -163,26 +163,26 @@ flashing run.
 
 ### Audio behavior
 
-The guest audio clock was running and monotonic during the host movie samples.
-A focused queue-log pass identified the host movie stream by its 683 ms queue
-cap. Across its one-second windows the queue repeatedly reached 0 ms, usually
-reported only 2–5 ms average depth, and recorded roughly 20–52 empty-queue
-observations per second. It recorded zero submission drops. The guest audio
-streams showed the same separation of queue behavior from the movie stream;
-the movie stream’s empty queue is the relevant evidence for the fragmented
-movie audio.
+The global `GuestAudioClock` was running and its selected progression was
+substantially slower than wall time during the host movie samples. A focused
+queue-log pass observed repeated underruns on multiple streams, including the
+identified movie stream. That movie stream (the stream with the 683 ms queue
+cap) commonly reported 2–5 ms average queued depth, frequent zero-depth
+observations, and zero submission drops.
 
-This distinguishes output starvation from buffer-discard or repeated-sample
-behavior: the host audio submission path is not dropping buffers, but the
-device often has no queued audio to play. The observed audio is therefore
-consistent with ordered segments separated by real silent gaps. No evidence in
-this investigation shows repeated samples, and no sample-level content claim
-is made. Because `MediaFramePlayback` uses the running guest audio clock as its
-selected playback time, the clock advances only with audio reported as played;
-that directly stretches video and delays host completion. The wall-clock
-comparison confirms the causal timing relationship while exposing
-audio/video desynchronization, so it remains a diagnostic control rather than a
-correction.
+`GuestAudioClock` stores the furthest reported progress across audio streams
+without identifying which stream supplied that value. The exact stream or
+combination of streams advancing the global clock therefore remains unresolved.
+The proven boundary is narrower: `MediaFramePlayback` selects the slow global
+clock, and the wall-clock A/B completed the movies near their source durations
+while guest audio time lagged. That proves the selected slow global clock
+causally stretches host video; it does not prove that the movie stream alone
+owns the clock or that wall time is the correct guest-observable contract.
+
+The queue evidence supports ordered audio segments separated by real silent
+gaps, rather than proving repeated samples or skipped samples. No sample-level
+content claim is made. The wall-clock comparison remains a diagnostic control,
+not a correction.
 
 ### Later progression and safety
 

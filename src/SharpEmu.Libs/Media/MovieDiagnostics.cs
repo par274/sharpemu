@@ -8,18 +8,20 @@ namespace SharpEmu.Libs.Media;
 
 /// <summary>
 /// Bounded, opt-in movie lifecycle diagnostics written to the existing JSONL
-/// memory-diagnostics stream. The default path is a single volatile read and
-/// does not allocate, format text, take a lock, or retain diagnostic state.
+/// memory-diagnostics stream. The default path is a short-circuiting set of
+/// volatile reads and does not allocate, format text, take a lock, or retain
+/// diagnostic state.
 /// </summary>
 internal static class MovieDiagnostics
 {
-    private const int MaximumEvents = 4096;
+    internal const int MaximumEvents = 4096;
     private static readonly bool Requested = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_MOVIE_DIAGNOSTICS"),
         "1",
         StringComparison.Ordinal);
     private static long _nextMovieInstanceId;
-    private static int _eventCount;
+    private static readonly MovieDiagnosticEventBudget EventBudget =
+        new(MaximumEvents);
     private static readonly MovieDiagnosticRateLimiter PresenterPumpLimiter =
         new();
     private static readonly MovieDiagnosticRateLimiter PresenterSelectionLimiter =
@@ -28,21 +30,32 @@ internal static class MovieDiagnostics
     private static bool _lastPresenterFrameAvailable;
     private static bool _lastPresenterPlaybackActive;
     private static long _lastPresenterInstanceId;
-    private static string _lastPresenterMovie = string.Empty;
+    private static string? _lastPresenterPath;
     private static readonly MovieDiagnosticRateLimiter PresenterPresentationLimiter =
         new();
     private static bool _hasPresenterPresentation;
     private static bool _lastPresenterPresentedHost;
     private static long _lastPresenterPresentedInstanceId;
+    private static string? _lastPresenterPresentedPath;
     private static string _lastPresenterPresentedMovie = string.Empty;
 
     internal static bool Enabled =>
-        Requested && MemoryDiagnostics.IsEnabled;
+        Requested &&
+        MemoryDiagnostics.IsEnabled &&
+        EventBudget.HasCapacity;
+
+    private static bool CanDoDiagnosticWork =>
+        Enabled;
 
     internal static long NewMovieInstanceId()
     {
-        return Enabled ? Interlocked.Increment(ref _nextMovieInstanceId) : 0;
+        return CanDoDiagnosticWork ?
+            Interlocked.Increment(ref _nextMovieInstanceId) :
+            0;
     }
+
+    private static bool TryReserveEvent() =>
+        Enabled && EventBudget.TryReserve();
 
     internal static void Observe(
         string path,
@@ -51,15 +64,44 @@ internal static class MovieDiagnostics
         long activeInstanceId,
         bool pending)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("observe", new
+        WriteReserved("observe", new
         {
             movie = MovieIdentity(path),
             state,
+            movieInstanceId = instanceId,
+            activeMovieInstanceId = activeInstanceId,
+            pending,
+        });
+    }
+
+    internal static void Observe(
+        string path,
+        HostMovieBridge.MovieMode mode,
+        long instanceId,
+        long activeInstanceId,
+        bool pending)
+    {
+        if (!TryReserveEvent())
+        {
+            return;
+        }
+
+        WriteReserved("observe", new
+        {
+            movie = MovieIdentity(path),
+            state = mode switch
+            {
+                HostMovieBridge.MovieMode.Guest => "guest",
+                HostMovieBridge.MovieMode.Skip => "skip",
+                HostMovieBridge.MovieMode.Dummy => "dummy",
+                HostMovieBridge.MovieMode.Native => "native",
+                _ => "unknown",
+            },
             movieInstanceId = instanceId,
             activeMovieInstanceId = activeInstanceId,
             pending,
@@ -71,12 +113,12 @@ internal static class MovieDiagnostics
         long activeInstanceId,
         bool duplicate)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("queue", new
+        WriteReserved("queue", new
         {
             movie = MovieIdentity(path),
             activeMovieInstanceId = activeInstanceId,
@@ -93,12 +135,12 @@ internal static class MovieDiagnostics
         uint framesPerSecondDenominator,
         string mode)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("attach", new
+        WriteReserved("attach", new
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
@@ -116,12 +158,12 @@ internal static class MovieDiagnostics
         string nextPath,
         long nextInstanceId)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("reattach", new
+        WriteReserved("reattach", new
         {
             previousMovie = MovieIdentity(previousPath),
             previousMovieInstanceId = previousInstanceId,
@@ -137,12 +179,12 @@ internal static class MovieDiagnostics
         bool audioRunning,
         bool followGuestAudioClock)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("start", new
+        WriteReserved("start", new
         {
             movieInstanceId = instanceId,
             wallSeconds = 0d,
@@ -171,12 +213,12 @@ internal static class MovieDiagnostics
         long framesRetired,
         long framesDiscarded)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("clock", new
+        WriteReserved("clock", new
         {
             movieInstanceId = instanceId,
             wallSeconds,
@@ -202,12 +244,12 @@ internal static class MovieDiagnostics
         double wallSeconds,
         long frameIndex)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("complete", new
+        WriteReserved("complete", new
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
@@ -218,12 +260,12 @@ internal static class MovieDiagnostics
 
     internal static void Stop(string path, long instanceId, string reason)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("stop", new
+        WriteReserved("stop", new
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
@@ -233,12 +275,12 @@ internal static class MovieDiagnostics
 
     internal static void Dispose(string path, long instanceId, string reason)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("dispose", new
+        WriteReserved("dispose", new
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
@@ -252,12 +294,12 @@ internal static class MovieDiagnostics
         long instanceId,
         bool completionShim)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("guest-open", new
+        WriteReserved("guest-open", new
         {
             fileDescriptor,
             movie = MovieIdentity(path),
@@ -272,12 +314,12 @@ internal static class MovieDiagnostics
         long instanceId,
         bool notifiedBridge)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("guest-close", new
+        WriteReserved("guest-close", new
         {
             fileDescriptor,
             movie = MovieIdentity(path),
@@ -296,7 +338,7 @@ internal static class MovieDiagnostics
         uint width,
         uint height)
     {
-        if (!Enabled)
+        if (!CanDoDiagnosticWork)
         {
             return;
         }
@@ -309,7 +351,12 @@ internal static class MovieDiagnostics
             return;
         }
 
-        Write("presenter-pump", new
+        if (!TryReserveEvent())
+        {
+            return;
+        }
+
+        WriteReserved("presenter-pump", new
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
@@ -334,12 +381,11 @@ internal static class MovieDiagnostics
         int lumaTextureIndex,
         int chromaTextureIndex)
     {
-        if (!Enabled)
+        if (!CanDoDiagnosticWork)
         {
             return;
         }
 
-        var movie = MovieIdentity(path);
         var state = (hostFrameAvailable ? 1 : 0) |
             (hostPlaybackActive ? 2 : 0);
         var now = Stopwatch.GetTimestamp();
@@ -347,11 +393,19 @@ internal static class MovieDiagnostics
             _lastPresenterFrameAvailable != hostFrameAvailable ||
             _lastPresenterPlaybackActive != hostPlaybackActive ||
             _lastPresenterInstanceId != instanceId ||
-            !string.Equals(_lastPresenterMovie, movie, StringComparison.Ordinal);
+            !string.Equals(_lastPresenterPath, path, StringComparison.Ordinal);
 
-        if (changed || PresenterSelectionLimiter.ShouldEmit(now, instanceId, state))
+        var shouldEmit = changed ||
+            PresenterSelectionLimiter.ShouldEmit(now, instanceId, state);
+        if (shouldEmit)
         {
-            Write("presenter-draw-selection", new
+            if (!TryReserveEvent())
+            {
+                return;
+            }
+
+            var movie = MovieIdentity(path);
+            WriteReserved("presenter-draw-selection", new
             {
                 movie,
                 movieInstanceId = instanceId,
@@ -366,11 +420,16 @@ internal static class MovieDiagnostics
             });
         }
 
+        if (!CanDoDiagnosticWork)
+        {
+            return;
+        }
+
         _hasPresenterSelection = true;
         _lastPresenterFrameAvailable = hostFrameAvailable;
         _lastPresenterPlaybackActive = hostPlaybackActive;
         _lastPresenterInstanceId = instanceId;
-        _lastPresenterMovie = movie;
+        _lastPresenterPath = path;
     }
 
     internal static void PresenterPresentation(
@@ -382,22 +441,29 @@ internal static class MovieDiagnostics
         long presentationSequence,
         string presentationKind)
     {
-        if (!Enabled)
+        if (!CanDoDiagnosticWork)
         {
             return;
         }
 
-        var movie = MovieIdentity(path);
         var now = Stopwatch.GetTimestamp();
         var changed = !_hasPresenterPresentation ||
             _lastPresenterPresentedHost != selectedHostMovie ||
             _lastPresenterPresentedInstanceId != instanceId ||
-            !string.Equals(_lastPresenterPresentedMovie, movie, StringComparison.Ordinal);
+            !string.Equals(_lastPresenterPresentedPath, path, StringComparison.Ordinal);
         var state = selectedHostMovie ? 1 : 0;
+        var shouldEmit = changed ||
+            PresenterPresentationLimiter.ShouldEmit(now, instanceId, state);
+        string? movie = null;
         if (changed && _hasPresenterPresentation && _lastPresenterPresentedHost &&
             (!selectedHostMovie || _lastPresenterPresentedInstanceId != instanceId))
         {
-            Write("presenter-present-end", new
+            if (!TryReserveEvent())
+            {
+                return;
+            }
+
+            WriteReserved("presenter-present-end", new
             {
                 movie = _lastPresenterPresentedMovie,
                 movieInstanceId = _lastPresenterPresentedInstanceId,
@@ -407,7 +473,13 @@ internal static class MovieDiagnostics
 
         if (selectedHostMovie && changed)
         {
-            Write("presenter-present-start", new
+            if (!TryReserveEvent())
+            {
+                return;
+            }
+
+            movie = MovieIdentity(path);
+            WriteReserved("presenter-present-start", new
             {
                 movie,
                 movieInstanceId = instanceId,
@@ -415,9 +487,15 @@ internal static class MovieDiagnostics
             });
         }
 
-        if (changed || PresenterPresentationLimiter.ShouldEmit(now, instanceId, state))
+        if (shouldEmit)
         {
-            Write("presenter-present", new
+            if (!TryReserveEvent())
+            {
+                return;
+            }
+
+            movie ??= MovieIdentity(path);
+            WriteReserved("presenter-present", new
             {
                 movie,
                 movieInstanceId = instanceId,
@@ -429,10 +507,16 @@ internal static class MovieDiagnostics
             });
         }
 
+        if (!CanDoDiagnosticWork)
+        {
+            return;
+        }
+
         _hasPresenterPresentation = true;
         _lastPresenterPresentedHost = selectedHostMovie;
         _lastPresenterPresentedInstanceId = instanceId;
-        _lastPresenterPresentedMovie = movie;
+        _lastPresenterPresentedPath = path;
+        _lastPresenterPresentedMovie = movie ?? _lastPresenterPresentedMovie;
     }
 
     internal static void PresenterUpload(
@@ -441,12 +525,12 @@ internal static class MovieDiagnostics
         long frameSerial,
         int plane)
     {
-        if (!Enabled)
+        if (!TryReserveEvent())
         {
             return;
         }
 
-        Write("presenter-upload", new
+        WriteReserved("presenter-upload", new
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
@@ -461,14 +545,19 @@ internal static class MovieDiagnostics
         long frameSerial,
         bool hostPlaybackActive)
     {
-        if (!Enabled)
+        if (!CanDoDiagnosticWork)
         {
             return;
         }
 
         if (_hasPresenterPresentation && _lastPresenterPresentedHost)
         {
-            Write("presenter-present-end", new
+            if (!TryReserveEvent())
+            {
+                return;
+            }
+
+            WriteReserved("presenter-present-end", new
             {
                 movie = _lastPresenterPresentedMovie,
                 movieInstanceId = _lastPresenterPresentedInstanceId,
@@ -476,7 +565,12 @@ internal static class MovieDiagnostics
             });
         }
 
-        Write("presenter-shutdown", new
+        if (!TryReserveEvent())
+        {
+            return;
+        }
+
+        WriteReserved("presenter-shutdown", new
         {
             movie = MovieIdentity(path),
             movieInstanceId = instanceId,
@@ -495,15 +589,47 @@ internal static class MovieDiagnostics
         return Path.GetFileName(path);
     }
 
-    private static void Write(string eventName, object data)
+    private static void WriteReserved(string eventName, object data)
     {
-        var count = Interlocked.Increment(ref _eventCount);
-        if (count > MaximumEvents)
-        {
-            return;
-        }
-
         MemoryDiagnostics.RecordEvent("movie." + eventName, data);
+    }
+}
+
+internal sealed class MovieDiagnosticEventBudget
+{
+    private readonly int _maximum;
+    private int _accepted;
+
+    internal MovieDiagnosticEventBudget(int maximum)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximum);
+        _maximum = maximum;
+    }
+
+    internal bool HasCapacity =>
+        Volatile.Read(ref _accepted) < _maximum;
+
+    internal int AcceptedCount =>
+        Volatile.Read(ref _accepted);
+
+    internal bool TryReserve()
+    {
+        while (true)
+        {
+            var accepted = Volatile.Read(ref _accepted);
+            if (accepted >= _maximum)
+            {
+                return false;
+            }
+
+            if (Interlocked.CompareExchange(
+                    ref _accepted,
+                    accepted + 1,
+                    accepted) == accepted)
+            {
+                return true;
+            }
+        }
     }
 }
 

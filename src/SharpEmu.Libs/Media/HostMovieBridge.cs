@@ -110,7 +110,7 @@ internal static class HostMovieBridge
             {
                 MovieDiagnostics.Observe(
                     hostPath,
-                    mode.ToString().ToLowerInvariant(),
+                    mode,
                     instanceId: 0,
                     activeInstanceId: _activeMovieInstanceId,
                     pending: false);
@@ -440,7 +440,7 @@ internal static class HostMovieBridge
         }
     }
 
-    private enum MovieMode
+    internal enum MovieMode
     {
         Guest,
         Skip,
