@@ -111,7 +111,7 @@ internal static class AmprFileRegistry
         {
             while (true)
             {
-                if (string.Equals(_indexedApp0Root, normalizedRoot, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(_indexedApp0Root, normalizedRoot, HostFsPath.Comparison))
                 {
                     return;
                 }
@@ -123,7 +123,7 @@ internal static class AmprFileRegistry
                     if (string.Equals(
                             _indexingApp0Root,
                             normalizedRoot,
-                            StringComparison.OrdinalIgnoreCase))
+                            HostFsPath.Comparison))
                     {
                         Monitor.Wait(_indexGate);
                         continue;
@@ -174,20 +174,34 @@ internal static class AmprFileRegistry
             }
 
             var relatives = new List<string>(256 * 1024);
-            foreach (var hostPath in Directory.EnumerateFiles(
-                         normalizedRoot,
-                         "*",
-                         SearchOption.AllDirectories))
+            try
             {
-                var relative = Path.GetRelativePath(normalizedRoot, hostPath)
-                    .Replace('\\', '/');
-                if (string.IsNullOrEmpty(relative) ||
-                    relative.StartsWith("..", StringComparison.Ordinal))
+                foreach (var hostPath in Directory.EnumerateFiles(
+                             normalizedRoot,
+                             "*",
+                             SearchOption.AllDirectories))
                 {
-                    continue;
-                }
+                    var relative = Path.GetRelativePath(normalizedRoot, hostPath)
+                        .Replace('\\', '/');
+                    if (string.IsNullOrEmpty(relative) ||
+                        relative.StartsWith("..", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
 
-                relatives.Add(relative);
+                    relatives.Add(relative);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // The walk is an opportunistic warm-up reached synchronously from
+                // sceAmprCommandBufferConstructor; a dump that moves or a mount
+                // that hiccups must not fault the guest export. The background
+                // preload already swallows this. Leave the root unindexed so a
+                // later call retries.
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] ampr.app0_index_walk_failed root={normalizedRoot}: {exception.Message}");
+                return;
             }
 
             // Hash + dictionary fill dominates under Rosetta once the walk is
@@ -315,7 +329,10 @@ internal static class AmprFileRegistry
                 "ampr-index");
         Directory.CreateDirectory(cacheDir);
 
-        var rootHash = ComputeFileId(normalizedRoot.ToLowerInvariant());
+        // Distinct roots must not share a cache file. Folding case is only
+        // correct where the host filesystem folds it too.
+        var rootKey = OperatingSystem.IsWindows() ? normalizedRoot.ToLowerInvariant() : normalizedRoot;
+        var rootHash = ComputeFileId(rootKey);
         return Path.Combine(cacheDir, $"app0-{rootHash:x8}.v{version}.idx");
     }
 
@@ -360,7 +377,7 @@ internal static class AmprFileRegistry
             }
 
             var root = reader.ReadString();
-            if (!string.Equals(root, normalizedRoot, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(root, normalizedRoot, HostFsPath.Comparison))
             {
                 return false;
             }
@@ -470,7 +487,7 @@ internal static class AmprFileRegistry
                 return;
             }
 
-            var relatives = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var relatives = new HashSet<string>(HostFsPath.Comparer);
             foreach (var hostPath in _hostPathsById.Values)
             {
                 var relative = Path.GetRelativePath(normalizedRoot, hostPath)

@@ -72,7 +72,7 @@ public static class AmprExports
     private const int MaxCachedHostFiles = 1536;
     private static readonly object _hostFileCacheGate = new();
     private static readonly Dictionary<string, LinkedListNode<CachedHostFileEntry>> _hostFileByPath =
-        new(StringComparer.OrdinalIgnoreCase);
+        new(HostFsPath.Comparer);
     private static readonly LinkedList<CachedHostFileEntry> _hostFileLru = new();
 
     [SysAbiExport(

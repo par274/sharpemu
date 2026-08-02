@@ -117,17 +117,12 @@ public static partial class KernelMemoryCompatExports
     private static readonly Dictionary<string, string> _guestMounts = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> _tracedStatResults = new(StringComparer.Ordinal);
     // Both caches memoize host filesystem probe outcomes, so their key
-    // equivalence must match the host filesystem's: Windows resolves names
-    // case-insensitively, but Linux hosts are case-sensitive, and an
-    // ignore-case cache there aliases distinct paths — a cached miss for
-    // "/app0/DATA.BIN" keeps answering NOT_FOUND for "/app0/Data.bin" even
-    // though that file exists and a fresh probe would find it.
-    private static readonly StringComparer HostFsPathComparer =
-        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-    private static readonly StringComparison HostFsPathComparison =
-        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-    private static readonly HashSet<string> _negativeStatCache = new(HostFsPathComparer);
-    private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(HostFsPathComparer);
+    // equivalence must match the host filesystem's — see HostFsPath. On a
+    // case-sensitive host an ignore-case cache aliases distinct paths: a
+    // cached miss for "/app0/DATA.BIN" keeps answering NOT_FOUND for
+    // "/app0/Data.bin" even though that file exists.
+    private static readonly HashSet<string> _negativeStatCache = new(HostFsPath.Comparer);
+    private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(HostFsPath.Comparer);
     private static long _nextFileDescriptor = 2;
     private static string _applicationTitleId = "UNKNOWN";
 
@@ -5203,8 +5198,8 @@ public static partial class KernelMemoryCompatExports
         // host would let a relative path escape into a sibling directory that
         // differs from the mount root only by case (root ".../Save" vs
         // sibling ".../save").
-        if (!string.Equals(candidate, matchedHostRoot, HostFsPathComparison) &&
-            !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
+        if (!string.Equals(candidate, matchedHostRoot, HostFsPath.Comparison) &&
+            !candidate.StartsWith(rootWithSeparator, HostFsPath.Comparison))
         {
             return false;
         }
@@ -5305,8 +5300,8 @@ public static partial class KernelMemoryCompatExports
 
         var rootWithSeparator =
             Path.TrimEndingDirectorySeparator(fullRoot) + Path.DirectorySeparatorChar;
-        if (!string.Equals(candidate, fullRoot, HostFsPathComparison) &&
-            !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
+        if (!string.Equals(candidate, fullRoot, HostFsPath.Comparison) &&
+            !candidate.StartsWith(rootWithSeparator, HostFsPath.Comparison))
         {
             return string.Empty;
         }
@@ -5332,7 +5327,7 @@ public static partial class KernelMemoryCompatExports
     private static bool EscapesMountViaReparsePoint(string mountRoot, string candidate)
     {
         var rootTrimmed = Path.TrimEndingDirectorySeparator(mountRoot);
-        if (string.Equals(candidate, rootTrimmed, HostFsPathComparison))
+        if (string.Equals(candidate, rootTrimmed, HostFsPath.Comparison))
         {
             return false;
         }
