@@ -214,28 +214,200 @@ and ordinary guest output. The present evidence proves the stale-selection
 condition and the solid-black outcome, but does not prove that it explains every
 flashing run.
 
-### Audio behavior
+### Audio and movie-clock attribution
 
-The global `GuestAudioClock` was running and its selected progression was
-substantially slower than wall time during the host movie samples. A focused
-queue-log pass observed repeated underruns on multiple streams, including the
-identified movie stream. That movie stream (the stream with the 683 ms queue
-cap) commonly reported 2–5 ms average queued depth, frequent zero-depth
-observations, and zero submission drops.
+This section records the 2026-08-03 attribution pass. It is an investigation
+finding only: no compatibility correction was implemented.
 
-`GuestAudioClock` stores the furthest reported progress across audio streams
-without identifying which stream supplied that value. The exact stream or
-combination of streams advancing the global clock therefore remains unresolved.
-The proven boundary is narrower: `MediaFramePlayback` selects the slow global
-clock, and the wall-clock A/B completed the movies near their source durations
-while guest audio time lagged. That proves the selected slow global clock
-causally stretches host video; it does not prove that the movie stream alone
-owns the clock or that wall time is the correct guest-observable contract.
+#### Direct observations
 
-The queue evidence supports ordered audio segments separated by real silent
-gaps, rather than proving repeated samples or skipped samples. No sample-level
-content claim is made. The wall-clock comparison remains a diagnostic control,
-not a correction.
+The exact stream ownership is now established. On both diagnostic runs the
+streams were:
+
+| Stream | Owner/source | Input and queue | Device observation | Clock reports |
+| ---: | --- | --- | --- | --- |
+| 1 | `audio-out2-primary` / `guest-audio-out2-primary` | 48 kHz, 2-channel S16; 682.667 ms cap | SDL device 25, 48 kHz 2-channel F32, 480-frame buffer, running | Accepted reports; this stream advances the global clock |
+| 2 | `movie` / `ps_studios_logo.bk2`, movie instance 1, generation 1 | 48 kHz, 2-channel S16; 170.667 ms cap | SDL device 29, 48 kHz 2-channel F32, 480-frame buffer, running | 0 accepted, 213 rejected in each run |
+| 3 | `audio-out` / `port-1` | 48 kHz, 8-channel S16; 60 ms cap | SDL device 33, 48 kHz 2-channel F32, 480-frame buffer, running | Rejected because its local position lagged stream 1 |
+
+The three SDL device IDs are distinct logical device associations with the same
+reported physical device name. Each stream observed one initial running-state
+transition, then remained running. No queue query failure, device-unavailable
+state, pause, frequency-ratio change, or SDL submission failure was recorded.
+The push streams reported no application callback: callback availability was
+false and requested/supplied callback frames remained zero.
+
+The movie path is:
+
+```text
+Bink packet demux/decode
+  → FfmpegVideoDecoder.SubmitAudioFrame
+  → swr_convert to 48 kHz stereo S16
+  → SdlHostAudio.AudioStream.Submit
+  → SDL_PutAudioStreamData (SDL input queue)
+  → SDL device conversion to 48 kHz stereo F32
+  → device consumption
+```
+
+The decoder-open event reported source `AV_SAMPLE_FMT_FLTP`, 48 kHz stereo,
+output `AV_SAMPLE_FMT_S16`, 48 kHz stereo, and an FFmpeg declared audio
+duration of 0 s. The independent source metadata is 8.500 s; the zero FFmpeg
+duration did not prevent draining the measured 8.520 s of samples.
+
+`SdlHostAudio.Submit` is also the only caller of `GuestAudioClock.Report`.
+It reports accepted submitted samples minus the queue depth; the movie stream
+reports its own local position, but the shared furthest-value clock rejects it
+because the guest AudioOut2 stream is already farther ahead. At movie start the
+global value was 26.506666 s in diagnostic run 1 and 28.286 s in run 2. The
+movie stream ended at 8.47/8.48 local seconds while its reports remained
+0 accepted/213 rejected. Stream 1 was the accepted clock source throughout the
+movie interval.
+
+The first starvation boundary is in the host movie decoder, before SDL
+submission. In diagnostic run 1 the movie decoder entered `frame-buffer-wait`
+at 45.278 s with 100 ms queued and resumed `video-decode` at 45.975 s with an
+empty queue. In run 2 it entered the same wait at 44.503 s with 130 ms queued
+and resumed at 45.018 s empty. `MediaFramePlayback.DecodeLoop` cannot call
+`FfmpegVideoDecoder.TryDecodeNextFrame` while all five frame buffers are held;
+the decoder therefore cannot read the next interleaved audio packets during
+that wait. Later short waits repeat after the queue is empty. The measured
+boundary is the frame-buffer wait; the component that delays releasing a frame
+buffer is not yet isolated.
+
+#### Calculated values
+
+The final movie totals reconciled identically in both diagnostic runs:
+
+| Quantity | Value | Calculation/meaning |
+| --- | ---: | --- |
+| Source audio frames decoded | 408,960 | FFmpeg audio frames, source 48 kHz |
+| Converted output frames | 408,960 | `swr_convert` output; 1.0000 ratio |
+| Submitted input frames | 408,960 | 1,635,840 bytes at 4 bytes/frame accepted by SDL |
+| Failed/unsubmitted frames | 0 | No SDL `PutAudioStreamData` failure and no converted output left unsubmitted |
+| Dequeued input frames at final snapshot | 408,960 | Submitted input minus SDL-reported queued input; not physical playback |
+| Missing output frames | 0 | Converted output equals accepted submission |
+| Source audio time | 8.520000 s | `408,960 / 48,000` |
+| Last source timestamp | 8.48 s | FFmpeg audio-frame PTS observed |
+
+The source asset is 8.500 s at 30 fps; the audio packet stream contributes
+8.520 s of 48 kHz samples. The movie completed once at frame 254 after
+13.896 s and 14.124 s of movie wall playback in the two diagnostic runs. The
+audio data was not stretched by a sample-count or resampling error: all source
+samples were converted and accepted for submission, with no converted frames
+lost or rejected. At the final snapshot SDL reported zero queued input bytes
+and zero converted-available bytes. This proves that no pending data remained
+visible at those two SDL stream boundaries. It does not prove exact
+physical-device playback or that every frame was audible. `GuestAudioClock` is
+an estimate derived from accepted input minus SDL input-queue depth, not a
+direct measurement of samples heard by the user.
+
+The separate guest stream was the slow clock frontier. In run 2, the final
+AudioOut2 primary snapshot had a 10.667 ms queue, 2,912,000 submitted input
+frames, 2,911,488 dequeued input frames, 2,121 underruns, and 22.573 s
+accumulated empty time. The dequeued count is SDL input-queue arithmetic, not
+a physical-device or audible-playback count. The movie stream had 11 underruns
+and 12.650 s accumulated empty time;
+the classic AudioOut stream had a 58 ms queue, one underrun, and 0.19 s of
+accumulated empty time. Queue caps were never exceeded and no stream recorded
+an over-target enqueue.
+
+#### Source-backed behavior
+
+The interpretation uses the current official SDL3 and .NET contracts recorded
+in [`docs/SOURCES.md`](SOURCES.md): SDL reports stream queued bytes and
+converted availability separately, exposes stream/device formats and device
+identity, and a null callback selects push-mode delivery; SDL's frequency ratio
+of 1.0 is normal-rate conversion. `SDL_GetAudioStreamQueued` reports input-format
+bytes still queued for conversion, while `SDL_GetAudioStreamAvailable` reports
+converted output available. Neither reports all device or hardware buffering.
+`Stopwatch.GetTimestamp` and
+`Stopwatch.GetElapsedTime` provide the host monotonic correlation used by the
+events. These API contracts do not identify the title's intended guest/movie
+clock owner.
+
+#### Inferences
+
+- The movie stream starves because Bink audio production is bursty and coupled
+  to the video decoder's five-buffer availability. The first measured cause is
+  the decoder's `frame-buffer-wait`, not slow sample conversion.
+- The slow movie presentation is causally explained by two measured facts:
+  movie frame selection follows the shared `GuestAudioClock`, and the accepted
+  clock source is the underrunning AudioOut2 primary stream. The movie stream's
+  own audio does not drive that clock.
+- The current implementation does not establish that the movie's host audio
+  and the guest AudioOut2 stream are intended to share one timeline. Therefore
+  changing the global clock owner, making it per-movie, or moving audio packet
+  pumping off the video decoder would be a semantic correction, not an
+  instrumentation-only change.
+- The historical 683 ms queue attribution to the movie stream was incorrect.
+  That cap belongs to AudioOut2 primary; the movie cap is 170.667 ms.
+
+#### No-default-device warnings
+
+The two diagnostic runs had no no-default-device warning and still reproduced
+the movie's empty queue and stretched completion. In the earlier warning-bearing
+run `20260801T061920689Z-c129d0f-trial-01`, every warning was explicitly
+`AudioOut2 primary backend unavailable: ... No default audio device available`.
+The movie stream was not the warning owner. The present evidence proves that
+the warnings are not required to reproduce the movie-stream underrun. It does
+not establish that an AudioOut2 fallback in a warning-bearing run cannot
+contribute to that run's behavior.
+
+#### Unresolved questions and falsifiers
+
+The following remain open: which guest/render phase holds the fifth movie frame
+buffer, whether the intended startup contract couples movie video to the movie
+audio or to guest AudioOut2, and whether SDL's input-queue/converted-available
+boundary needs a device-level consumption probe for sub-interval accounting.
+
+The attribution would be falsified if a repeat run shows movie stream clock
+reports accepted while AudioOut2 reports are rejected, if movie audio totals
+contain failed/unsubmitted samples or a non-1.0 ratio, if the movie queue stays
+non-empty across the measured frame-buffer waits, if device state transitions
+precede the gaps, or if decoupling frame-buffer availability in a synthetic
+authored decoder leaves the same starvation pattern. A correction proposal also
+requires a proof of the intended guest/movie timeline and ownership.
+
+#### Narrowest correction boundary
+
+No implementation-ready compatibility correction exists from this pass. The
+narrowest measured boundary is the host `MediaFramePlayback` frame-buffer wait
+that prevents `FfmpegVideoDecoder` from pumping interleaved audio packets. The
+smallest plausible future experiment is an authored synthetic decoder that
+continues audio packet pumping while the video frame pool is exhausted; it must
+preserve the observed frame ownership and prove the guest/movie clock contract
+before any target behavior is changed. Wall-clock playback remains diagnostic
+only.
+
+#### Runs, hashes, safety, and instrumentation overhead
+
+| Run | Mode/result | Movie checkpoint |
+| --- | --- | --- |
+| `20260802T220619684Z-a7ee8a4-trial-01` | Clean control, diagnostics disabled; physical-headroom stop at 204.420 s | `ps_studios_logo.bk2` attached and completed at 11.13 s/frame 254; `attract_movie.bk2` attached; no nickname checkpoint inferred |
+| `20260802T221008090Z-a7ee8a4-trial-01` | Diagnostic; physical-headroom stop at 70.781 s; no cleanup failures | Logo attached at 44.454 s, started at 45.800 s, completed at 13.896 s/frame 254 |
+| `20260802T221703483Z-a7ee8a4-trial-01` | Diagnostic repeat; physical-headroom stop at 93.151 s; no cleanup failures | Logo attached at 43.707 s, started at 44.936 s, completed at 14.124 s/frame 254 |
+
+The Release executable SHA-256 was
+`FAA5F39B1A1395873DE5577770671421FF0A955DB0CADD716A7EC4C7280DAF47`.
+The target `eboot.bin` SHA-256 was
+`22ED8843917CB16438B7B780998E408321F5CEBE79DD10F388AE59CFCA588306`.
+The fixed page file remained `C:\pagefile.sys`, 32,768 MB initial and maximum;
+the runner's physical-headroom, commit-headroom, process-tree cleanup, and
+sampling policies were unchanged. All three manifests recorded empty cleanup
+failures, and no SharpEmu process remained after each run.
+
+With diagnostics disabled, the audio path performs no diagnostic payload
+construction, formatting, diagnostic locking, or per-frame accounting. Enabled
+runs emitted 411 and 408 bounded audio events respectively and produced 5.1 MB
+and 6.5 MB JSONL artifacts, alongside the runner's other memory events. The
+target completion shift relative to the clean control is a sensitivity signal,
+not an isolated instrumentation-overhead measurement; the broad memory
+diagnostic stream and physical-headroom stop prevent that claim.
+
+Focused diagnostics tests passed 10/10. The Fast lane passed all six runner and
+memory regressions and all 843 solution tests. `git diff --check` passed. The
+shader lane was not run because this investigation changes no shader or GPU
+semantics.
 
 ### Later progression and safety
 

@@ -399,6 +399,13 @@ internal static class HostMovieBridge
         _activeMovieGeneration = HostMovieGenerations.Activate();
         _activeMovieInstanceId = MovieDiagnostics.NewMovieInstanceId();
         _activeInfo = info;
+        if (decoder is IMediaAudioDiagnostics audioDiagnostics)
+        {
+            audioDiagnostics.SetMovieDiagnosticIdentity(
+                hostPath,
+                _activeMovieInstanceId,
+                _activeMovieGeneration);
+        }
         _playback = new MediaFramePlayback(decoder, _activeMovieInstanceId);
         MovieDiagnostics.Attach(
             hostPath,

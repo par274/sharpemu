@@ -833,10 +833,27 @@ public static class AudioOut2Exports
                             context.Frequency,
                             maxQueuedPcmBytes: 128 * 1024);
                         PrimaryBackendName = audio.BackendName + "-primary";
+                        if (HostAudioDiagnostics.Enabled &&
+                            PrimaryBackend is IHostAudioStreamDiagnostics streamDiagnostics)
+                        {
+                            streamDiagnostics.SetDiagnosticContext(
+                                owner: "audio-out2-primary",
+                                source: "guest-audio-out2-primary",
+                                movieInstanceId: 0,
+                                hostMovieGeneration: 0);
+                        }
                     }
                     catch (Exception exception)
                     {
                         PrimaryBackendName = "silent";
+                        HostAudioDiagnostics.RecordOpenFailure(
+                            owner: "audio-out2-primary",
+                            source: "guest-audio-out2-primary",
+                            sampleRate: context.Frequency,
+                            channels: 2,
+                            format: "S16",
+                            maximumQueuedBytes: 128 * 1024,
+                            exception: exception);
                         Console.Error.WriteLine(
                             $"[LOADER][WARN] AudioOut2 primary backend unavailable: {exception.Message}");
                     }
@@ -855,10 +872,27 @@ public static class AudioOut2Exports
                         context.Frequency,
                         maxQueuedPcmBytes: 128 * 1024);
                     SecondaryBackendName = audio.BackendName + "-secondary";
+                    if (HostAudioDiagnostics.Enabled &&
+                        SecondaryBackend is IHostAudioStreamDiagnostics streamDiagnostics)
+                    {
+                        streamDiagnostics.SetDiagnosticContext(
+                            owner: "audio-out2-secondary",
+                            source: "guest-audio-out2-secondary",
+                            movieInstanceId: 0,
+                            hostMovieGeneration: 0);
+                    }
                 }
                 catch (Exception exception)
                 {
                     SecondaryBackendName = "silent";
+                    HostAudioDiagnostics.RecordOpenFailure(
+                        owner: "audio-out2-secondary",
+                        source: "guest-audio-out2-secondary",
+                        sampleRate: context.Frequency,
+                        channels: 2,
+                        format: "S16",
+                        maximumQueuedBytes: 128 * 1024,
+                        exception: exception);
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] AudioOut2 secondary backend unavailable: {exception.Message}");
                 }

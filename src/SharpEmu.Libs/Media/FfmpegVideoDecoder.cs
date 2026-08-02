@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers;
+using System.Diagnostics;
 using FFmpeg.AutoGen;
 using SharpEmu.HLE.Host;
 
@@ -13,7 +14,7 @@ namespace SharpEmu.Libs.Media;
 /// libraries published by github.com/sharpemu/ffmpeg-core -- no native C
 /// bridge of our own to build. See docs/bink2-bridge.md.
 /// </summary>
-internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
+internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder, IMediaAudioDiagnostics
 {
     private const int OutputAudioChannels = 2;
     private const int OutputAudioBytesPerSample = sizeof(short);
@@ -31,6 +32,22 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
     private readonly int _videoStreamIndex;
     private readonly int _audioStreamIndex;
     private readonly int _audioOutputSampleRate;
+    private readonly AVRational _audioTimeBase;
+    private readonly double _declaredAudioDurationSeconds;
+    private readonly int _audioInputSampleRate;
+    private readonly int _audioInputChannels;
+    private readonly AVSampleFormat _audioInputFormat;
+    private readonly IHostAudioStreamDiagnostics? _audioStreamDiagnostics;
+    private long _decodedSourceFrames;
+    private long _convertedOutputFrames;
+    private long _failedSubmissionFrames;
+    private long _resamplerInputFrames;
+    private long _resamplerOutputFrames;
+    private double _lastSourceTimestampSeconds = -1;
+    private long _nextDiagnosticTimestamp;
+    private string _diagnosticSource = string.Empty;
+    private long _diagnosticMovieInstanceId;
+    private long _diagnosticHostMovieGeneration;
     private AVChannelLayout _swrInputLayout;
     private AVSampleFormat _swrInputFormat = AVSampleFormat.AV_SAMPLE_FMT_NONE;
     private int _swrInputSampleRate;
@@ -56,6 +73,11 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
         int audioStreamIndex,
         IHostAudioStream? audioStream,
         int audioOutputSampleRate,
+        AVRational audioTimeBase,
+        double declaredAudioDurationSeconds,
+        int audioInputSampleRate,
+        int audioInputChannels,
+        AVSampleFormat audioInputFormat,
         uint width,
         uint height,
         uint framesPerSecondNumerator,
@@ -68,6 +90,14 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
         _audioStreamIndex = audioStreamIndex;
         _audioStream = audioStream;
         _audioOutputSampleRate = audioOutputSampleRate;
+        _audioTimeBase = audioTimeBase;
+        _declaredAudioDurationSeconds = declaredAudioDurationSeconds;
+        _audioInputSampleRate = audioInputSampleRate;
+        _audioInputChannels = audioInputChannels;
+        _audioInputFormat = audioInputFormat;
+        _audioStreamDiagnostics = HostAudioDiagnostics.Enabled
+            ? audioStream as IHostAudioStreamDiagnostics
+            : null;
         Width = width;
         Height = height;
         FramesPerSecondNumerator = framesPerSecondNumerator;
@@ -155,6 +185,18 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
                 formatContext,
                 out audioCodecContext,
                 out var audioOutputSampleRate);
+            var audioTimeBase = default(AVRational);
+            var declaredAudioDurationSeconds = 0d;
+            if (audioStreamIndex >= 0)
+            {
+                var audioMediaStream = formatContext->streams[audioStreamIndex];
+                audioTimeBase = audioMediaStream->time_base;
+                if (audioMediaStream->duration > 0 && audioTimeBase.den > 0)
+                {
+                    declaredAudioDurationSeconds = audioMediaStream->duration *
+                        ((double)audioTimeBase.num / audioTimeBase.den);
+                }
+            }
             if (audioStreamIndex >= 0 && audioCodecContext is not null)
             {
                 try
@@ -165,6 +207,14 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
                 catch (Exception exception) when (exception is InvalidOperationException or
                                                      ArgumentOutOfRangeException)
                 {
+                    HostAudioDiagnostics.RecordOpenFailure(
+                        owner: "movie",
+                        source: path,
+                        sampleRate: checked((uint)Math.Max(0, audioOutputSampleRate)),
+                        channels: OutputAudioChannels,
+                        format: "S16LE",
+                        maximumQueuedBytes: 32 * 1024,
+                        exception);
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] Bink audio output unavailable: {exception.Message}");
                     ffmpeg.avcodec_free_context(&audioCodecContext);
@@ -201,6 +251,13 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
                 audioStreamIndex,
                 audioStream,
                 audioOutputSampleRate,
+                audioTimeBase,
+                declaredAudioDurationSeconds,
+                audioCodecContext is null ? 0 : audioCodecContext->sample_rate,
+                audioCodecContext is null ? 0 : audioCodecContext->ch_layout.nb_channels,
+                audioCodecContext is null
+                    ? AVSampleFormat.AV_SAMPLE_FMT_NONE
+                    : audioCodecContext->sample_fmt,
                 outputWidth,
                 outputHeight,
                 (uint)frameRate.num,
@@ -278,6 +335,54 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
         return streamIndex;
     }
 
+    public void SetMovieDiagnosticIdentity(
+        string source,
+        long movieInstanceId,
+        long hostMovieGeneration)
+    {
+        if (!HostAudioDiagnostics.Enabled)
+        {
+            return;
+        }
+
+        _diagnosticSource = source;
+        _diagnosticMovieInstanceId = movieInstanceId;
+        _diagnosticHostMovieGeneration = hostMovieGeneration;
+        if (_audioStreamDiagnostics is not null)
+        {
+            _audioStreamDiagnostics.SetDiagnosticContext(
+                owner: "movie",
+                source,
+                movieInstanceId,
+                hostMovieGeneration);
+        }
+
+        HostAudioDiagnostics.RecordMovieDecoderIdentity(
+            source,
+            movieInstanceId,
+            hostMovieGeneration,
+            _declaredAudioDurationSeconds,
+            _audioInputSampleRate,
+            _audioInputChannels,
+            _audioInputFormat.ToString(),
+            _audioOutputSampleRate,
+            OutputAudioChannels,
+            AVSampleFormat.AV_SAMPLE_FMT_S16.ToString());
+    }
+
+    public void SetDiagnosticPhase(string phase)
+    {
+        if (!HostAudioDiagnostics.Enabled)
+        {
+            return;
+        }
+
+        if (_audioStreamDiagnostics is not null)
+        {
+            _audioStreamDiagnostics.SetDiagnosticPhase(phase);
+        }
+    }
+
     public bool TryDecodeNextFrame(Span<byte> destination)
     {
         lock (_decodeGate)
@@ -296,6 +401,7 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
 
             if (!TryReceiveFrame())
             {
+                RecordMovieDecoderSummaryIfDue();
                 return false;
             }
 
@@ -314,6 +420,7 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
             if (_swsContext is null)
             {
                 ffmpeg.av_frame_unref(_frame);
+                RecordMovieDecoderSummaryIfDue();
                 return false;
             }
 
@@ -330,9 +437,40 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
                     destinationPlanes,
                     destinationStrides);
                 ffmpeg.av_frame_unref(_frame);
+                RecordMovieDecoderSummaryIfDue();
                 return convertedRows == (int)Height;
             }
         }
+    }
+
+    private void RecordMovieDecoderSummaryIfDue()
+    {
+        if (_audioStreamDiagnostics is null || !HostAudioDiagnostics.Enabled)
+        {
+            return;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        if (_nextDiagnosticTimestamp != 0 && now < _nextDiagnosticTimestamp)
+        {
+            return;
+        }
+
+        _nextDiagnosticTimestamp = now + Stopwatch.Frequency;
+        var streamSnapshot = _audioStreamDiagnostics.GetDiagnosticSnapshot();
+        HostAudioDiagnostics.RecordMovieDecoderSummary(
+            _diagnosticSource,
+            _diagnosticMovieInstanceId,
+            _diagnosticHostMovieGeneration,
+            _declaredAudioDurationSeconds,
+            _decodedSourceFrames,
+            _convertedOutputFrames,
+            streamSnapshot.SubmittedInputFrames,
+            _failedSubmissionFrames,
+            _resamplerInputFrames,
+            _resamplerOutputFrames,
+            _lastSourceTimestampSeconds,
+            streamSnapshot);
     }
 
     private bool TryReceiveFrame()
@@ -479,6 +617,17 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
             return true;
         }
 
+        if (_audioStreamDiagnostics is not null)
+        {
+            _decodedSourceFrames = checked(_decodedSourceFrames + _audioFrame->nb_samples);
+            if (_audioFrame->pts != ffmpeg.AV_NOPTS_VALUE &&
+                _audioTimeBase.den > 0)
+            {
+                _lastSourceTimestampSeconds = _audioFrame->pts *
+                    ((double)_audioTimeBase.num / _audioTimeBase.den);
+            }
+        }
+
         var sampleRate = _audioFrame->sample_rate > 0
             ? _audioFrame->sample_rate
             : _audioCodecContext->sample_rate;
@@ -540,7 +689,24 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
 
                     var convertedBytes = checked(
                         convertedSamples * OutputAudioChannels * OutputAudioBytesPerSample);
-                    return _audioStream.Submit(buffer.AsSpan(0, convertedBytes));
+                    if (_audioStreamDiagnostics is not null)
+                    {
+                        _convertedOutputFrames = checked(
+                            _convertedOutputFrames + convertedSamples);
+                        _resamplerInputFrames = checked(
+                            _resamplerInputFrames + _audioFrame->nb_samples);
+                        _resamplerOutputFrames = checked(
+                            _resamplerOutputFrames + convertedSamples);
+                    }
+
+                    var submitted = _audioStream.Submit(buffer.AsSpan(0, convertedBytes));
+                    if (_audioStreamDiagnostics is not null && !submitted)
+                    {
+                        _failedSubmissionFrames = checked(
+                            _failedSubmissionFrames + convertedSamples);
+                    }
+
+                    return submitted;
                 }
             }
             finally

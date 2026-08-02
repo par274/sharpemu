@@ -19,6 +19,16 @@ internal interface IMediaFrameDecoder : IDisposable
     bool TryDecodeNextFrame(Span<byte> destination);
 }
 
+internal interface IMediaAudioDiagnostics
+{
+    void SetMovieDiagnosticIdentity(
+        string source,
+        long movieInstanceId,
+        long hostMovieGeneration);
+
+    void SetDiagnosticPhase(string phase);
+}
+
 /// <summary>
 /// Keeps blocking codec work away from the Vulkan presentation thread and
 /// releases decoded frames according to the movie time base.
@@ -29,6 +39,7 @@ internal sealed class MediaFramePlayback : IDisposable
 
     private readonly object _gate = new();
     private readonly IMediaFrameDecoder _decoder;
+    private readonly IMediaAudioDiagnostics? _audioDiagnostics;
     private readonly long _diagnosticMovieInstanceId;
     private readonly Queue<byte[]> _freeBuffers = new();
     private readonly Queue<DecodedFrame> _decodedFrames = new();
@@ -56,6 +67,9 @@ internal sealed class MediaFramePlayback : IDisposable
         long diagnosticMovieInstanceId = 0)
     {
         _decoder = decoder;
+        _audioDiagnostics = HostAudioDiagnostics.Enabled
+            ? decoder as IMediaAudioDiagnostics
+            : null;
         _diagnosticMovieInstanceId = diagnosticMovieInstanceId;
         Width = decoder.Width;
         Height = decoder.Height;
@@ -283,7 +297,8 @@ internal sealed class MediaFramePlayback : IDisposable
 
         _lastSkewTraceTimestamp = now;
         var wallSeconds = Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds;
-        var audioSeconds = GuestAudioClock.PlayedSeconds - _audioStartSeconds;
+        var guestAudioClockSeconds = GuestAudioClock.PlayedSeconds;
+        var audioSeconds = guestAudioClockSeconds - _audioStartSeconds;
         var selectedPlaybackSeconds = CurrentPlaybackSecondsLocked();
         var targetFrameIndex = CurrentTargetFrameIndexLocked();
         var audioRunning = GuestAudioClock.IsRunning;
@@ -299,11 +314,16 @@ internal sealed class MediaFramePlayback : IDisposable
         MovieDiagnostics.Clock(
             _diagnosticMovieInstanceId,
             wallSeconds,
+            guestAudioClockSeconds,
             audioSeconds,
             selectedPlaybackSeconds,
             audioRunning,
             _followGuestAudioClock,
             _currentFrameIndex,
+            _currentFrameIndex < 0
+                ? -1
+                : _currentFrameIndex *
+                    (double)FramesPerSecondDenominator / FramesPerSecondNumerator,
             targetFrameIndex,
             _nextDecodedFrameIndex,
             _decodedFrames.Count,
@@ -342,11 +362,19 @@ internal sealed class MediaFramePlayback : IDisposable
                 {
                     while (!_stopRequested && _freeBuffers.Count == 0)
                     {
+                        if (_audioDiagnostics is not null)
+                        {
+                            _audioDiagnostics.SetDiagnosticPhase("frame-buffer-wait");
+                        }
                         Monitor.Wait(_gate);
                     }
                     if (_stopRequested)
                     {
                         return;
+                    }
+                    if (_audioDiagnostics is not null)
+                    {
+                        _audioDiagnostics.SetDiagnosticPhase("video-decode");
                     }
                     destination = _freeBuffers.Dequeue();
                 }

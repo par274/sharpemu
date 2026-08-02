@@ -174,6 +174,14 @@ public static class AudioOutExports
         catch (Exception exception)
         {
             backendName = "silent";
+            HostAudioDiagnostics.RecordOpenFailure(
+                owner: "audio-out",
+                source: "guest-port",
+                sampleRate: frequency,
+                channels: channels,
+                format: isFloat ? "F32" : "S16",
+                maximumQueuedBytes: 0,
+                exception: exception);
             Console.Error.WriteLine(
                 $"[LOADER][WARN] AudioOut host backend unavailable: {exception.Message}");
         }
@@ -190,6 +198,15 @@ public static class AudioOutExports
             isFloat,
             preservesGuestFormat,
             backend);
+        if (HostAudioDiagnostics.Enabled &&
+            backend is IHostAudioStreamDiagnostics streamDiagnostics)
+        {
+            streamDiagnostics.SetDiagnosticContext(
+                owner: "audio-out",
+                source: $"port-{handle}",
+                movieInstanceId: 0,
+                hostMovieGeneration: 0);
+        }
         Console.Error.WriteLine(
             $"[LOADER][INFO] AudioOut port {handle}: {frequency} Hz, " +
             $"{channels} ch, {(isFloat ? "float32" : "s16")}, " +
