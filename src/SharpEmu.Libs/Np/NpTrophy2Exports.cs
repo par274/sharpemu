@@ -99,7 +99,7 @@ public static class NpTrophy2Exports
     public static int NpTrophy2GetTrophyInfo(CpuContext ctx) =>
         SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
 
-    // SHP!!! NpTrophy2
+    // SHP!!! NpTrophy2GetTrophyInfoArray
     [SysAbiExport(
         Nid = "y3zHpdZO6ME",
         ExportName = "sceNpTrophy2GetTrophyInfoArray",
