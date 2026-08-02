@@ -194,19 +194,16 @@ public static partial class AgcExports
     // Last {base, cursor} seen on each builder header at packet-record time,
     // used to detect arena switches the moment they happen (see
     // TrackCbReleaseMemTarget). Deliberately updated ONLY from release_mem
-    // builds, not every packet type: three live attempts to generalize this
-    // to every AGC packet via TryAllocateCommandDwords (to also catch a
-    // trailing write_data built after a lap's last release_mem) each
-    // regressed the stall earlier (12 flips -> 6 -> 6 -> 2), regardless of
-    // whether the closed-slice action ran immediately or was deferred to a
-    // release_mem checkpoint — even a purely passive per-packet cache write
-    // made it worse. TryAllocateCommandDwords is the single choke point for
-    // every packet the ENTIRE game builds, across every queue; hooking it
-    // is apparently unsafe here for reasons not fully root-caused (leading
-    // theory: lock/timing pressure on this hot path shifts the game's own
-    // scheduling into whatever pre-existing race the orphan-submit
-    // machinery already routes around). Left as a known gap: a trailing
-    // non-release_mem packet at the tail of a lap can still be missed.
+    // builds, not every packet type: generalizing this to every AGC packet
+    // via TryAllocateCommandDwords (to also catch a trailing write_data built
+    // after a lap's last release_mem) made the stall worse, even with a
+    // purely passive per-packet cache write — root cause not fully
+    // understood (leading theory: lock/timing pressure on this hot path,
+    // the single choke point for every packet the game builds across every
+    // queue, shifts scheduling into whatever pre-existing race the
+    // orphan-submit machinery already routes around). Left as a known gap:
+    // a trailing non-release_mem packet at the tail of a lap can still be
+    // missed.
     // ThreadHandle/Timestamp piggyback on the existing (Base, Cursor) snapshot
     // captured at the same already-safe checkpoints (see the comment above):
     // no new hook, just two extra fields read at sites that already read this
@@ -1040,13 +1037,11 @@ public static partial class AgcExports
         // — which only runs on the header's NEXT release_mem build. A builder
         // that writes its lap's release_mem and then moves to another arena
         // WITHOUT ever building another release_mem never triggers that
-        // staging, and the abandoned arena's tail is lost (observed live:
-        // 0x804F85790 built its data=1 producer at 0x20147C3714, moved to
-        // 0x20118B2000, built no further release_mem — the ==1 waiter on
-        // 0x201479FD80 then hung forever). This sweep-time check covers that
-        // case from the caches Track already maintains, at sweep cadence — no
-        // new per-packet hook (that approach regressed three times, see
-        // _builderArenaLastSeen's history).
+        // staging, and the abandoned arena's tail is lost, leaving any waiter
+        // on it hung forever. This sweep-time check covers that case from the
+        // caches Track already maintains, at sweep cadence — a per-packet
+        // hook on every AGC packet was tried instead and made the underlying
+        // stall worse (see _builderArenaLastSeen's own comment).
         lock (_orphanPreambleGate)
         {
             if (_builderArenaLastSeen.TryGetValue(headerAddress, out var lastSeen) &&
@@ -1085,15 +1080,13 @@ public static partial class AgcExports
 
         // A closed-arena slice staged by TrackCbReleaseMemTarget can land at
         // any point relative to this call: the game's builder thread stages it
-        // while the monitor loop is anywhere in its iteration. Observed live
-        // (label 0x20000003C0): the closure carrying release_mem data=8 was
-        // staged between DrainPendingOrphanPreambles' closed-slice flush and
-        // SweepBuilderArenas of the SAME iteration, so the sweep enqueued the
-        // current arena (data=9) first and the closed slice (data=8) a later
-        // iteration — same per-header queue, so 9 then 8 executed, the counter
-        // regressed, and every ==9 waiter hung forever. Flushing this header's
-        // staged closures before reading its current cursor makes the
-        // current-arena submission unable to overtake its own predecessor.
+        // while the monitor loop is anywhere in its iteration. If the current
+        // arena's sweep enqueues before an already-staged closed slice from
+        // the same header, the two execute out of counter order on the same
+        // per-header queue and any waiter expecting the closed slice's value
+        // first hangs forever. Flushing this header's staged closures before
+        // reading its current cursor makes the current-arena submission
+        // unable to overtake its own predecessor.
         FlushClosedSlicesForHeader(ctx, gpuState, headerAddress);
 
         if (cursor <= commandAddress)
@@ -1277,9 +1270,9 @@ public static partial class AgcExports
     // Sorts headers by the wall-clock time their LATEST recorded checkpoint
     // (release_mem build or sweep-detected arena switch) happened, oldest
     // first — the closest approximation of "the order the game actually
-    // built this content in" available without a per-packet hook (which
-    // regressed three times live, see _builderArenaLastSeen's history
-    // above). A header with no checkpoint yet (never seen by
+    // built this content in" available without a per-packet hook (see
+    // _builderArenaLastSeen's own comment above for why that hook makes
+    // things worse). A header with no checkpoint yet (never seen by
     // TrackCbReleaseMemTarget) sorts first: it has no fresher claim on the
     // ordering than anything else, and ForceSubmitOrphanPreambleHeader's own
     // "readable/non-empty" gates make an out-of-turn call on it a harmless
@@ -3736,14 +3729,13 @@ public static partial class AgcExports
     // the cursor cache to cover trailer packets built AFTER a lap's last
     // release_mem but before the arena switches — those bytes fell outside
     // the closed slice TrackCbReleaseMemTarget computes from a release_mem-
-    // only cursor, permanently starving them (observed live: a per-frame
-    // write_data counter built ~16 bytes past the last tracked release_mem
-    // was silently dropped every lap, stalling the main thread's frame-gate
-    // spin forever — and, more rarely with only write_data covered, a
-    // different small trailer packet in the same tail position).
+    // only cursor, permanently starving them (a per-frame write_data counter
+    // built just past the last tracked release_mem could be silently
+    // dropped every lap, stalling the main thread's frame-gate spin
+    // forever).
     //
-    // Deliberately much narrower than a universal per-packet hook (which
-    // regressed live three times, see _builderArenaLastSeen's comment):
+    // Deliberately much narrower than a universal per-packet hook (see
+    // _builderArenaLastSeen's own comment for why that makes things worse):
     // only fires for headers TrackCbReleaseMemTarget already tracks (a
     // release_mem was seen from them before), never introduces a new base
     // into the cache and never triggers arena-switch detection or a lap
@@ -8040,8 +8032,8 @@ public static partial class AgcExports
                 // int_sel field asks for one. The AGC interrupt thread decrements
                 // its driver completion refcount once per kevent it receives, and
                 // that refcount signals continuations only on an exact zero
-                // crossing — measured live (Yotei), a single unrequested kevent
-                // drives it negative while unarmed and permanently loses the
+                // crossing — a single unrequested kevent drives it negative
+                // while unarmed and permanently loses the
                 // signal that kicks the frame graph. Releases with int_sel==0
                 // (all of them, in Yotei's first frames) are pure label writes
                 // the wait registry resolves; they must not deliver kevents.
