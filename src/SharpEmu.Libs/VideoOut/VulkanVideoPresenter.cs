@@ -3,6 +3,7 @@
 
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
+using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Media;
@@ -1256,6 +1257,25 @@ internal static unsafe class VulkanVideoPresenter
 
             _guestImageWorkSequences[address] = EnqueueGuestWorkLocked(
                 new VulkanGuestImageWrite(address, null, fillValue));
+        }
+    }
+
+    private static readonly ConcurrentDictionary<ulong, byte> _pendingGuestColorClears = new();
+
+    /// <summary>
+    /// Clear a guest colour target to zero at its next render pass.
+    ///
+    /// Deliberately not <see cref="SubmitOffscreenColorClear"/>: that enqueues
+    /// a CmdClearColorImage which lands outside the render pass that follows
+    /// it, so a target cleared this way was still observed reading back its
+    /// previous contents. Dropping <c>Initialized</c> makes the render pass
+    /// itself clear via <see cref="AttachmentLoadOp.Clear"/>.
+    /// </summary>
+    internal static void RequestGuestColorClear(ulong address)
+    {
+        if (address != 0)
+        {
+            _pendingGuestColorClears[address] = 0;
         }
     }
 
@@ -12412,6 +12432,17 @@ internal static unsafe class VulkanVideoPresenter
                 // format could later be replayed inside a render pass of the
                 // other identity.
                 formats[index] = targets[index].Format;
+
+                // Guest colour attachments load their previous contents on
+                // every pass after the first, so nothing resets one until the
+                // guest clears it. Consume a pending clear here, before the
+                // render pass is built, so the pass uses LoadOp.Clear.
+                if (work.Targets[index].Address != 0 &&
+                    _pendingGuestColorClears.TryRemove(work.Targets[index].Address, out _))
+                {
+                    targets[index].Initialized = false;
+                }
+
                 if (work.Targets[index].Address != 0 &&
                     TakeGuestImageInitialData(work.Targets[index].Address) is { } initialData &&
                     !targets[index].Initialized &&

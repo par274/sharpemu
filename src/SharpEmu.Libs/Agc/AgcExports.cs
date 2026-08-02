@@ -141,9 +141,15 @@ public static partial class AgcExports
     private const uint CbColor0Base = 0x318;
     private const uint CbColorRegisterStride = 15;
     private const uint CbColor0Info = 0x31C;
+    private const uint CbColor0ClearWord0 = 0x323;
+    private const uint CbColor0ClearWord1 = 0x324;
     private const uint CbColor0BaseExt = 0x390;
     private const uint CbColor0Attrib2 = 0x3B0;
     private const uint CbColor0Attrib3 = 0x3B8;
+    // CB_COLORn_INFO.DCC_ENABLE (gc_10_1_0_sh_mask.h). On GFX10 the legacy
+    // FAST_CLEAR and COMPRESSION bits stay clear because DCC, not CMASK,
+    // carries the compression.
+    private const uint CbColorInfoDccEnableMask = 1u << 28;
     private const uint CbBlend0Control = 0x1E0;
     private const uint PaScModeCntl0 = 0x292;
     // GFX10 DB context registers (register byte address minus 0x28000, / 4).
@@ -503,7 +509,8 @@ public static partial class AgcExports
         float ClearRed = 0f,
         float ClearGreen = 0f,
         float ClearBlue = 0f,
-        float ClearAlpha = 1f);
+        float ClearAlpha = 1f,
+        bool IsDccFastClear = false);
 
     private sealed record TranslatedImageBinding(
         TextureDescriptor Descriptor,
@@ -6864,6 +6871,29 @@ public static partial class AgcExports
                     $"dst=0x{resolveDestination.Address:X16}");
             }
 
+            // A DCC fast clear writes metadata only; the colour block discards
+            // the quad's shaded output. Reset the attachment and drop the draw,
+            // which reproduces the observable effect of a clear to zero without
+            // modelling DCC block state.
+            if (translatedDraw.IsDccFastClear)
+            {
+                foreach (var target in translatedDraw.GuestTargets)
+                {
+                    if (target.Address != 0)
+                    {
+                        VulkanVideoPresenter.RequestGuestColorClear(target.Address);
+                    }
+                }
+
+                ReturnPooledDrawArrays(
+                    translatedDraw,
+                    globals: true,
+                    vertex: true,
+                    index: true);
+                state.TranslatedDraw = null;
+                return;
+            }
+
             var firstTarget = translatedDraw.RenderTargets.FirstOrDefault();
             if (firstTarget.Address != 0)
             {
@@ -7780,6 +7810,12 @@ public static partial class AgcExports
             pixelUserData[index] = pixelEvaluation.InitialScalarRegisters[index];
         }
 
+        var renderState = ApplyTransparentPremultipliedFillClear(
+            CreateRenderState(state.CxRegisters, renderTargets, pixelColorExportMasks),
+            textures,
+            vertexInputs,
+            pixelEvaluation.InitialScalarRegisters);
+
         draw = new TranslatedGuestDraw(
             exportShaderAddress,
             pixelShaderAddress,
@@ -7797,11 +7833,7 @@ public static partial class AgcExports
             renderTargets,
             DecodeDepthTarget(state.CxRegisters),
             guestTargets,
-            ApplyTransparentPremultipliedFillClear(
-                CreateRenderState(state.CxRegisters, renderTargets, pixelColorExportMasks),
-                textures,
-                vertexInputs,
-                pixelEvaluation.InitialScalarRegisters),
+            renderState,
             pixelUserData,
             state.CxRegisters.TryGetValue(CbBlend0Control, out var rawBlend) ? rawBlend : 0,
             state.CxRegisters.TryGetValue(
@@ -7815,7 +7847,15 @@ public static partial class AgcExports
             fullscreenClearColor.Red,
             fullscreenClearColor.Green,
             fullscreenClearColor.Blue,
-            fullscreenClearColor.Alpha);
+            fullscreenClearColor.Alpha,
+            IsDccFastClearDraw(
+                state.CxRegisters,
+                renderTargets,
+                textures,
+                vertexInputs,
+                renderState,
+                primitiveType,
+                vertexCount));
         return true;
     }
 
@@ -8090,6 +8130,113 @@ public static partial class AgcExports
                 .Select(blend => blend with { Enable = false })
                 .ToArray(),
         };
+    }
+
+    /// <summary>
+    /// Recognises the covering quad a GFX10 driver issues to clear a
+    /// DCC-compressed colour target. There is no clear packet: the driver
+    /// programs CB_COLORn_CLEAR_WORD0/1 and draws a quad that the colour block
+    /// turns into DCC clear codes, discarding whatever the pixel shader
+    /// exported. Executing it as an ordinary draw writes the shaded output
+    /// instead, and because the blend it uses computes
+    /// <c>a &lt;- a_src + a_dst * (1 - a_src)</c> - fixed point 1 - the target's
+    /// alpha then climbs every frame and saturates.
+    ///
+    /// Restricted to clear-to-zero. The reset performed for a match clears the
+    /// attachment to zero, so a nonzero CLEAR_WORD would be cleared to the
+    /// wrong colour; those fall through and are drawn. Zero is zero under every
+    /// encoding the register can carry, so the pair needs no format handling.
+    ///
+    /// The clip-space test is load-bearing rather than belt-and-braces: fills
+    /// sharing the vertex count, topology and blend outnumber the clears by two
+    /// orders of magnitude and sit at coordinates well outside the frame.
+    /// </summary>
+    private const uint TriangleStripPrimitive = 6;
+
+    // A float32x3 vertex position stream (BUF_DATA_FORMAT_32_32_32 / FLOAT).
+    private const uint PositionDataFormat = 13;
+    private const uint PositionNumberFormat = 7;
+
+    private static bool IsDccFastClearDraw(
+        IReadOnlyDictionary<uint, uint> registers,
+        IReadOnlyList<RenderTargetDescriptor> renderTargets,
+        IReadOnlyList<TranslatedImageBinding> textures,
+        IReadOnlyList<Gen5VertexInputBinding> vertexInputs,
+        GuestRenderState renderState,
+        uint primitiveType,
+        uint vertexCount)
+    {
+        if (textures.Count != 0 ||
+            vertexCount != 4 ||
+            primitiveType != TriangleStripPrimitive ||
+            renderTargets.Count == 0 ||
+            renderState.Blends.Count == 0 ||
+            !renderState.Blends.All(IsTransparentPremultipliedFillBlend))
+        {
+            return false;
+        }
+
+        var slotStride = renderTargets[0].Slot * CbColorRegisterStride;
+        return registers.TryGetValue(CbColor0Info + slotStride, out var info) &&
+            (info & CbColorInfoDccEnableMask) != 0 &&
+            registers.TryGetValue(CbColor0ClearWord0 + slotStride, out var clearWord0) &&
+            registers.TryGetValue(CbColor0ClearWord1 + slotStride, out var clearWord1) &&
+            clearWord0 == 0 &&
+            clearWord1 == 0 &&
+            CoversClipSpace(vertexInputs, vertexCount);
+    }
+
+    /// <summary>
+    /// True when the draw's float32x3 position stream spans the full clip
+    /// rectangle, i.e. x and y both reach -1 and +1.
+    /// </summary>
+    private static bool CoversClipSpace(
+        IReadOnlyList<Gen5VertexInputBinding> vertexInputs,
+        uint vertexCount)
+    {
+        const float Tolerance = 0.001f;
+        foreach (var input in vertexInputs)
+        {
+            if (input.DataFormat != PositionDataFormat ||
+                input.NumberFormat != PositionNumberFormat)
+            {
+                continue;
+            }
+
+            var stride = input.Stride == 0 ? 12u : input.Stride;
+            var available = Math.Min(input.DataLength, input.Data.Length);
+            float minX = float.MaxValue, maxX = float.MinValue;
+            float minY = float.MaxValue, maxY = float.MinValue;
+            var seen = 0;
+            for (var vertex = 0u; vertex < vertexCount; vertex++)
+            {
+                var at = (int)(input.OffsetBytes + (vertex * stride));
+                if (at + 12 > available)
+                {
+                    break;
+                }
+
+                var position = input.Data.AsSpan(at);
+                var x = BitConverter.ToSingle(position);
+                var y = BitConverter.ToSingle(position[4..]);
+                if (!float.IsFinite(x) || !float.IsFinite(y))
+                {
+                    return false;
+                }
+
+                minX = Math.Min(minX, x);
+                maxX = Math.Max(maxX, x);
+                minY = Math.Min(minY, y);
+                maxY = Math.Max(maxY, y);
+                seen++;
+            }
+
+            return seen >= 3 &&
+                minX <= -1f + Tolerance && maxX >= 1f - Tolerance &&
+                minY <= -1f + Tolerance && maxY >= 1f - Tolerance;
+        }
+
+        return false;
     }
 
     private static bool IsTransparentPremultipliedFillBlend(GuestBlendState blend) =>
