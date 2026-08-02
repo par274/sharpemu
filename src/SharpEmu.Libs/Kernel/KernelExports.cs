@@ -474,8 +474,6 @@ public static class KernelExports
     LibraryName = "libKernel")]
     public static int KernelIsTrinityMode(CpuContext ctx)
     {
-        Console.WriteLine($"[LOADER][TRACE] KernelIsTrinityMode called");
-
         ctx[CpuRegister.Rax] = 0;
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
