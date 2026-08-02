@@ -34,14 +34,18 @@ title reach character creation.
 
 One corrected, one-shot validation pilot later reached the character-creation
 name prompt and then showed the entered name and class screen. The attended
-target was stopped after that observation. This pilot validates the revised
-measurement fields, but it is not one of the three comparable baseline runs:
-the diagnostic executable came from the changed working tree, and the
-runner's aggregate metrics ended at 117.968 s, before the 170 s residency
-scan. No aggregate process-tree counter, physical-availability, or commit-
-headroom sample is claimed for the scan instant.
-The diagnostic identified the actual mitigated SharpEmu child as PID 10688;
-the runner had two processes in its last samples.
+target was stopped after that observation. The diagnostic measurement itself
+completed successfully: it produced a complete bounded asynchronous
+observation with stable mapping snapshots and no QueryWorkingSetEx call
+failures. This pilot is not one of the three comparable baseline runs: the
+diagnostic executable came from the changed working tree, and the controlled
+runner stopped producing telemetry at 117.968 s while the mitigated child
+continued until approximately 170 s. The target execution after telemetry
+ended is therefore not described as controlled or safety-supervised. The
+later character-creation observation is not used for baseline or safety
+conclusions. This exposed a runner child-supervision defect that must be fixed
+before another target launch. The diagnostic identified the actual mitigated
+SharpEmu child as PID 10688; the runner had two processes in its last samples.
 
 The one-shot probe triggered on the actual SharpEmu child near 8 GiB working
 set and queried the union represented by the pre-scan guest host-mapping
@@ -67,28 +71,35 @@ after-query process sample or mapping snapshot. The apparent share and
 remainder are arithmetic point estimates, not exact values: working-set
 change during the 233–329 ms query interval was not captured, and mapping-set
 stability was not captured. The revised diagnostic records both counter
-samples, their derived range, and the before/after mapping comparison. The
-measured pre-scan guest domain is large enough in aggregate that a proven
+samples, their endpoint-derived ranges, and the before/after mapping comparison.
+The measured pre-scan guest domain is large enough in aggregate that a proven
 lifecycle or representation improvement could exceed 2 GiB, but its resident
 pages are not thereby stale or disposable.
 
 The corrected validation result was a complete bounded asynchronous
 observation:
 
-| Child WS before / after | Child private before / after | Mapping snapshot | Guest resident | Resident share range | Working-set-minus-guest range | Queried / resident / nonresident-or-invalid pages | Query failures; scan / query |
+| Child WS before / after | Child private before / after | Mapping snapshot | Guest resident | Resident share endpoint-derived range | Working-set-minus-guest endpoint-derived range | Queried / resident / nonresident-or-invalid pages | Query failures; scan / query |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 8.095 / 8.200 GiB | 16.415 / 16.819 GiB | 1,345 / 1,345; stable; 0 added, 0 removed, 0 changed | 4.459 GiB | 54.37–55.08% | 3.636–3.741 GiB | 2,700,858 / 1,168,798 / 1,532,060 | 0 pages; 254 / 233 ms |
 
 Because the before and after mapping snapshots were identical and the query
 failure count was zero, this result's resident total belongs to the exact
-current mapping union at the query boundary. It remains asynchronous: the
-working-set counters changed by 0.105 GiB during the 233 ms Windows query, so
-the report retains a percentage and remainder range rather than a single
-counter-derived value. The largest retained temporary query buffer was 128
-KiB.
+mapping union represented by both snapshots at the query boundary. It remains
+a bounded asynchronous observation: the working-set counters changed by
+0.105 GiB during the 233 ms Windows query, so the report retains endpoint-
+derived percentage and remainder ranges rather than a single counter-derived
+value. Those ranges reflect only the two process-counter endpoints; they are
+not strict minimum/maximum values over every instant of the scan. The largest
+retained temporary query buffer was 128 KiB.
 
-The runner's aggregate process-tree observations remained separate from the
-child measurement:
+The corrected pilot's diagnostic completed before the runner supervision gap.
+Its before/after child counters and stable mapping snapshots are valid
+diagnostic evidence, but no target state after 117.968 s is claimed as a
+controlled or safety-supervised result.
+
+The runner's aggregate process-tree observations for the three historical
+pilots remained separate from the child measurement:
 
 | Trial | Termination | Peak tree WS / private | Minimum physical | Minimum commit headroom | Duration |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -212,7 +223,9 @@ not launched for another target trial.
    4.824–4.932 GiB in the three historical observations and 4.459 GiB in the
    corrected stable-snapshot validation, or 54.37–55.08% of that pilot's child
    working set. The old pilots' percentages remain temporally unbounded; the
-   corrected pilot bounds its counter uncertainty.
+   corrected pilot reports endpoint-derived ranges from its two process-counter
+   endpoints. Those ranges are not strict minimum/maximum values over every
+   instant of the asynchronous scan.
 2. The 4 GiB direct-memory range is a real guest-visible allocation with an
    observed allocation event and no release before the safety stop. Its
    resident contribution sometimes exceeds 2 GiB, but the source contract
@@ -232,7 +245,8 @@ materially weakened by a matched late stable scan below 2 GiB in the guest
 union with a named non-guest owner accounting for the remainder, or by an
 access/lifetime trace proving that the direct mapping is dead at the proposed
 release point. A correct future reduction must preserve raw guest-pointer
-access, mapping identity, and unmap/clear semantics.
+access, mapping identity, and unmap/clear semantics. The runner child-
+supervision defect must be fixed before another target launch.
 
 `docs/BASELINE.md` remains unchanged: one earlier clean run reached character
 creation, but the baseline remains pending because three comparable successful

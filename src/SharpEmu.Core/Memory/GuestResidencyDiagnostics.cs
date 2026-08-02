@@ -384,27 +384,29 @@ internal static class GuestResidencyMappingSnapshotComparer
     }
 }
 
-internal readonly record struct GuestResidencyByteRange(
+// These are sorted values from the two process-counter endpoints. They are
+// not strict temporal extrema over the asynchronous Windows query.
+internal readonly record struct GuestResidencyEndpointByteRange(
     long MinimumBytes,
     long MaximumBytes);
 
-internal readonly record struct GuestResidencyPercentageRange(
+internal readonly record struct GuestResidencyEndpointPercentageRange(
     double MinimumPercent,
     double MaximumPercent);
 
-internal static class GuestResidencyCounterRanges
+internal static class GuestResidencyCounterEndpointRanges
 {
-    public static GuestResidencyByteRange Remainder(
+    public static GuestResidencyEndpointByteRange RemainderEndpointRange(
         ulong workingSetBefore,
         ulong workingSetAfter,
         ulong residentBytes)
     {
         var before = checked(ToSigned(workingSetBefore) - ToSigned(residentBytes));
         var after = checked(ToSigned(workingSetAfter) - ToSigned(residentBytes));
-        return new GuestResidencyByteRange(Math.Min(before, after), Math.Max(before, after));
+        return new GuestResidencyEndpointByteRange(Math.Min(before, after), Math.Max(before, after));
     }
 
-    public static GuestResidencyPercentageRange ResidentPercentage(
+    public static GuestResidencyEndpointPercentageRange ResidentPercentageEndpointRange(
         ulong workingSetBefore,
         ulong workingSetAfter,
         ulong residentBytes)
@@ -416,7 +418,7 @@ internal static class GuestResidencyCounterRanges
 
         var before = 100d * residentBytes / workingSetBefore;
         var after = 100d * residentBytes / workingSetAfter;
-        return new GuestResidencyPercentageRange(
+        return new GuestResidencyEndpointPercentageRange(
             Math.Min(before, after),
             Math.Max(before, after));
     }
@@ -731,11 +733,11 @@ public sealed class GuestResidencyDiagnosticsSession : IDisposable
             mappingsAfter);
 
         var residentBytes = checked(aggregation.ResidentPages * pageSize);
-        var remainderRange = GuestResidencyCounterRanges.Remainder(
+        var remainderEndpointRange = GuestResidencyCounterEndpointRanges.RemainderEndpointRange(
             processWorkingSetBytesBefore,
             processWorkingSetBytesAfter,
             residentBytes);
-        var residentPercentageRange = GuestResidencyCounterRanges.ResidentPercentage(
+        var residentPercentageEndpointRange = GuestResidencyCounterEndpointRanges.ResidentPercentageEndpointRange(
             processWorkingSetBytesBefore,
             processWorkingSetBytesAfter,
             residentBytes);
@@ -829,8 +831,8 @@ public sealed class GuestResidencyDiagnosticsSession : IDisposable
                     ResidentBytes = residentBytes,
                     ResidentPageCount = aggregation.ResidentPages,
                 },
-                WorkingSetMinusGuestResidentBytesRange = remainderRange,
-                GuestResidentPercentageOfWorkingSetRange = residentPercentageRange,
+                WorkingSetMinusGuestResidentBytesEndpointRange = remainderEndpointRange,
+                GuestResidentPercentageOfWorkingSetEndpointRange = residentPercentageEndpointRange,
                 Mappings = resultMappings,
             };
         if (!WriteDocument(document) && !_outputGuard.IsWritten)
@@ -851,8 +853,8 @@ public sealed class GuestResidencyDiagnosticsSession : IDisposable
                 processWorkingSetBytesAfterScan = processWorkingSetBytesAfter,
                 processPrivateBytesAfterScan = processPrivateBytesAfter,
                 residentBytes,
-                remainderMinimumBytes = remainderRange.MinimumBytes,
-                remainderMaximumBytes = remainderRange.MaximumBytes,
+                remainderEndpointMinimumBytes = remainderEndpointRange.MinimumBytes,
+                remainderEndpointMaximumBytes = remainderEndpointRange.MaximumBytes,
                 queryPageCount = aggregation.QueriedPages,
                 residentPageCount = aggregation.ResidentPages,
                 nonResidentOrInvalidPageCount = aggregation.NonResidentOrInvalidPages,
@@ -1013,9 +1015,9 @@ internal sealed class GuestResidencyDiagnosticDocument
 
     public GuestResidencyUnion? GuestMappingUnion { get; init; }
 
-    public GuestResidencyByteRange? WorkingSetMinusGuestResidentBytesRange { get; init; }
+    public GuestResidencyEndpointByteRange? WorkingSetMinusGuestResidentBytesEndpointRange { get; init; }
 
-    public GuestResidencyPercentageRange? GuestResidentPercentageOfWorkingSetRange { get; init; }
+    public GuestResidencyEndpointPercentageRange? GuestResidentPercentageOfWorkingSetEndpointRange { get; init; }
 
     public GuestResidencyMappingResult[]? Mappings { get; init; }
 }

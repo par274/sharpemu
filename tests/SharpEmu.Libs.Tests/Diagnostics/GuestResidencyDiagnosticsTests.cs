@@ -146,18 +146,18 @@ public sealed class GuestResidencyDiagnosticsTests
     }
 
     [Fact]
-    public void CounterRangesPreserveTemporalUncertainty()
+    public void CounterEndpointRangesPreserveEndpointUncertainty()
     {
-        var remainder = GuestResidencyCounterRanges.Remainder(
+        var remainder = GuestResidencyCounterEndpointRanges.RemainderEndpointRange(
             workingSetBefore: 100,
             workingSetAfter: 140,
             residentBytes: 60);
-        var percentage = GuestResidencyCounterRanges.ResidentPercentage(
+        var percentage = GuestResidencyCounterEndpointRanges.ResidentPercentageEndpointRange(
             workingSetBefore: 100,
             workingSetAfter: 140,
             residentBytes: 60);
 
-        Assert.Equal(new GuestResidencyByteRange(40, 80), remainder);
+        Assert.Equal(new GuestResidencyEndpointByteRange(40, 80), remainder);
         Assert.Equal(42.857142857142854, percentage.MinimumPercent, 12);
         Assert.Equal(60, percentage.MaximumPercent, 12);
     }
