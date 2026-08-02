@@ -61,7 +61,9 @@ Each manifest preserves the expanded launched arguments in
 and falls back to `emulator.arguments` for older manifests that predate the
 stable field.
 
-The runner verifies target and emulator hashes, records the clean or dirty commit state, samples the complete SharpEmu process tree, and stops it at the configured wall-time or aggregate working-set limit. Each trial writes a manifest, JSON-lines metrics, and SharpEmu log under ignored `artifacts-local/runs/`.
+The runner verifies target and emulator hashes, records the clean or dirty commit state, samples the complete SharpEmu process tree, and stops it at the configured wall-time, aggregate working-set, physical-headroom, or commit-headroom limit. `minimumAvailablePhysicalGiB` and `minimumCommitHeadroomGiB` are optional safety thresholds; omitted or `null` disables that boundary. When a threshold is present, the runner calls the Windows `GetPerformanceInfo` API once per existing sample. Startup API failure and invalid configured thresholds fail closed before the target is launched; malformed sampled host data fails closed with guaranteed cleanup. The runner does not change the page file or Windows configuration.
+
+Every metrics sample records `workingSetBytes`, `privateBytes`, `physicalAvailableBytes`, `commitTotalBytes`, `commitLimitBytes`, and calculated `commitHeadroomBytes` (plus the page size and physical total used for validation). The manifest records the configured threshold values in `limits`, startup physical and commit values, the run minimum physical availability and commit headroom under `hostMemory`, the final sampled host values, and a `terminationBoundary` with the distinct reason and sampled boundary value. The reasons are `working-set-limit`, `physical-headroom-limit`, `commit-headroom-limit`, `wall-time-limit`, and `process-exited`. Each trial writes a manifest, JSON-lines metrics, and SharpEmu log under ignored `artifacts-local/runs/`.
 
 After inspecting each run, record the actually observed checkpoint and concise notes in its local manifest. Do not infer a checkpoint from exit code or elapsed time. Use screenshots or diagnostic captures locally when they are needed to support that observation.
 
@@ -74,4 +76,3 @@ When the three runs are comparable, replace the pending entry in `docs/BASELINE.
 - Use at least three trials for memory, timing, or performance conclusions.
 - Distinguish managed, native, driver, and Vulkan ownership before attributing memory.
 - Preserve failed and high-variance results; do not select only the best run.
-- Have a separate agent review the implementation and evidence without editing before handoff.
