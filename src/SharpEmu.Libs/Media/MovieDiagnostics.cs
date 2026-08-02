@@ -727,7 +727,19 @@ internal static class MovieDiagnostics
             return string.Empty;
         }
 
-        return Path.GetFileName(path);
+        // Guest paths can retain their Windows spelling when diagnostics are
+        // consumed on another host platform. Treat both separators as path
+        // boundaries so the bounded identity remains platform-neutral.
+        var lastSeparator = -1;
+        for (var index = 0; index < path.Length; index++)
+        {
+            if (path[index] is '/' or '\\')
+            {
+                lastSeparator = index;
+            }
+        }
+
+        return lastSeparator >= 0 ? path[(lastSeparator + 1)..] : path;
     }
 
     private static void WriteReserved(string eventName, object data)
