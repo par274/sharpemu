@@ -5,10 +5,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Startup movie temporal boundary
 
-Status: cumulative target finding with the stale-generation correction
-implemented, audio/timing ownership attributed, and the next timing design
-evaluated through authored experiments. This PR changes no retail decoder,
-audio, clock, presenter, or runner behavior.
+Status: cumulative target finding with the stale-generation correction and
+movie-local timeline contract established. Lawful packet measurement falsified
+the authored bounded compressed-packet queue as a practical target model. The
+first one-demux decode-and-discard implementation then failed target validation:
+it lost required future video frames. A bounded demux-boundary repair preserved
+one packet and one next frame but stalled at the first future frame and crossed
+the physical-memory safety boundary. No movie timing correction is accepted;
+the branch stops before production implementation of an unproven pump model.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
@@ -28,6 +32,22 @@ The consequential identifiers for the earlier target findings are:
   `20260802T221703483Z-a7ee8a4-trial-01`.
 - Diagnostic Release executable SHA-256:
   `FAA5F39B1A1395873DE5577770671421FF0A955DB0CADD716A7EC4C7280DAF47`.
+- Phase 1 offline packet probe: local FFmpeg runtime tag `3b502d4`, FFmpeg
+  bindings `7.1.1`, run on 2026-08-03 against the six anonymous basenames
+  below. The probe retained only scalar aggregates and ran from ignored local
+  files; no packet payloads or target-derived output are committed.
+- First attended pilot: `20260803T042151858Z-ebb9e72-trial-01`, Release
+  executable SHA-256 `F62A41247BD76A541964DD486477D9193A45BCDDAFE8AD4445E71D4FBD4A7880`.
+- Bounded demux-boundary follow-up pilot:
+  `20260803T043935358Z-ebb9e72-trial-01`, executable SHA-256
+  `641419B207D507E3F37285B1479B29EA328667CAE858B6120D9B6347BA99211C`.
+  The follow-up was intentionally run from a dirty working tree containing
+  only the bounded-boundary probe; its raw manifest records that fact.
+- Final evidence-only clean Release from commit
+  `b86f4f8f48fcc35560f1915d0f4d077f5fdceb54`: executable SHA-256
+  `28E541E64E53F6AF05827B7CD5E043E8FD398A586D5B65B3CF52B8B522AF053D`.
+  It was not attended on the target because the pump model had already been
+  falsified and the runner safety boundary had been crossed by the follow-up.
 - PR #17 implemented host-generation invalidation at completion, guest close,
   replacement, and shutdown. Attended validation showed the former stale-black
   interval became grey; the remaining grey transition is a separate unresolved
@@ -134,34 +154,90 @@ call. Consequently, after `V1`–`V5` are owned, the current decoder cannot reac
 `A6`, `V7`, or any following packet. This is the measured starvation boundary;
 it is not a conversion-loss, SDL-submit, or device-format finding.
 
-### Candidate packet behavior
+### Lawful packet measurement and evidence gate
 
-The authored candidate demonstrates that one demux context can continue
-processing audio while all five video destinations are owned if it has a finite
-compressed-video deferral queue:
+The ignored local probe opened each asset with the repository's FFmpeg-compatible
+runtime, read the actual interleaved packet sequence, and retained only counts,
+byte totals, timestamp aggregates, ordering counters, and consumer simulations.
+The event timestamp used for demux-arrival windows and backlog simulation was
+DTS when present, otherwise PTS. PTS and DTS were both reported independently;
+all six assets had complete, monotonic PTS/DTS values. Video packet duration was
+one 1/30-second time-base tick in every asset. The source durations reported by
+FFmpeg were 8.5, 8, 12, 20, 20, and 117.366667 seconds for the requested files.
 
-- `A6`, `A8`, and `A10` are submitted while five decoded video buffers remain
-  owned.
-- `V7` and `V9` remain compressed and ordered in the deferral queue; no second
-  decoded-frame queue is created.
-- The queue never exceeds two packets or eight bytes in the authored bound
-  test.
-- When the count or byte bound is full, the next video packet is not consumed;
-  the pump returns backpressure. A later audio packet behind that video packet
-  is intentionally not skipped or reordered around the full boundary.
-- Releasing buffer 0 decodes the oldest deferred packet into buffer 0; the
-  experiment rejects any attempt to overwrite an owned buffer. The same holds
-  for the next deferred packet and its released buffer.
-- EOF is not completion until deferred compressed packets are drained. A
-  device submission failure marks audio failed but does not create an unbounded
-  video queue or prevent later video drain.
-- Disposal clears all retained compressed packets, disposes the audio sink once,
-  rejects further pump work, and leaves externally owned video buffers
-  untouched.
+The per-stream aggregates were:
 
-These facts establish the narrow mechanism that can address the measured
-startup audio starvation. They do not yet establish the target's final clock
-owner.
+| Asset | Stream | Packets / bytes | Packet size min / median / p95 / p99 / max | PTS / DTS range | Duration range |
+| --- | --- | ---: | ---: | --- | --- |
+| `ps_studios_logo.bk2` | video 0 | 255 / 45,038,052 | 1,072 / 197,904 / 326,688 / 409,652 / 474,552 | 0–8.466667 s / 0–8.466667 s | 0.033333–0.033333 s |
+|  | audio 1 | 195 / 120,128 | 84 / 592 / 728 / 804 / 10,036 | 0–8.48 s / 0–8.48 s | 0.04–0.04 s |
+| `attract_movie.bk2` | video 0 | 3,521 / 680,480,616 | 1,072 / 205,172 / 234,908 / 286,356 / 620,088 | 0–117.333333 s / 0–117.333333 s | 0.033333–0.033333 s |
+| `logo_intro.bk2` | video 0 | 360 / 71,053,168 | 3,304 / 206,732 / 250,520 / 306,968 / 324,192 | 0–11.966667 s / 0–11.966667 s | 0.033333–0.033333 s |
+| `logo_intro_loop.bk2` | video 0 | 240 / 49,779,576 | 185,316 / 206,724 / 218,772 / 226,360 / 434,804 | 0–7.966667 s / 0–7.966667 s | 0.033333–0.033333 s |
+| `main_menu.bk2` | video 0 | 600 / 124,417,148 | 19,432 / 172,768 / 477,944 / 878,440 / 1,464,704 | 0–19.966667 s / 0–19.966667 s | 0.033333–0.033333 s |
+| `main_menu_ngp.bk2` | video 0 | 600 / 124,413,240 | 17,836 / 158,464 / 536,344 / 747,516 / 1,506,800 | 0–19.966667 s / 0–19.966667 s | 0.033333–0.033333 s |
+
+`ps_studios_logo.bk2` is the only requested asset with an audio stream. Its
+maximum run between audio packets was 23 video packets, 2,452,968 compressed
+bytes, and 733.333 ms of video timestamps; adjacent audio packet timestamps
+were at most 760 ms apart. This independently correlates the target's two
+approximately 0.5–0.7-second `frame-buffer-wait` observations with the offline
+sequence: after five destinations are owned, the decoder can be unable to reach
+the next audio packet while traversing a video-only run of the same order of
+magnitude. The target waits began with approximately 100–130 ms of movie audio
+queued and resumed after that queue emptied; the offline sequence does not prove
+which consumer held the fifth destination.
+
+The cumulative video packet count/bytes encountered at source timestamps 100,
+250, 500, 750, and 1,000 ms, followed by the complete asset, were:
+
+| Asset | 100 ms | 250 ms | 500 ms | 750 ms | 1 s | Complete |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ps_studios_logo.bk2` | 4 / 449,988 | 8 / 886,172 | 16 / 2,809,484 | 23 / 4,480,640 | 31 / 6,245,740 | 255 / 45,038,052 |
+| `attract_movie.bk2` | 4 / 10,400 | 8 / 14,688 | 16 / 23,264 | 23 / 88,808 | 31 / 167,812 | 3,521 / 680,480,616 |
+| `logo_intro.bk2` | 4 / 22,800 | 8 / 64,504 | 16 / 254,976 | 23 / 625,848 | 31 / 1,429,048 | 360 / 71,053,168 |
+| `logo_intro_loop.bk2` | 4 / 997,436 | 8 / 1,745,296 | 16 / 3,243,740 | 23 / 4,717,512 | 31 / 6,433,688 | 240 / 49,779,576 |
+| `main_menu.bk2` | 4 / 1,691,972 | 8 / 2,423,396 | 16 / 3,301,208 | 23 / 5,291,368 | 31 / 6,577,852 | 600 / 124,417,148 |
+| `main_menu_ngp.bk2` | 4 / 1,653,468 | 8 / 2,081,924 | 16 / 3,387,556 | 23 / 4,881,312 | 31 / 6,629,668 | 600 / 124,413,240 |
+
+The consumer simulation modeled five initially owned decoded destinations,
+one video packet decoded per released destination, and packet arrivals at the
+measured DTS/PTS timestamps. It did not assume that every stream packet is a
+frame; it counted the actual video packets. The maximum retained compressed
+backlog and the retained state when the source reached EOF were:
+
+| Asset | Consumer | Max packets / bytes | At source end packets / bytes | End byte fraction |
+| --- | ---: | ---: | ---: | ---: |
+| `ps_studios_logo.bk2` | 2 FPS | 234 / 41,010,944 | 233 / 40,789,652 | 90.6% |
+|  | 3 FPS | 225 / 39,006,628 | 225 / 39,006,628 | 86.6% |
+|  | 4 FPS | 217 / 37,317,008 | 216 / 37,106,956 | 82.4% |
+|  | 5 FPS | 208 / 35,578,028 | 208 / 35,414,180 | 78.6% |
+|  | 10 FPS | 166 / 27,251,580 | 165 / 26,419,180 | 58.7% |
+| `attract_movie.bk2` | 2 FPS | 3,282 / 670,038,816 | 3,282 / 669,300,192 | 98.4% |
+|  | 3 FPS | 3,164 / 646,155,764 | 3,164 / 644,829,244 | 94.8% |
+|  | 4 FPS | 3,047 / 622,186,284 | 3,047 / 620,611,948 | 91.2% |
+|  | 5 FPS | 2,930 / 598,304,292 | 2,930 / 596,256,436 | 87.6% |
+|  | 10 FPS | 2,343 / 478,670,536 | 2,343 / 474,557,316 | 69.7% |
+| `logo_intro.bk2` | 2–5 FPS | 332 / 69,995,312; 320 / 67,981,140; 308 / 64,624,544; 296 / 61,548,840 | 331 / 69,882,356; 320 / 67,981,140; 307 / 64,314,632; 295 / 61,352,652 | 98.4%; 95.7%; 90.5%; 86.3% |
+| `logo_intro_loop.bk2` | 2–5 FPS | 220 / 45,705,052; 212 / 43,964,956; 204 / 42,275,536; 196 / 40,604,688 | 219 / 45,490,328; 211 / 43,761,756; 203 / 42,057,692; 196 / 40,604,688 | 91.4%; 87.9%; 84.5%; 81.6% |
+| `main_menu.bk2` | 2–5 FPS | 556 / 115,012,368; 536 / 111,056,104; 516 / 106,869,516; 496 / 103,003,316 | 555 / 114,893,628; 535 / 110,964,220; 515 / 106,681,164; 495 / 102,764,428 | 92.3%; 89.2%; 85.7%; 82.6% |
+| `main_menu_ngp.bk2` | 2–5 FPS | 556 / 115,220,812; 536 / 110,918,964; 516 / 106,816,740; 496 / 103,184,804 | 555 / 114,842,276; 535 / 110,630,516; 515 / 106,709,764; 495 / 102,609,124 | 92.3%; 88.9%; 85.8%; 82.5% |
+
+The four values in each `2–5 FPS` cell are ordered 2, 3, 4, and 5 FPS.
+At 30 FPS the simulation retained no backlog; at 10 FPS it still retained
+58.7–69.7% of the bytes for the assets with video. The 2–5 FPS backlog grows
+with playback duration toward the complete asset, not toward a small stable
+bound. It would require approximately 570 MiB for `attract_movie.bk2` at 5 FPS
+and approximately 98 MiB for either main-menu asset at 5 FPS, before FFmpeg
+reference overhead. A practical finite cap would therefore fill and reproduce
+the measured audio starvation. The largest individual packet is 1,506,800
+bytes, so no small byte cap can hide an oversized packet outside the bound.
+
+The authored two-packet/eight-byte candidate remains valid as a synthetic
+ownership and backpressure experiment, but it is falsified as the production
+target model by this evidence gate. It is rejected because the required
+backlog is duration-dependent and material on the 16 GiB host, not because
+FFmpeg reference counting is inherently unreliable.
 
 ### Candidate timeline behavior
 
@@ -190,52 +266,114 @@ clock that is ahead, temporary underrun, permanent audio failure, pause, skip,
 completion, replacement, same-path replacement, disposal, monotonicity, and
 diagnostics-disabled execution.
 
+## Attended pilot evidence and stopping point
+
+The clean self-contained Release preflight preserved `PPSA01341`, Europe,
+`1.004.000`, the expected eboot SHA-256, the fixed 32 GiB page file, and the
+runner limits of 9 GiB working set, 2 GiB minimum available physical memory,
+and 4 GiB minimum commit headroom. The first pilot was authorized after that
+preflight. Raw logs, JSONL diagnostics, screenshots, and manifests remain in
+ignored local run directories.
+
+The first pilot used the one-demux decode-and-discard implementation from
+commit `ebb9e7254ba9f55d4efb941ba726c96f665e247a`. It reached the attract route
+but not the character-creation nickname prompt before the 300-second wall
+limit. Its scalar observations were:
+
+- `ps_studios_logo.bk2` completed at frame 218 in 7.3086 seconds, versus the
+  measured 8.5-second source and the PR #18 control completions at frame 254
+  in 11.13, 13.90, and 14.12 seconds.
+- The movie-owned SDL stream submitted and dequeued all 408,960 input frames
+  with zero failed submissions. Its queue arithmetic nevertheless recorded 60
+  underruns totaling approximately 2.496 seconds. This supports “submitted
+  continuously with no submission failure,” not a claim about continuous
+  physical or audible sound.
+- The first movie clock used the movie-owned progress estimate. At start the
+  selected local position was zero while the unrelated global AudioOut2 clock
+  was already approximately 32.86 seconds ahead. The movie clock recorded
+  `Running` and `TemporaryUnderrun` states and `MovieAudio` and
+  `HeldDuringUnderrun` modes; no global clock was used by the production code
+  in that pilot.
+- No late-frame count was visible in the periodic movie events, but the
+  completion at frame 218 proves the implementation had discarded or failed
+  to make available later source frames. This is an incorrect video result,
+  not a timing correction.
+- `attract_movie.bk2` used local wall time, reached movie-local 128.71 seconds
+  against its 117.3667-second source, and was still active at frame 3212 of a
+  target frame index of 3861 when the runner stopped. No main-menu progression
+  or expected checkpoint was observed.
+- Peak working set was 8,593,494,016 bytes and peak private bytes were
+  14,809,223,168 bytes. Minimum available physical memory was
+  2,375,888,896 bytes. Cleanup reported no failures, but the private-memory
+  headroom was too narrow to treat this as a safe timing confirmation.
+
+The follow-up tested the smallest apparent repair: stop at the first future
+decoded frame, retain one measured-size demux-boundary packet, and wake when
+that frame's local PTS interval became late. It used executable SHA-256
+`641419B207D507E3F37285B1479B29EA328667CAE858B6120D9B6347BA99211C`.
+The runner stopped at the physical-headroom safety boundary after 55.028
+seconds. The movie had only reached frame 0; its local clock was held at zero
+in `TemporaryUnderrun`/`HeldDuringUnderrun`, with one retained next frame and
+one 114,456-byte boundary packet. The movie audio stream had submitted 46,080
+and dequeued 44,160 input frames, had 40 ms queued, and recorded two short
+underruns. Minimum available physical memory was 2,089,025,536 bytes, below
+the configured 2 GiB boundary. Cleanup again reported no failures.
+
+These pilots falsify the selected one-demux/one-frame model for this target:
+the first version drained future frames too aggressively; the boundary repair
+could not keep audio supplied while a future frame and the next video packet
+blocked the demux. No confirmation runs were justified after the first pilot,
+and the follow-up independently confirmed that the small repair was unsafe and
+ineffective. Grey, black, and flashing output were not investigated.
+
 ## Evaluated alternatives
 
-### A. Bounded compressed-video packet deferral in one demux context — selected
+### A. Decode-and-discard late video output — falsified on target
 
-Ownership is unchanged for decoded video: exactly five RGBA destinations are
-owned by the playback/consumer boundary, and a destination is returned only by
-the consumer that owns it. A video packet encountered without a free
-destination is retained as a referenced compressed packet, not decoded into a
-new frame queue. Audio remains owned by the movie's audio decoder and host
-stream.
+The packet measurement falsified compressed-packet deferral as the production
+model. Alternative A keeps one demux and one video decoder, sends every video
+packet to FFmpeg in demux order, and keeps the existing five externally owned
+RGBA destinations. When those destinations are full, the decoder continues
+through the interleaved input far enough to submit the next movie-audio packet.
+Decoded video is compared with the movie-local time using the frame PTS and is
+discarded only when its presentation interval is already late. At most one
+decoded next `AVFrame` reference is retained; there is no compressed-video
+queue and no decoded RGBA queue beyond the existing five destinations.
 
-The authored maximum is two packets and eight bytes of compressed payload. The
-production implementation must use both a finite packet-count cap and a finite
-byte cap; the exact production byte value is not claimed by this experiment
-because a target packet-size histogram was not collected. At the bound, the
-next video packet causes backpressure before `av_read_frame` consumes it. The
-decoder resumes only after a video destination is released. This is a bounded
-memory contract, not permission to grow the queue until EOF.
+The hypothetical finite limits would therefore be:
 
-Demux/decode ordering is:
+- five external BGRA/RGBA presentation destinations, each with one owner;
+- one FFmpeg input `AVPacket`, unreferenced after every read;
+- one decoder working `AVFrame`;
+- zero retained compressed packets;
+- at most one explicitly owned next decoded `AVFrame` reference;
+- no target-specific packet, asset, or frame-name condition.
+
+The pump order is:
 
 ```text
-oldest deferred video packet → oldest video destination when available
-audio packet                → audio decoder/host stream immediately
-new video packet             → defer if both bounds allow, otherwise backpressure
+oldest retained next frame → convert only when a destination is available
+audio packet              → audio decoder/host stream immediately
+video packet              → send to the video decoder in input order
+late decoded video        → unref/discard while preserving codec state
+future decoded video      → retain only the single next frame, or discard
 ```
 
-Video order is preserved within the video stream, audio order within the audio
-stream, and no packet is dropped. Cross-stream execution intentionally permits
-audio work after a deferred video packet; that is the behavior needed to cross
-the measured starvation boundary. Movie video synchronization is supplied by
-the separate movie-local clock contract above.
+The future-frame rule is deliberately small: the earliest future decoded frame
+is the only frame allowed to cross the no-destination boundary. Later frames are
+not copied into another queue; the audio submission boundary paces demux work,
+and the consumer will receive the retained next frame before the decoder reads
+the following video run. This preserves codec reference state while allowing
+the measured audio packets behind a video run to be reached.
 
-At EOF, the demux is marked exhausted, the audio decoder is drained, and
-completion waits for the deferred video packets to acquire destinations and
-drain. Cancellation wakes the pump, unreferences every retained packet, stops
-audio submission, and does not reuse any externally owned destination. The
-additional `FfmpegVideoDecoder` complexity is one bounded packet queue, one
-full-boundary result, and a pump path that can run without a video destination.
-Opening the asset twice is not required.
-
-This is the smallest model that directly addresses the measured target wait.
-Its important failure modes are a cap too small for an observed run of video
-packets, leaked `AVPacket` references, decoding a deferred packet out of order,
-or treating a full queue as EOF instead of backpressure. Those are all
-synthetic-testable.
+At EOF, the demux is marked exhausted, both decoders are drained, the retained
+next frame is delivered or released, and only then can playback complete.
+Cancellation, replacement, and disposal wake the pump, release the retained
+frame exactly once, stop audio submission, and leave externally owned
+destinations untouched. The target pilots falsified this one-demux contract:
+the first implementation discarded required future frames, while the boundary
+repair stalled audio at the first future frame. It is therefore not a
+production selection despite its finite nominal ownership bound.
 
 ### B. Separate audio demux/decode context
 
@@ -247,12 +385,11 @@ until its bounded host stream is full.
 This requires opening the asset twice or creating a second independent input
 context. Its memory cost is a second format/codec/resampler stack plus codec
 buffers and the existing bounded audio stream; an exact byte cost was not
-measured in this authored experiment. It has simpler per-context packet order
-but two EOF/drain/cancel paths and a new synchronization problem between
-independently positioned inputs. It would likely remove the measured starvation,
-but adds duplicate file I/O, duplicated probing, and failure modes where the
-audio and video contexts disagree about seek/EOF or cleanup. It is larger than
-the selected one-queue change and is not required by the current evidence.
+measured in this task. It has simpler per-context packet order but two
+EOF/drain/cancel paths and a new synchronization problem between independently
+positioned inputs. It is the smallest remaining credible model because audio
+can continue while the video context is backpressured, but it was not
+implemented or target validated here.
 
 ### C. Unbounded decoded-frame or packet queue
 
@@ -265,10 +402,10 @@ temporary presentation delay into native memory growth. It is rejected.
 
 Wall clock explains why the current shared clock stretches `attract_movie.bk2`,
 but it does not preserve the movie's own audio relationship and does not fix
-the frame-buffer starvation. It remains a diagnostic comparison, not the
+the frame-buffer starvation. It remains a diagnostic comparison, not a
 selected production contract.
 
-## Selected clock contract
+## Movie-local timeline contract
 
 The movie-local timeline is owned by the active host movie generation. It is
 created at attach/start and is never a static global clock. The timeline source
@@ -294,15 +431,16 @@ The next implementation must preserve all of these invariants:
 
 1. A decoded RGBA destination has one owner. It is not overwritten, reused, or
    returned to the free pool until that owner releases it.
-2. A deferred compressed packet has one queue owner. The queue holds a bounded
-   `AVPacket` reference and releases it exactly once on decode, EOF drain,
-   cancellation, replacement, or disposal.
-3. The retained compressed packet count and bytes never exceed their hard caps.
-   A full bound applies backpressure; it does not drop a packet or declare EOF.
-4. Deferred video packets are decoded in packet order before later video input is
-   accepted. Audio packets may be pumped while video is deferred.
-5. EOF means demux exhaustion, not playback completion. Deferred video and
-   decoder drain work must finish before completion is published.
+2. The demux owns at most one live input `AVPacket`; every read is either sent,
+   processed, or unreferenced before the next read.
+3. The decoder owns at most one retained next `AVFrame` reference. The working
+   frame and retained frame are unreferenced exactly once on delivery, late-frame
+   discard, EOF drain, cancellation, replacement, or disposal.
+4. No compressed-video queue exists. Video packets are sent in demux order,
+   audio packets remain ordered, and decoded video may be discarded without
+   skipping codec input or breaking reference state.
+5. EOF means demux exhaustion, not playback completion. Audio, video decoder
+   output, and the one retained next frame must drain before completion.
 6. Audio-device failure is observable to the movie timeline. A temporary
    underrun is not treated as permanent failure without an explicit state
    transition.
@@ -314,73 +452,82 @@ The next implementation must preserve all of these invariants:
 9. Diagnostics-disabled paths short-circuit before payload construction,
    formatting, event locking, or per-event accounting.
 
-## Selected design and remaining prerequisites
+## Stopping boundary and next model
 
-The selected mechanism is bounded compressed-video packet deferral within one
-demux context. The selected clock model is a generation-owned movie-local
-timeline: movie audio supplies only that movie's local progress, audio-less or
-failed playback uses the defined local fallback, and unrelated
-`GuestAudioClock` values are never inputs.
+No production model was selected. Alternative A is falsified by the attended
+pilots above, and Alternative B was not implemented because its second format
+context, codec lifecycle, cancellation, synchronization, and memory cost still
+need a focused design and measurement. The movie-local timeline behavior above
+remains the exact contract that any future implementation must satisfy; it is
+not installed by this branch.
 
-The authored two-packet/eight-byte bound proves the ownership, ordering,
-backpressure, EOF, failure, replacement, and disposal behavior only. It is not a
-production packet-count or byte-cap value.
+The authored two-packet/eight-byte queue remains synthetic test coverage for
+ownership and backpressure history, but it is not production code and does not
+set a target limit. The production-facing conversion is intentionally deferred
+until a selected model has deterministic ownership tests and a safe target
+pilot.
 
-Production implementation requires these prerequisites first:
+The audio seam must expose local estimated progress without depending on
+`HostAudioDiagnostics`: no-track, running, temporary-underrun, normal completion,
+permanent open/decoder/submission/device failure, and disposal. SDL queue
+arithmetic remains an estimate of input removed from SDL's input queue, not a
+measurement of physical or audible playback. Other host backends may return a
+safe unavailable state until they implement equivalent progress.
 
-1. Measure a lawful target packet-size/interleave trace and choose finite
-   compressed-video packet and byte caps from that evidence. A full bound must
-   apply backpressure; it must not become an unbounded queue or silently drop
-   input.
-2. Define the movie-local audio state/progress seam using only the movie's host
-   stream. It must not consume unrelated `AudioOut` or `AudioOut2` clock values.
-3. Define explicit decoder/device states for temporary underrun, normal audio
-   end, unavailable audio, and permanent failure. The transition must use those
-   states, not a timeout guess.
-4. Then implement the smallest host-movie change: a no-destination audio/input
-   pump capability, bounded referenced compressed-video packets, exact five
-   buffer ownership, generation-owned clock lifecycle, and production-facing
-   tests for the authored contracts.
+The timeline must be created for each host movie generation and must use:
 
-The next task is therefore implementation preparation plus implementation, not a
-fully specified patch that can be written without further measurement. This PR
-does not implement retail behavior, measure target packets, or choose the
-production cap.
+1. this movie's running audio estimate;
+2. a held value during temporary underrun;
+3. an anchored local wall continuation after normal audio completion with video
+   remaining or after permanent audio failure;
+4. local monotonic wall time for no-track movies;
+5. a held value while paused, with resume rebasing the local wall origin;
+6. a terminal old identity on skip, completion, replacement, and disposal.
+
+This is a finite timeline contract fully specified for deterministic synthetic
+testing. It is not evidence that a one-demux media pump is safe; the attended
+pilots established the opposite. Do not implement a replacement pump until the
+separate-audio-context comparison or another measured finite model closes the
+falsifiers below.
 
 ## Remaining uncertainty
 
 - The exact guest/render consumer holding the fifth buffer is still unknown.
-- This experiment models packet ownership and ordering; it does not yet call
-  FFmpeg against a committed synthetic media file. A local lawful FFmpeg probe
-  may confirm packet interleave, but it is not a CI dependency.
-- The target compressed-packet size distribution and the smallest production
-  byte cap are not measured here.
+- The lawful probe establishes packet order and scalar size/timestamp aggregates,
+  not the host runtime's exact scheduling or which consumer owns a destination.
 - SDL queue arithmetic remains an estimate, so the local movie-audio progress
-  source needs a precise host-stream contract in the implementation change.
+  source must retain its calibrated non-audible terminology.
 - The criterion for distinguishing temporary audio underrun from permanent
   device/decoder failure must be tied to explicit host error/state transitions,
   not an arbitrary elapsed-time guess.
+- Alternative B's duplicate format/codec context cost, EOF synchronization,
+  cancellation, and audio/video lifecycle have not been measured.
+- The two pilots did not reach main-menu progression or the expected checkpoint,
+  so no claim is made about later startup behavior.
 - The title's intended proprietary clock ownership remains unknown. The
-  selected contract is justified by emulator ownership, target observations,
-  and bounded behavior, not by a claim about Sony internals.
+  movie-local contract is justified by the authored boundary and target clock
+  observations, not by a claim about Sony internals.
 
 ## Falsifiers
 
-The selected model or timeline hypothesis must be revisited if any of these
-occur:
+The next implementation must close these falsifiers before production work:
 
-- An authored or synthetic FFmpeg fixture requires audio packets after a full
-  compressed-video bound but cannot make progress without an unbounded queue.
-- A deferred packet is observed duplicated, dropped, decoded out of order, or
-  released more than once.
-- A full bound overwrites/reuses an owned RGBA destination or reports EOF before
-  deferred packets drain.
-- A target packet trace shows a required audio run consistently behind a bound
-  that cannot be raised within the stated memory budget; this would reopen the
-  separate-audio-context comparison.
+- A one-demux model must not lose a source frame, stall at the first future frame,
+  or cross the configured physical-memory safety boundary. Both failure modes
+  were observed in the pilots and are now accepted evidence against Alternative
+  A.
+- A separate audio context must account for duplicate file I/O, exact audio and
+  video EOF/drain ordering, cancellation, disposal, host-stream failure, and
+  bounded memory before it is selected.
+- A video packet is skipped before being sent to FFmpeg, codec reference state
+  becomes invalid, or PTS order is not preserved at the decoder input.
+- A candidate pump overwrites or reuses an owned RGBA destination, retains more
+  than its explicit bound, or reports EOF before all decoder output drains.
+- Audio remains starved while the destination pool is full, or a permanent
+  failure cannot transition to the anchored fallback without a jump.
 - A controlled target run shows movie-local audio and video remain correctly
   synchronized while the global AudioOut2 clock is ahead/slow, or shows that a
-  no-audio movie must follow a guest stream. That would falsify the selected
+  no-audio movie must follow a guest stream. That would falsify the movie-local
   clock owner.
 - A temporary underrun demonstrably advances the title's expected movie video
   rather than holding, or permanent failure cannot transition to the anchored
@@ -405,4 +552,12 @@ git diff --check
 ```
 
 Shader verification is unnecessary because this change touches no shader or
-GPU semantics. No retail target run is required for this experiment.
+GPU semantics. Target confirmations were intentionally stopped after the
+falsifying pilots above.
+
+Verification completed on the evidence-only stopping point:
+
+- focused movie/audio contract tests: 21 passed;
+- all media tests: 49 passed;
+- Fast lane: passed, including 864 solution tests;
+- `git diff --check`: passed.
