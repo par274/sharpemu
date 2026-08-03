@@ -102,7 +102,10 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 
     private static int _nextStreamId;
 
-    private sealed class AudioStream : IHostAudioStream, IHostAudioStreamDiagnostics
+    private sealed class AudioStream :
+        IHostAudioStream,
+        IHostAudioStreamDiagnostics,
+        IHostAudioStreamControl
     {
         private readonly object _gate = new();
         private readonly int _maximumQueuedBytes;
@@ -134,6 +137,8 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private long _clockReportAcceptedCount;
         private long _clockReportRejectedCount;
         private double _lastEstimatedPlayedSeconds;
+        private bool _guestClockReporting = true;
+        private bool _strictQueueBound;
         private bool _hasDeviceState;
         private string _lastDeviceSignature = string.Empty;
         private long _deviceStateTransitionCount;
@@ -219,7 +224,12 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             }
         }
 
-        public bool Submit(ReadOnlySpan<byte> pcm)
+        public bool Submit(ReadOnlySpan<byte> pcm) =>
+            Submit(pcm, CancellationToken.None);
+
+        public bool Submit(
+            ReadOnlySpan<byte> pcm,
+            CancellationToken cancellationToken)
         {
             if (pcm.IsEmpty)
             {
@@ -243,8 +253,21 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 var overrun = false;
                 while (queued > _maximumQueuedBytes)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (Stopwatch.GetTimestamp() >= deadline)
                     {
+                        if (_strictQueueBound)
+                        {
+                            if (_sampleAccounting is not null)
+                            {
+                                _sampleAccounting.RecordSubmission(pcm.Length, false);
+                                _diagnosticSubmissionCount++;
+                                _failedSubmissionCount++;
+                            }
+
+                            return false;
+                        }
+
                         // Enqueue anyway rather than discarding the buffer. A gap in
                         // the stream is an audible click; the extra latency of one
                         // over-deep submission is not, and the queue recovers as soon
@@ -292,7 +315,8 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                             0,
                             _totalSubmittedInputBytes - queued - pcm.Length) /
                             bytesPerSecond;
-                        var reportAccepted = GuestAudioClock.Report(estimatedPlayedSeconds);
+                        var reportAccepted = _guestClockReporting &&
+                                             GuestAudioClock.Report(estimatedPlayedSeconds);
                         if (_sampleAccounting is not null)
                         {
                             _lastEstimatedPlayedSeconds = estimatedPlayedSeconds;
@@ -300,7 +324,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                             {
                                 _clockReportAcceptedCount++;
                             }
-                            else
+                            else if (_guestClockReporting)
                             {
                                 _clockReportRejectedCount++;
                             }
@@ -320,6 +344,65 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             }
 
             return submitted;
+        }
+
+        public void SetPaused(bool paused)
+        {
+            lock (_gate)
+            {
+                if (_disposed || _stream is null)
+                {
+                    return;
+                }
+
+                if (paused)
+                {
+                    if (!SDL_PauseAudioStreamDevice(_stream))
+                    {
+                        throw new InvalidOperationException(
+                            $"SDL audio stream pause failed: {GetError()}");
+                    }
+                }
+                else if (!SDL_ResumeAudioStreamDevice(_stream))
+                {
+                    throw new InvalidOperationException(
+                        $"SDL audio stream resume failed: {GetError()}");
+                }
+            }
+        }
+
+        public int QueuedPcmBytes
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    if (_disposed || _stream is null)
+                    {
+                        return -1;
+                    }
+
+                    var queuedBytes = ReadQueuedBytesLocked();
+                    ObserveQueueLocked(queuedBytes, Stopwatch.GetTimestamp());
+                    return queuedBytes;
+                }
+            }
+        }
+
+        public void SetGuestClockReporting(bool enabled)
+        {
+            lock (_gate)
+            {
+                _guestClockReporting = enabled;
+            }
+        }
+
+        public void SetStrictQueueBound(bool enabled)
+        {
+            lock (_gate)
+            {
+                _strictQueueBound = enabled;
+            }
         }
 
         /// <summary>

@@ -159,7 +159,14 @@ public static class HostAudioDiagnostics
         string sourceSampleFormat,
         int outputSampleRate,
         int outputChannels,
-        string outputSampleFormat)
+        string outputSampleFormat,
+        long formatStartTime = long.MinValue,
+        long formatDuration = long.MinValue,
+        int streamIndex = -1,
+        int streamTimeBaseNumerator = 0,
+        int streamTimeBaseDenominator = 0,
+        long streamStartTime = long.MinValue,
+        long streamDuration = long.MinValue)
     {
         if (!TryReserveEvent())
         {
@@ -184,6 +191,13 @@ public static class HostAudioDiagnostics
                 outputSampleRate,
                 outputChannels,
                 outputSampleFormat,
+                formatStartTime,
+                formatDuration,
+                streamIndex,
+                streamTimeBaseNumerator,
+                streamTimeBaseDenominator,
+                streamStartTime,
+                streamDuration,
             });
     }
 
@@ -199,7 +213,13 @@ public static class HostAudioDiagnostics
         long resamplerInputFrames,
         long resamplerOutputFrames,
         double lastSourceTimestampSeconds,
-        HostAudioStreamDiagnosticSnapshot stream)
+        HostAudioStreamDiagnosticSnapshot stream,
+        string audioState = "",
+        double audioProgressSeconds = 0,
+        bool demuxEof = false,
+        bool decoderEof = false,
+        bool audioDrainComplete = false,
+        string audioFailureReason = "")
     {
         if (!TryReserveEvent())
         {
@@ -228,6 +248,12 @@ public static class HostAudioDiagnostics
                 resamplerInputFrames,
                 resamplerOutputFrames,
                 lastSourceTimestampSeconds,
+                audioState,
+                audioProgressSeconds,
+                demuxEof,
+                decoderEof,
+                audioDrainComplete,
+                audioFailureReason,
                 stream,
             });
     }

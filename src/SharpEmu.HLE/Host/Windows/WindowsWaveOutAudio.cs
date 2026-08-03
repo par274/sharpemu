@@ -12,7 +12,7 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
     public IHostAudioStream OpenStereoPcm16Stream(uint sampleRate, int maxQueuedPcmBytes = 32 * 1024) =>
         new WaveOutStream(sampleRate, maxQueuedPcmBytes);
 
-    private sealed partial class WaveOutStream : IHostAudioStream
+    private sealed partial class WaveOutStream : IHostAudioStream, IHostAudioStreamControl
     {
         private const uint WaveMapper = uint.MaxValue;
         private const uint CallbackEvent = 0x0005_0000;
@@ -53,7 +53,12 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
             }
         }
 
-        public bool Submit(ReadOnlySpan<byte> stereoPcm16)
+        public bool Submit(ReadOnlySpan<byte> stereoPcm16) =>
+            Submit(stereoPcm16, CancellationToken.None);
+
+        public bool Submit(
+            ReadOnlySpan<byte> stereoPcm16,
+            CancellationToken cancellationToken)
         {
             lock (_gate)
             {
@@ -66,9 +71,14 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
                 while (_queuedPcmBytes != 0 &&
                        _queuedPcmBytes + stereoPcm16.Length > _maximumQueuedPcmBytes)
                 {
-                    if (!_completion.WaitOne(TimeSpan.FromSeconds(1)))
+                    if (cancellationToken.IsCancellationRequested)
                     {
                         return false;
+                    }
+
+                    if (!_completion.WaitOne(TimeSpan.FromMilliseconds(10)))
+                    {
+                        continue;
                     }
 
                     ReapCompletedBuffers();
@@ -76,6 +86,51 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
 
                 return QueueBuffer(stereoPcm16);
             }
+        }
+
+        public int QueuedPcmBytes
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    if (_disposed || _device == IntPtr.Zero)
+                    {
+                        return -1;
+                    }
+
+                    ReapCompletedBuffers();
+                    return _queuedPcmBytes;
+                }
+            }
+        }
+
+        public void SetPaused(bool paused)
+        {
+            lock (_gate)
+            {
+                if (_disposed || _device == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                var result = paused
+                    ? WaveOutPause(_device)
+                    : WaveOutRestart(_device);
+                if (result != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"waveOut{(paused ? "Pause" : "Restart")} failed with MMRESULT {result}.");
+                }
+            }
+        }
+
+        public void SetGuestClockReporting(bool enabled)
+        {
+        }
+
+        public void SetStrictQueueBound(bool enabled)
+        {
         }
 
         public void Dispose()
@@ -238,6 +293,12 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
 
         [LibraryImport("winmm.dll", EntryPoint = "waveOutReset")]
         private static partial uint WaveOutReset(IntPtr device);
+
+        [LibraryImport("winmm.dll", EntryPoint = "waveOutPause")]
+        private static partial uint WaveOutPause(IntPtr device);
+
+        [LibraryImport("winmm.dll", EntryPoint = "waveOutRestart")]
+        private static partial uint WaveOutRestart(IntPtr device);
 
         [LibraryImport("winmm.dll", EntryPoint = "waveOutClose")]
         private static partial uint WaveOutClose(IntPtr device);

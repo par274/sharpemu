@@ -57,6 +57,24 @@ public sealed class MediaFramePlaybackTests
         Assert.Equal(2, WaitForAdvancedFrame(playback)[0]);
     }
 
+    [Fact]
+    public void IndependentMovieAudioStartsWhileFiveVideoDestinationsAreOwned()
+    {
+        var decoder = new SaturatedVideoDecoder();
+        using var playback = new MediaFramePlayback(decoder);
+
+        Assert.True(
+            decoder.FiveDestinationsOwned.Wait(TimeSpan.FromSeconds(2)),
+            "The video decoder did not reach the five-destination boundary.");
+        Assert.True(playback.TryGetFrame(true, out _, out _));
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => decoder.AudioPumpCount > 0,
+                TimeSpan.FromSeconds(2)),
+            "The independent audio pump did not run after video backpressure.");
+        Assert.Equal(5, decoder.VideoFramesProduced);
+    }
+
     private static byte[] WaitForFrame(
         MediaFramePlayback playback,
         bool advanceClock)
@@ -102,6 +120,87 @@ public sealed class MediaFramePlaybackTests
 
         public void Dispose()
         {
+        }
+    }
+
+    private sealed class SaturatedVideoDecoder :
+        IMediaFrameDecoder,
+        IMediaMovieAudio
+    {
+        private readonly ManualResetEventSlim _audioStop = new();
+        private Thread? _audioThread;
+        private int _disposed;
+        private int _audioPumpCount;
+
+        internal ManualResetEventSlim FiveDestinationsOwned { get; } = new();
+
+        internal int VideoFramesProduced { get; private set; }
+
+        internal int AudioPumpCount => Volatile.Read(ref _audioPumpCount);
+
+        public uint Width => 1;
+
+        public uint Height => 1;
+
+        public uint FramesPerSecondNumerator => 30;
+
+        public uint FramesPerSecondDenominator => 1;
+
+        public bool HasAudioTrack => true;
+
+        public bool TryDecodeNextFrame(Span<byte> destination)
+        {
+            destination[0] = checked((byte)(VideoFramesProduced + 1));
+            VideoFramesProduced++;
+            if (VideoFramesProduced == 5)
+            {
+                FiveDestinationsOwned.Set();
+            }
+
+            return true;
+        }
+
+        public void Start()
+        {
+            _audioThread = new Thread(() =>
+            {
+                while (!_audioStop.IsSet)
+                {
+                    Interlocked.Increment(ref _audioPumpCount);
+                    Thread.SpinWait(256);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "synthetic movie audio pump",
+            };
+            _audioThread.Start();
+        }
+
+        public MovieAudioProgress GetMovieAudioProgress() =>
+            new(MovieAudioProgressState.Running, 0, false, string.Empty);
+
+        public void Pause() => _audioStop.Reset();
+
+        public void Resume()
+        {
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            _audioStop.Set();
+            if (_audioThread is not null && Thread.CurrentThread != _audioThread)
+            {
+                _audioThread.Join();
+            }
+
+            FiveDestinationsOwned.Dispose();
+            _audioStop.Dispose();
         }
     }
 }

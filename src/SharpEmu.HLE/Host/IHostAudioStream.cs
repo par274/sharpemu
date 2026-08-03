@@ -28,4 +28,30 @@ public interface IHostAudioStream : IDisposable
     /// which case callers must fall back to their own pacing.
     /// </summary>
     int QueuedMilliseconds => -1;
+
+    /// <summary>
+    /// Exact PCM bytes already handed to the device and not yet played, when
+    /// the backend can report them. Zero means the device queue is drained.
+    /// </summary>
+    int QueuedPcmBytes => -1;
+}
+
+/// <summary>
+/// Optional controls used by host-owned media streams. Guest audio streams
+/// continue to use <see cref="IHostAudioStream.Submit(ReadOnlySpan{byte})"/>
+/// and do not need to implement this extension.
+/// </summary>
+public interface IHostAudioStreamControl
+{
+    bool Submit(ReadOnlySpan<byte> stereoPcm16, CancellationToken cancellationToken);
+
+    void SetPaused(bool paused);
+
+    void SetGuestClockReporting(bool enabled);
+
+    /// <summary>
+    /// Enables rejection instead of over-target admission when a bounded
+    /// host-owned stream cannot accept the next submission.
+    /// </summary>
+    void SetStrictQueueBound(bool enabled);
 }
