@@ -170,6 +170,19 @@ public sealed class GuestAudioProducerDiagnosticsTests
             GuestAudioDiagnostics.Fingerprint([1, 2, 4]));
     }
 
+    [Theory]
+    [InlineData((ushort)0x0000, false, true)]
+    [InlineData((ushort)0x0001, false, true)]
+    [InlineData((ushort)0x0100, true, false)]
+    public void AudioOut2PortClassificationKeepsObjectPortsSeparate(
+        ushort portType,
+        bool expectedObject,
+        bool expectedMainOrBgm)
+    {
+        Assert.Equal(expectedObject, AudioOut2Exports.IsObjectPort(portType));
+        Assert.Equal(expectedMainOrBgm, AudioOut2Exports.IsMainOrBgmPort(portType));
+    }
+
     private static void WriteS16(Span<byte> destination, int sample, short value) =>
         BinaryPrimitives.WriteInt16LittleEndian(
             destination[(sample * sizeof(short))..],

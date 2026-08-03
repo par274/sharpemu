@@ -1459,11 +1459,8 @@ public static class AudioOut2Exports
             });
     }
 
-    private static bool IsMainOrBgmPort(ushort portType)
-    {
-        var kind = portType & 0xFF;
-        return kind is 0 or 1;
-    }
+    internal static bool IsMainOrBgmPort(ushort portType) =>
+        !IsObjectPort(portType) && (portType & 0xFF) is 0 or 1;
 
     private static void MixPortIntoStereo(
         ReadOnlySpan<byte> source,
@@ -1537,7 +1534,7 @@ public static class AudioOut2Exports
         return (short)Math.Clamp(MathF.Round(value * scale), short.MinValue, short.MaxValue);
     }
 
-    private static bool IsObjectPort(ushort portType) => (portType & 0xFF00) == 0x0100;
+    internal static bool IsObjectPort(ushort portType) => (portType & 0xFF00) == 0x0100;
 
     private static bool TryDecodeDataFormat(
         uint dataFormat,
