@@ -329,10 +329,20 @@ internal sealed unsafe class FfmpegVideoDecoder :
         while (true)
         {
             var readResult = ffmpeg.av_read_frame(_formatContext, _packet);
-            if (readResult < 0)
+            var readDisposition = MovieDemuxReadBoundary.Classify(
+                readResult,
+                ffmpeg.AVERROR_EOF);
+            if (readDisposition == MovieDemuxReadDisposition.EndOfInput)
             {
                 _draining = true;
                 return ffmpeg.avcodec_send_packet(_codecContext, null) >= 0;
+            }
+
+            if (readDisposition == MovieDemuxReadDisposition.Failure)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] movie video demux failed ({readResult}).");
+                return false;
             }
 
             if (_packet->stream_index != _videoStreamIndex)

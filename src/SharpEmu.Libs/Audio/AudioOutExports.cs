@@ -205,7 +205,8 @@ public static class AudioOutExports
                 owner: "audio-out",
                 source: $"port-{handle}",
                 movieInstanceId: 0,
-                hostMovieGeneration: 0);
+                hostMovieGeneration: 0,
+                guestStreamIdentity: $"port-{handle}");
         }
         Console.Error.WriteLine(
             $"[LOADER][INFO] AudioOut port {handle}: {frequency} Hz, " +

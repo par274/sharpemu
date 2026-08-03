@@ -11,7 +11,9 @@ namespace SharpEmu.HLE.Host.Posix;
 /// Submit applies the same 32KB backpressure the WinMM backend uses so guest
 /// pacing works identically.
 /// </summary>
-internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
+internal sealed unsafe class PosixCoreAudioStream :
+    IHostAudioStream,
+    IHostAudioStreamControl
 {
     private const uint FormatLinearPcm = 0x6C70636D; // 'lpcm'
     private const uint FlagIsSignedInteger = 0x4;
@@ -25,6 +27,8 @@ internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
     private nint _queue;
     private int _queuedPcmBytes;
     private bool _started;
+    private bool _paused;
+    private bool _strictQueueBound;
     private bool _disposed;
 
     public PosixCoreAudioStream(uint sampleRate, int maxQueuedPcmBytes = 32 * 1024)
@@ -64,7 +68,22 @@ internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
         }
     }
 
-    public bool Submit(ReadOnlySpan<byte> stereoPcm16)
+    public bool Submit(ReadOnlySpan<byte> stereoPcm16) =>
+        Submit(stereoPcm16, CancellationToken.None);
+
+    public bool Submit(
+        ReadOnlySpan<byte> stereoPcm16,
+        CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref _strictQueueBound))
+        {
+            return SubmitStrict(stereoPcm16, cancellationToken);
+        }
+
+        return SubmitLegacy(stereoPcm16);
+    }
+
+    private bool SubmitLegacy(ReadOnlySpan<byte> stereoPcm16)
     {
         lock (_gate)
         {
@@ -118,7 +137,7 @@ internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
             }
 
             _queuedPcmBytes += outputLength;
-            if (!_started)
+            if (!_started && !_paused)
             {
                 if (AudioQueueStart(_queue, 0) != 0)
                 {
@@ -136,6 +155,147 @@ internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
             }
 
             return true;
+        }
+    }
+
+    private bool SubmitStrict(
+        ReadOnlySpan<byte> stereoPcm16,
+        CancellationToken cancellationToken)
+    {
+        if (stereoPcm16.IsEmpty)
+        {
+            return true;
+        }
+
+        if (stereoPcm16.Length > _maximumQueuedPcmBytes)
+        {
+            return false;
+        }
+
+        while (true)
+        {
+            lock (_gate)
+            {
+                if (_disposed || _queue == 0)
+                {
+                    return false;
+                }
+
+                if (HostAudioQueueAdmission.Fits(
+                        _queuedPcmBytes,
+                        stereoPcm16.Length,
+                        _maximumQueuedPcmBytes))
+                {
+                    return SubmitBufferLocked(stereoPcm16);
+                }
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            try
+            {
+                var waitHandles = cancellationToken.CanBeCanceled
+                    ? new[] { _completion, cancellationToken.WaitHandle }
+                    : new[] { _completion };
+                WaitHandle.WaitAny(waitHandles, 10);
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+        }
+    }
+
+    private bool SubmitBufferLocked(ReadOnlySpan<byte> stereoPcm16)
+    {
+        var outputLength = stereoPcm16.Length;
+        if (!TryTakeBuffer(outputLength, out var buffer))
+        {
+            return false;
+        }
+
+        var audioData = ((AudioQueueBuffer*)buffer)->AudioData;
+        stereoPcm16.CopyTo(new Span<byte>(audioData, outputLength));
+
+        ((AudioQueueBuffer*)buffer)->AudioDataByteSize = (uint)outputLength;
+        if (AudioQueueEnqueueBuffer(_queue, buffer, 0, 0) != 0)
+        {
+            _freeBuffers.Enqueue(buffer);
+            return false;
+        }
+
+        _queuedPcmBytes += outputLength;
+        if (!_started && !_paused)
+        {
+            if (AudioQueueStart(_queue, 0) != 0)
+            {
+                _ = AudioQueueDispose(_queue, true);
+                _queue = 0;
+                _queuedPcmBytes = 0;
+                _freeBuffers.Clear();
+                return false;
+            }
+
+            _started = true;
+        }
+
+        return true;
+    }
+
+    public int QueuedPcmBytes
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _disposed || _queue == 0 ? -1 : _queuedPcmBytes;
+            }
+        }
+    }
+
+    public HostAudioProgressSource ProgressSource =>
+        HostAudioProgressSource.ExactQueueDepth;
+
+    public bool SupportsPause => true;
+
+    public void SetPaused(bool paused)
+    {
+        lock (_gate)
+        {
+            if (_disposed || _queue == 0)
+            {
+                return;
+            }
+
+            _paused = paused;
+            if (!_started)
+            {
+                return;
+            }
+
+            var status = paused
+                ? AudioQueuePause(_queue)
+                : AudioQueueStart(_queue, 0);
+            if (status != 0)
+            {
+                throw new InvalidOperationException(
+                    $"AudioQueue{(paused ? "Pause" : "Start")} failed with OSStatus {status}.");
+            }
+        }
+    }
+
+    public void SetGuestClockReporting(bool enabled)
+    {
+    }
+
+    public void SetStrictQueueBound(bool enabled)
+    {
+        lock (_gate)
+        {
+            _strictQueueBound = enabled;
         }
     }
 
@@ -257,6 +417,9 @@ internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
 
     [DllImport(AudioToolbox)]
     private static extern int AudioQueueStart(nint queue, nint startTime);
+
+    [DllImport(AudioToolbox)]
+    private static extern int AudioQueuePause(nint queue);
 
     [DllImport(AudioToolbox)]
     private static extern int AudioQueueDispose(nint queue, [MarshalAs(UnmanagedType.I1)] bool immediate);

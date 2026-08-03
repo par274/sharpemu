@@ -115,12 +115,14 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private readonly SDL_AudioFormat _inputFormat;
         private readonly bool _diagnosticsEnabled;
         private readonly AudioSampleAccounting? _sampleAccounting;
+        private readonly AudioPcmStatistics? _pcmStatistics;
         private readonly int _streamId = Interlocked.Increment(ref _nextStreamId);
         private SDL_AudioStream* _stream;
         private bool _disposed;
         private long _totalSubmittedInputBytes;
         private string _diagnosticOwner = string.Empty;
         private string _diagnosticSource = string.Empty;
+        private string _diagnosticGuestStreamIdentity = string.Empty;
         private string _diagnosticPhase = "open";
         private long _diagnosticMovieInstanceId;
         private long _diagnosticHostMovieGeneration;
@@ -170,6 +172,9 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             _diagnosticsEnabled = HostAudioDiagnostics.Enabled;
             _sampleAccounting = _diagnosticsEnabled
                 ? new AudioSampleAccounting(_bytesPerFrame)
+                : null;
+            _pcmStatistics = _diagnosticsEnabled
+                ? new AudioPcmStatistics(format, channels)
                 : null;
             _queueObservationCounters = _diagnosticsEnabled || _traceQueue
                 ? new AudioQueueObservationCounters()
@@ -236,6 +241,11 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 return true;
             }
 
+            if (Volatile.Read(ref _strictQueueBound))
+            {
+                return SubmitStrict(pcm, cancellationToken);
+            }
+
             HostAudioStreamDiagnosticSnapshot? diagnosticSnapshot = null;
             var submitted = false;
             lock (_gate)
@@ -256,18 +266,6 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     cancellationToken.ThrowIfCancellationRequested();
                     if (Stopwatch.GetTimestamp() >= deadline)
                     {
-                        if (_strictQueueBound)
-                        {
-                            if (_sampleAccounting is not null)
-                            {
-                                _sampleAccounting.RecordSubmission(pcm.Length, false);
-                                _diagnosticSubmissionCount++;
-                                _failedSubmissionCount++;
-                            }
-
-                            return false;
-                        }
-
                         // Enqueue anyway rather than discarding the buffer. A gap in
                         // the stream is an audible click; the extra latency of one
                         // over-deep submission is not, and the queue recovers as soon
@@ -304,6 +302,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 
                 if (submitted)
                 {
+                    _pcmStatistics?.Record(pcm);
                     // This is only an estimate of input no longer queued in SDL's
                     // input-format queue. SDL does not expose exact physical or
                     // audible device consumption here.
@@ -344,6 +343,112 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             }
 
             return submitted;
+        }
+
+        private bool SubmitStrict(
+            ReadOnlySpan<byte> pcm,
+            CancellationToken cancellationToken)
+        {
+            if (pcm.Length > _maximumQueuedBytes)
+            {
+                lock (_gate)
+                {
+                    if (_sampleAccounting is not null)
+                    {
+                        _sampleAccounting.RecordSubmission(pcm.Length, false);
+                        _diagnosticSubmissionCount++;
+                        _failedSubmissionCount++;
+                    }
+                }
+
+                return false;
+            }
+
+            while (true)
+            {
+                HostAudioStreamDiagnosticSnapshot? diagnosticSnapshot = null;
+                var admitted = false;
+                var submitted = false;
+                lock (_gate)
+                {
+                    if (_disposed || _stream is null)
+                    {
+                        return false;
+                    }
+
+                    var blockStart = Stopwatch.GetTimestamp();
+                    var queued = ReadQueuedBytesLocked();
+                    if (queued < 0)
+                    {
+                        return false;
+                    }
+
+                    if (HostAudioQueueAdmission.Fits(
+                            queued,
+                            pcm.Length,
+                            _maximumQueuedBytes))
+                    {
+                        admitted = true;
+                        RecordSubmission(
+                            queued,
+                            blockStart,
+                            overTarget: false,
+                            bytes: pcm.Length);
+                        fixed (byte* data = pcm)
+                        {
+                            submitted = SDL_PutAudioStreamData(
+                                _stream,
+                                (nint)data,
+                                pcm.Length);
+                        }
+
+                        if (_sampleAccounting is not null)
+                        {
+                            _sampleAccounting.RecordSubmission(
+                                pcm.Length,
+                                submitted);
+                            _diagnosticSubmissionCount++;
+                            if (!submitted)
+                            {
+                                _failedSubmissionCount++;
+                            }
+                        }
+
+                        if (submitted)
+                        {
+                            _pcmStatistics?.Record(pcm);
+                            _totalSubmittedInputBytes += pcm.Length;
+                        }
+
+                        if (ShouldCaptureDiagnosticLocked(Stopwatch.GetTimestamp()))
+                        {
+                            diagnosticSnapshot = CaptureDiagnosticSnapshotLocked();
+                        }
+                    }
+                }
+
+                if (diagnosticSnapshot is { } snapshot)
+                {
+                    HostAudioDiagnostics.RecordStreamSummary(snapshot);
+                }
+
+                if (admitted)
+                {
+                    // An SDL submission failure is an explicit host failure.
+                    // A full bounded queue never reaches this return path.
+                    return submitted;
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return false;
+                }
+
+                // Strict movie admission has no arbitrary deadline. The
+                // cancellation token and Dispose's gate acquisition provide
+                // the termination boundary when a device never drains.
+                cancellationToken.WaitHandle.WaitOne(1);
+            }
         }
 
         public void SetPaused(bool paused)
@@ -388,6 +493,11 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 }
             }
         }
+
+        public HostAudioProgressSource ProgressSource =>
+            HostAudioProgressSource.ExactQueueDepth;
+
+        public bool SupportsPause => true;
 
         public void SetGuestClockReporting(bool enabled)
         {
@@ -467,7 +577,8 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             string owner,
             string source,
             long movieInstanceId,
-            long hostMovieGeneration)
+            long hostMovieGeneration,
+            string guestStreamIdentity = "")
         {
             if (!_diagnosticsEnabled || !HostAudioDiagnostics.Enabled)
             {
@@ -484,6 +595,8 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 
                 _diagnosticOwner = owner;
                 _diagnosticSource = HostAudioDiagnostics.Identity(source);
+                _diagnosticGuestStreamIdentity =
+                    HostAudioDiagnostics.Identity(guestStreamIdentity);
                 _diagnosticMovieInstanceId = movieInstanceId;
                 _diagnosticHostMovieGeneration = hostMovieGeneration;
                 if (!_diagnosticOpenRecorded)
@@ -619,6 +732,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             var streamFrequencyRatio = SDL_GetAudioStreamFrequencyRatio(_stream);
             var accounting = _sampleAccounting?.Snapshot(queuedBytes);
             var accountingSnapshot = accounting ?? default;
+            var pcmWindow = _pcmStatistics?.SnapshotAndReset() ?? default;
             var now = Stopwatch.GetTimestamp();
             var deviceSignature = string.Concat(
                 deviceIdValue,
@@ -651,9 +765,11 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 StreamId = _streamId,
                 Owner = _diagnosticOwner,
                 Source = _diagnosticSource,
+                GuestStreamIdentity = _diagnosticGuestStreamIdentity,
                 MovieInstanceId = _diagnosticMovieInstanceId,
                 HostMovieGeneration = _diagnosticHostMovieGeneration,
                 Phase = _diagnosticPhase,
+                ProgressSource = HostAudioProgressSource.ExactQueueDepth,
                 InputSampleRate = _sampleRate,
                 InputChannels = _channels,
                 InputBytesPerFrame = _bytesPerFrame,
@@ -714,6 +830,16 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 ClockReportRejectedCount = _clockReportRejectedCount,
                 LastEstimatedPlayedSeconds = _lastEstimatedPlayedSeconds,
                 GlobalGuestAudioClockSeconds = GuestAudioClock.PlayedSeconds,
+                FirstSubmissionTimestamp = accountingSnapshot.FirstSubmissionTimestamp,
+                LastSubmissionTimestamp = accountingSnapshot.LastSubmissionTimestamp,
+                PcmWindowFormat = pcmWindow.Format,
+                PcmWindowChannels = pcmWindow.Channels,
+                PcmWindowFrames = pcmWindow.FrameCount,
+                PcmWindowSamples = pcmWindow.SampleCount,
+                PcmWindowPeak = pcmWindow.Peak,
+                PcmWindowRms = pcmWindow.Rms,
+                PcmWindowClippingCount = pcmWindow.ClippingCount,
+                PcmWindowZeroCrossingCount = pcmWindow.ZeroCrossingCount,
             };
         }
 

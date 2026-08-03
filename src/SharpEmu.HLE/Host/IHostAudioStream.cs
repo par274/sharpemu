@@ -34,6 +34,23 @@ public interface IHostAudioStream : IDisposable
     /// the backend can report them. Zero means the device queue is drained.
     /// </summary>
     int QueuedPcmBytes => -1;
+
+    /// <summary>
+    /// Describes how a media owner may interpret progress from this stream.
+    /// Backends with an exact queue depth inherit that capability; other
+    /// backends must explicitly expose a calibrated submission-paced or
+    /// unavailable state instead of making the movie fail after one buffer.
+    /// </summary>
+    HostAudioProgressSource ProgressSource => QueuedPcmBytes >= 0
+        ? HostAudioProgressSource.ExactQueueDepth
+        : HostAudioProgressSource.Unavailable;
+}
+
+public enum HostAudioProgressSource
+{
+    ExactQueueDepth,
+    CalibratedSubmissionPaced,
+    Unavailable,
 }
 
 /// <summary>
@@ -44,6 +61,14 @@ public interface IHostAudioStream : IDisposable
 public interface IHostAudioStreamControl
 {
     bool Submit(ReadOnlySpan<byte> stereoPcm16, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Whether SetPaused changes the device state. A false value is an
+    /// explicit unsupported capability, not an implicit pause promise.
+    /// </summary>
+    bool SupportsPause => false;
+
+    HostAudioProgressSource ProgressSource => HostAudioProgressSource.Unavailable;
 
     void SetPaused(bool paused);
 

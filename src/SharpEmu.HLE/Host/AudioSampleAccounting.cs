@@ -18,6 +18,8 @@ internal sealed class AudioSampleAccounting
     private long _failedSubmissionBytes;
     private long _resamplerInputFrames;
     private long _resamplerOutputFrames;
+    private long _firstSubmissionTimestamp;
+    private long _lastSubmissionTimestamp;
 
     internal AudioSampleAccounting(int bytesPerStreamFrame)
     {
@@ -40,6 +42,13 @@ internal sealed class AudioSampleAccounting
     internal void RecordSubmission(int bytes, bool accepted)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(bytes);
+        var timestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_firstSubmissionTimestamp == 0)
+        {
+            _firstSubmissionTimestamp = timestamp;
+        }
+
+        _lastSubmissionTimestamp = timestamp;
         if (accepted)
         {
             _submittedInputBytes = checked(_submittedInputBytes + bytes);
@@ -83,6 +92,8 @@ internal sealed class AudioSampleAccounting
             MissingOutputBytes = missingOutputBytes,
             ResamplerInputFrames = _resamplerInputFrames,
             ResamplerOutputFrames = _resamplerOutputFrames,
+            FirstSubmissionTimestamp = _firstSubmissionTimestamp,
+            LastSubmissionTimestamp = _lastSubmissionTimestamp,
         };
     }
 
@@ -95,6 +106,8 @@ internal sealed class AudioSampleAccounting
         _failedSubmissionBytes = 0;
         _resamplerInputFrames = 0;
         _resamplerOutputFrames = 0;
+        _firstSubmissionTimestamp = 0;
+        _lastSubmissionTimestamp = 0;
     }
 
     /// <summary>
@@ -134,4 +147,6 @@ internal readonly record struct AudioSampleAccountingSnapshot
     internal long MissingOutputBytes { get; init; }
     internal long ResamplerInputFrames { get; init; }
     internal long ResamplerOutputFrames { get; init; }
+    internal long FirstSubmissionTimestamp { get; init; }
+    internal long LastSubmissionTimestamp { get; init; }
 }

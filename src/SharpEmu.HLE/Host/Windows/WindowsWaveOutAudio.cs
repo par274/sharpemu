@@ -25,6 +25,7 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
         private readonly Queue<NativeBuffer> _buffers = new();
         private IntPtr _device;
         private int _queuedPcmBytes;
+        private bool _strictQueueBound;
         private bool _disposed;
 
         public WaveOutStream(uint sampleRate, int maxQueuedPcmBytes)
@@ -60,6 +61,18 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
             ReadOnlySpan<byte> stereoPcm16,
             CancellationToken cancellationToken)
         {
+            if (Volatile.Read(ref _strictQueueBound))
+            {
+                return SubmitStrict(stereoPcm16, cancellationToken);
+            }
+
+            return SubmitLegacy(stereoPcm16, cancellationToken);
+        }
+
+        private bool SubmitLegacy(
+            ReadOnlySpan<byte> stereoPcm16,
+            CancellationToken cancellationToken)
+        {
             lock (_gate)
             {
                 if (_disposed)
@@ -69,7 +82,8 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
 
                 ReapCompletedBuffers();
                 while (_queuedPcmBytes != 0 &&
-                       _queuedPcmBytes + stereoPcm16.Length > _maximumQueuedPcmBytes)
+                       _queuedPcmBytes + stereoPcm16.Length >
+                       _maximumQueuedPcmBytes)
                 {
                     if (cancellationToken.IsCancellationRequested)
                     {
@@ -85,6 +99,61 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
                 }
 
                 return QueueBuffer(stereoPcm16);
+            }
+        }
+
+        private bool SubmitStrict(
+            ReadOnlySpan<byte> stereoPcm16,
+            CancellationToken cancellationToken)
+        {
+            if (stereoPcm16.IsEmpty)
+            {
+                return true;
+            }
+
+            if (stereoPcm16.Length > _maximumQueuedPcmBytes)
+            {
+                return false;
+            }
+
+            while (true)
+            {
+                lock (_gate)
+                {
+                    if (_disposed || _device == IntPtr.Zero)
+                    {
+                        return false;
+                    }
+
+                    ReapCompletedBuffers();
+                    if (HostAudioQueueAdmission.Fits(
+                            _queuedPcmBytes,
+                            stereoPcm16.Length,
+                            _maximumQueuedPcmBytes))
+                    {
+                        // QueueBuffer is the only admission point. The queue
+                        // cannot grow between the fit check and waveOutWrite
+                        // because every stream operation is serialized here.
+                        return QueueBuffer(stereoPcm16);
+                    }
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    var waitHandles = cancellationToken.CanBeCanceled
+                        ? new[] { _completion, cancellationToken.WaitHandle }
+                        : new[] { _completion };
+                    WaitHandle.WaitAny(waitHandles, 10);
+                }
+                catch (ObjectDisposedException)
+                {
+                    return false;
+                }
             }
         }
 
@@ -129,8 +198,17 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
         {
         }
 
+        public HostAudioProgressSource ProgressSource =>
+            HostAudioProgressSource.ExactQueueDepth;
+
+        public bool SupportsPause => true;
+
         public void SetStrictQueueBound(bool enabled)
         {
+            lock (_gate)
+            {
+                _strictQueueBound = enabled;
+            }
         }
 
         public void Dispose()

@@ -45,7 +45,8 @@ internal readonly record struct MovieAudioProgress(
     MovieAudioProgressState State,
     double Seconds,
     bool IsDrainComplete,
-    string FailureReason);
+    string FailureReason,
+    bool PauseSupported = true);
 
 internal interface IMediaMovieAudio
 {

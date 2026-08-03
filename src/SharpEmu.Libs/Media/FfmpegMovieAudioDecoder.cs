@@ -31,6 +31,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
     private const int MaximumDecodedAudioSamples = 1_048_576;
 
     private readonly object _stateGate = new();
+    private readonly MovieAudioDrainLifecycle _drainLifecycle = new();
     private readonly double _declaredAudioDurationSeconds;
     private readonly int _audioStreamIndex;
     private readonly AVRational _audioTimeBase;
@@ -43,6 +44,8 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
     private readonly AVSampleFormat _audioInputFormat;
     private readonly bool _diagnosticsEnabled;
     private readonly IHostAudioStreamDiagnostics? _audioStreamDiagnostics;
+    private readonly bool _pauseSupported;
+    private readonly AudioPcmStatistics? _pcmStatistics;
     private readonly byte[] _outputBuffer;
     private readonly CancellationTokenSource _stopSource = new();
 
@@ -55,17 +58,12 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
     private AVSampleFormat _swrInputFormat = AVSampleFormat.AV_SAMPLE_FMT_NONE;
     private int _swrInputSampleRate;
     private bool _swrInputLayoutValid;
-    private IHostAudioStream? _audioStream;
+    private MovieAudioSubmissionBoundary? _audioSubmission;
     private Thread? _pumpThread;
     private MovieAudioProgressState _state;
     private string _failureReason = string.Empty;
     private bool _started;
     private bool _paused;
-    private bool _demuxEof;
-    private bool _codecDrainSent;
-    private bool _codecEof;
-    private bool _resamplerEof;
-    private bool _hostDrainComplete;
     private long _decodedSourceFrames;
     private long _convertedOutputFrames;
     private long _submittedOutputFrames;
@@ -73,6 +71,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
     private long _resamplerInputFrames;
     private long _resamplerOutputFrames;
     private double _lastEstimatedPlayedSeconds;
+    private double _firstSourceTimestampSeconds = -1;
     private double _lastSourceTimestampSeconds = -1;
     private long _nextDiagnosticTimestamp;
     private string _diagnosticSource = string.Empty;
@@ -94,7 +93,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
         SwrContext* swrContext,
         AVChannelLayout swrInputLayout,
         bool swrInputLayoutValid,
-        IHostAudioStream? audioStream,
+        MovieAudioSubmissionBoundary? audioSubmission,
         MovieAudioProgressState state,
         string failureReason,
         long formatStartTime,
@@ -119,12 +118,16 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
         _swrContext = swrContext;
         _swrInputLayout = swrInputLayout;
         _swrInputLayoutValid = swrInputLayoutValid;
-        _audioStream = audioStream;
+        _audioSubmission = audioSubmission;
+        _pauseSupported = audioSubmission?.SupportsPause == true;
         _state = state;
         _failureReason = failureReason;
         _diagnosticsEnabled = HostAudioDiagnostics.Enabled;
         _audioStreamDiagnostics = _diagnosticsEnabled
-            ? audioStream as IHostAudioStreamDiagnostics
+            ? audioSubmission?.Diagnostics
+            : null;
+        _pcmStatistics = _diagnosticsEnabled
+            ? new AudioPcmStatistics(HostPcmFormat.Signed16, OutputChannels)
             : null;
         _outputBuffer = state == MovieAudioProgressState.Failed
             ? []
@@ -146,6 +149,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
         AVChannelLayout swrInputLayout = default;
         var swrInputLayoutValid = false;
         IHostAudioStream? audioStream = null;
+        MovieAudioSubmissionBoundary? audioSubmission = null;
         var declaredDurationSeconds = 0d;
         var audioTimeBase = default(AVRational);
         var formatStartTime = long.MinValue;
@@ -295,6 +299,12 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
                 controls.SetStrictQueueBound(true);
             }
 
+            audioSubmission = new MovieAudioSubmissionBoundary(
+                audioStream,
+                OutputChannels * OutputBytesPerSample,
+                48_000);
+            audioStream = null;
+
             var result = new FfmpegMovieAudioDecoder(
                 declaredDurationSeconds,
                 audioStreamIndex,
@@ -309,7 +319,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
                 swrContext,
                 swrInputLayout,
                 swrInputLayoutValid,
-                audioStream,
+                audioSubmission,
                 MovieAudioProgressState.NotStarted,
                 string.Empty,
                 formatStartTime,
@@ -323,7 +333,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
             swrContext = null;
             swrInputLayout = default;
             swrInputLayoutValid = false;
-            audioStream = null;
+            audioSubmission = null;
             return result;
         }
         catch (Exception exception) when (
@@ -348,6 +358,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
         }
         finally
         {
+            audioSubmission?.Dispose();
             audioStream?.Dispose();
             if (swrContext is not null)
             {
@@ -508,8 +519,9 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
             return new MovieAudioProgress(
                 _state,
                 _lastEstimatedPlayedSeconds,
-                _hostDrainComplete,
-                _failureReason);
+                _drainLifecycle.HostDrainComplete,
+                _failureReason,
+                _pauseSupported);
         }
     }
 
@@ -531,9 +543,9 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
 
         try
         {
-            if (_audioStream is IHostAudioStreamControl controls)
+            if (_pauseSupported)
             {
-                controls.SetPaused(true);
+                _audioSubmission?.SetPaused(true);
             }
         }
         catch (Exception exception) when (
@@ -547,9 +559,9 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
     {
         try
         {
-            if (_audioStream is IHostAudioStreamControl controls)
+            if (_pauseSupported)
             {
-                controls.SetPaused(false);
+                _audioSubmission?.SetPaused(false);
             }
         }
         catch (Exception exception) when (
@@ -641,18 +653,27 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
                     continue;
                 }
 
-                if (!_demuxEof)
+                if (!_drainLifecycle.DemuxEof)
                 {
                     SetDiagnosticPhase("audio-demux");
                     var readResult = ffmpeg.av_read_frame(_formatContext, _packet);
-                    if (readResult < 0)
+                    var readDisposition = MovieDemuxReadBoundary.Classify(
+                        readResult,
+                        ffmpeg.AVERROR_EOF);
+                    if (readDisposition == MovieDemuxReadDisposition.EndOfInput)
                     {
-                        _demuxEof = true;
+                        _drainLifecycle.MarkDemuxEof();
                         if (!DrainCodecAtEof())
                         {
                             return;
                         }
                         continue;
+                    }
+
+                    if (readDisposition == MovieDemuxReadDisposition.Failure)
+                    {
+                        Fail($"audio demux failed ({readResult})");
+                        return;
                     }
 
                     if (_packet->size < 0 || _packet->size > MaximumAudioPacketBytes)
@@ -678,7 +699,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
                     continue;
                 }
 
-                if (!_codecEof)
+                if (!_drainLifecycle.DecoderEof)
                 {
                     if (!DrainCodecAtEof())
                     {
@@ -687,7 +708,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
                     continue;
                 }
 
-                if (!_resamplerEof)
+                if (!_drainLifecycle.ResamplerEof)
                 {
                     SetDiagnosticPhase("audio-resampler-drain");
                     if (!DrainResampler())
@@ -695,7 +716,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
                         return;
                     }
 
-                    _resamplerEof = true;
+                    _drainLifecycle.MarkResamplerEof();
                     continue;
                 }
 
@@ -745,12 +766,12 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
 
     private bool DrainCodecAtEof()
     {
-        if (_codecEof)
+        if (_drainLifecycle.DecoderEof)
         {
             return true;
         }
 
-        if (!_codecDrainSent)
+        if (!_drainLifecycle.CodecDrainSent)
         {
             var sendResult = ffmpeg.avcodec_send_packet(_codecContext, null);
             if (sendResult == ffmpeg.AVERROR(ffmpeg.EAGAIN))
@@ -760,7 +781,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
                     return false;
                 }
 
-                return !_codecEof;
+                return !_drainLifecycle.DecoderEof;
             }
 
             if (sendResult < 0)
@@ -769,7 +790,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
                 return false;
             }
 
-            _codecDrainSent = true;
+            _drainLifecycle.MarkCodecDrainSent();
         }
 
         return DrainDecodedAudioFrames();
@@ -787,7 +808,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
 
             if (receiveResult == ffmpeg.AVERROR_EOF)
             {
-                _codecEof = true;
+                _drainLifecycle.MarkDecoderEof();
                 return true;
             }
 
@@ -826,6 +847,10 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
             {
                 _lastSourceTimestampSeconds = _frame->pts *
                     ((double)_audioTimeBase.num / _audioTimeBase.den);
+                if (_firstSourceTimestampSeconds < 0)
+                {
+                    _firstSourceTimestampSeconds = _lastSourceTimestampSeconds;
+                }
             }
         }
 
@@ -946,14 +971,27 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
 
             var byteCount = checked(
                 converted * OutputChannels * OutputBytesPerSample);
-            var submitted = SubmitHostAudio(_outputBuffer.AsSpan(0, byteCount));
-            if (!submitted)
+            _pcmStatistics?.Record(_outputBuffer.AsSpan(0, byteCount));
+            var submissionResult = SubmitHostAudio(
+                _outputBuffer.AsSpan(0, byteCount),
+                converted,
+                out var submissionProgress);
+            if (submissionResult != MovieAudioSubmissionResult.Accepted)
             {
-                if (!_stopSource.IsCancellationRequested)
+                if (submissionResult == MovieAudioSubmissionResult.HostFailure &&
+                    !_stopSource.IsCancellationRequested)
                 {
                     _failedSubmissionFrames = checked(
                         _failedSubmissionFrames + converted);
                     Fail("host audio submission failed");
+                }
+
+                if (submissionResult == MovieAudioSubmissionResult.ProgressUnavailable &&
+                    !_stopSource.IsCancellationRequested)
+                {
+                    _failedSubmissionFrames = checked(
+                        _failedSubmissionFrames + converted);
+                    Fail("host audio progress source violated its exact contract");
                 }
 
                 return -1;
@@ -963,7 +1001,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
             _resamplerInputFrames = checked(_resamplerInputFrames + inputSamples);
             _resamplerOutputFrames = checked(_resamplerOutputFrames + converted);
             _submittedOutputFrames = checked(_submittedOutputFrames + converted);
-            if (!UpdateProgressAfterSubmission())
+            if (!ApplyProgress(submissionProgress))
             {
                 return -1;
             }
@@ -993,47 +1031,59 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
         return true;
     }
 
-    private bool SubmitHostAudio(ReadOnlySpan<byte> samples)
+    private MovieAudioSubmissionResult SubmitHostAudio(
+        ReadOnlySpan<byte> samples,
+        int outputFrames,
+        out MovieAudioProgressSample progress)
     {
-        var stream = _audioStream;
-        if (stream is null)
+        var submission = _audioSubmission;
+        if (submission is null)
         {
-            return false;
+            progress = default;
+            return MovieAudioSubmissionResult.HostFailure;
         }
 
-        return stream is IHostAudioStreamControl controls
-            ? controls.Submit(samples, _stopSource.Token)
-            : stream.Submit(samples);
+        return submission.Submit(
+            samples,
+            outputFrames,
+            _stopSource.Token,
+            out progress);
     }
 
     private bool WaitForHostDrain(CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        var submission = _audioSubmission;
+        if (submission is null)
         {
-            var queuedPcmBytes = GetQueuedPcmBytes();
-            if (queuedPcmBytes < 0)
-            {
-                Fail("host audio drain is not observable");
-                return false;
-            }
+            Fail("host audio submission boundary is unavailable");
+            return false;
+        }
 
-            UpdateProgress(queuedPcmBytes);
-            if (queuedPcmBytes == 0)
-            {
+        switch (submission.WaitForDrain(cancellationToken))
+        {
+            case MovieAudioDrainResult.Completed:
+                ApplyProgress(submission.LastProgress);
+                SetDiagnosticPhase("completed");
                 lock (_stateGate)
                 {
-                    _hostDrainComplete = true;
+                    _drainLifecycle.MarkHostDrainComplete();
                     _state = MovieAudioProgressState.Completed;
                 }
 
                 RecordMovieDecoderSummaryIfDue(force: true);
                 return true;
-            }
-
-            Thread.Sleep(1);
+            case MovieAudioDrainResult.Cancelled:
+                return false;
+            case MovieAudioDrainResult.Unsupported:
+                // An unavailable backend is an explicit capability state, not
+                // a decoder failure. It cannot satisfy movie completion until
+                // its owner supplies a drain boundary.
+                SetDiagnosticPhase("audio-host-drain-unavailable");
+                return false;
+            default:
+                Fail("host audio drain failed");
+                return false;
         }
-
-        return false;
     }
 
     private bool IsPaused()
@@ -1044,75 +1094,42 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
         }
     }
 
-    private bool UpdateProgressAfterSubmission()
+    private bool ApplyProgress(MovieAudioProgressSample progress)
     {
-        var queuedPcmBytes = GetQueuedPcmBytes();
-        if (queuedPcmBytes < 0)
+        if (!progress.HasProgress)
         {
-            Fail("host audio progress is not observable");
-            return false;
+            return true;
         }
 
-        UpdateProgress(queuedPcmBytes);
-        return true;
-    }
-
-    private int GetQueuedPcmBytes()
-    {
-        var stream = _audioStream;
-        if (stream is null)
-        {
-            return -1;
-        }
-
-        var queuedPcmBytes = stream.QueuedPcmBytes;
-        if (queuedPcmBytes >= 0)
-        {
-            return queuedPcmBytes;
-        }
-
-        var queuedMilliseconds = stream.QueuedMilliseconds;
-        return queuedMilliseconds < 0
-            ? -1
-            : checked((int)Math.Round(
-                queuedMilliseconds * (48_000.0 * OutputChannels * OutputBytesPerSample) /
-                1_000.0));
-    }
-
-    private void UpdateProgress(int queuedPcmBytes)
-    {
-        var queuedFrames = Math.Max(0, queuedPcmBytes / (OutputChannels * OutputBytesPerSample));
-        var playedFrames = Math.Clamp(
-            _submittedOutputFrames - queuedFrames,
-            0,
-            _submittedOutputFrames);
-        var seconds = playedFrames / 48_000.0;
         lock (_stateGate)
         {
             _lastEstimatedPlayedSeconds = Math.Max(
                 _lastEstimatedPlayedSeconds,
-                seconds);
+                progress.Seconds);
             if (_state is MovieAudioProgressState.Failed or
                 MovieAudioProgressState.Completed or
                 MovieAudioProgressState.Disposed)
             {
-                return;
+                return true;
             }
 
             if (_paused)
             {
                 _state = MovieAudioProgressState.Paused;
-                return;
+                return true;
             }
 
-            _state = queuedPcmBytes == 0 && _submittedOutputFrames > 0
+            _state = progress.TemporaryUnderrun
                 ? MovieAudioProgressState.TemporaryUnderrun
                 : MovieAudioProgressState.Running;
         }
+
+        return true;
     }
 
     private void Fail(string reason, Exception? exception = null)
     {
+        _drainLifecycle.MarkFailed();
         lock (_stateGate)
         {
             if (_state is MovieAudioProgressState.Failed or
@@ -1136,10 +1153,10 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
             Console.Error.WriteLine($"[LOADER][WARN] movie audio {reason}.");
         }
 
-        var stream = _audioStream;
-        _audioStream = null;
-        stream?.Dispose();
+        SetDiagnosticPhase("failed");
         RecordMovieDecoderSummaryIfDue(force: true);
+        var submission = Interlocked.Exchange(ref _audioSubmission, null);
+        submission?.Dispose();
     }
 
     private bool EnsureAudioResampler(
@@ -1246,14 +1263,20 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
             _failedSubmissionFrames,
             _resamplerInputFrames,
             _resamplerOutputFrames,
+            _firstSourceTimestampSeconds,
             _lastSourceTimestampSeconds,
             _audioStreamDiagnostics.GetDiagnosticSnapshot(),
             progress.State.ToString(),
             progress.Seconds,
-            _demuxEof,
-            _codecEof,
-            progress.IsDrainComplete,
-            progress.FailureReason);
+            _drainLifecycle.DemuxEof,
+            _drainLifecycle.DecoderEof,
+            resamplerEof: _drainLifecycle.ResamplerEof,
+            codecDrainSent: _drainLifecycle.CodecDrainSent,
+            audioDrainComplete: progress.IsDrainComplete,
+            hostDrainObserved: _drainLifecycle.HostDrainComplete,
+            disposed: _drainLifecycle.Disposed,
+            audioFailureReason: progress.FailureReason,
+            pcmWindow: _pcmStatistics?.SnapshotAndReset() ?? default);
     }
 
     public void Dispose()
@@ -1276,8 +1299,16 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
             _pumpThread.Join();
         }
 
-        _audioStream?.Dispose();
-        _audioStream = null;
+        lock (_stateGate)
+        {
+            _state = MovieAudioProgressState.Disposed;
+            Monitor.PulseAll(_stateGate);
+        }
+        _drainLifecycle.MarkDisposed();
+        RecordMovieDecoderSummaryIfDue(force: true);
+
+        var submission = Interlocked.Exchange(ref _audioSubmission, null);
+        submission?.Dispose();
         FreeAudioResampler();
 
         if (_frame is not null)
@@ -1309,10 +1340,8 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
         }
 
         _stopSource.Dispose();
-        lock (_stateGate)
-        {
-            _state = MovieAudioProgressState.Disposed;
-            Monitor.PulseAll(_stateGate);
-        }
+        // The state was marked disposed before the stream boundary was
+        // released so the final movie summary retains its generation and
+        // lifecycle identity. The host stream emits its own disposed event.
     }
 }

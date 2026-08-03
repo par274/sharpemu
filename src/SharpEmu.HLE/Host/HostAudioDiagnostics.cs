@@ -212,14 +212,20 @@ public static class HostAudioDiagnostics
         long failedSubmissionFrames,
         long resamplerInputFrames,
         long resamplerOutputFrames,
+        double firstSourceTimestampSeconds,
         double lastSourceTimestampSeconds,
         HostAudioStreamDiagnosticSnapshot stream,
         string audioState = "",
         double audioProgressSeconds = 0,
         bool demuxEof = false,
         bool decoderEof = false,
+        bool resamplerEof = false,
+        bool codecDrainSent = false,
         bool audioDrainComplete = false,
-        string audioFailureReason = "")
+        bool hostDrainObserved = false,
+        bool disposed = false,
+        string audioFailureReason = "",
+        AudioPcmStatisticsSnapshot pcmWindow = default)
     {
         if (!TryReserveEvent())
         {
@@ -247,13 +253,19 @@ public static class HostAudioDiagnostics
                 failedSubmissionFrames,
                 resamplerInputFrames,
                 resamplerOutputFrames,
+                firstSourceTimestampSeconds,
                 lastSourceTimestampSeconds,
                 audioState,
                 audioProgressSeconds,
                 demuxEof,
                 decoderEof,
+                resamplerEof,
+                codecDrainSent,
                 audioDrainComplete,
+                hostDrainObserved,
+                disposed,
                 audioFailureReason,
+                pcmWindow,
                 stream,
             });
     }
@@ -290,7 +302,8 @@ public interface IHostAudioStreamDiagnostics
         string owner,
         string source,
         long movieInstanceId,
-        long hostMovieGeneration);
+        long hostMovieGeneration,
+        string guestStreamIdentity = "");
 
     void SetDiagnosticPhase(string phase);
 
@@ -306,9 +319,11 @@ public readonly record struct HostAudioStreamDiagnosticSnapshot
     public int StreamId { get; init; }
     public string Owner { get; init; } = string.Empty;
     public string Source { get; init; } = string.Empty;
+    public string GuestStreamIdentity { get; init; } = string.Empty;
     public long MovieInstanceId { get; init; }
     public long HostMovieGeneration { get; init; }
     public string Phase { get; init; } = string.Empty;
+    public HostAudioProgressSource ProgressSource { get; init; }
     public uint InputSampleRate { get; init; }
     public int InputChannels { get; init; }
     public int InputBytesPerFrame { get; init; }
@@ -364,6 +379,16 @@ public readonly record struct HostAudioStreamDiagnosticSnapshot
     public long ClockReportRejectedCount { get; init; }
     public double LastEstimatedPlayedSeconds { get; init; }
     public double GlobalGuestAudioClockSeconds { get; init; }
+    public long FirstSubmissionTimestamp { get; init; }
+    public long LastSubmissionTimestamp { get; init; }
+    public string PcmWindowFormat { get; init; } = string.Empty;
+    public int PcmWindowChannels { get; init; }
+    public long PcmWindowFrames { get; init; }
+    public long PcmWindowSamples { get; init; }
+    public double PcmWindowPeak { get; init; }
+    public double PcmWindowRms { get; init; }
+    public long PcmWindowClippingCount { get; init; }
+    public long PcmWindowZeroCrossingCount { get; init; }
 }
 
 internal sealed class AudioDiagnosticEventBudget

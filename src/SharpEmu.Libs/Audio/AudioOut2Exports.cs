@@ -840,7 +840,8 @@ public static class AudioOut2Exports
                                 owner: "audio-out2-primary",
                                 source: "guest-audio-out2-primary",
                                 movieInstanceId: 0,
-                                hostMovieGeneration: 0);
+                                hostMovieGeneration: 0,
+                                guestStreamIdentity: "audio-out2-primary");
                         }
                     }
                     catch (Exception exception)
@@ -879,7 +880,8 @@ public static class AudioOut2Exports
                             owner: "audio-out2-secondary",
                             source: "guest-audio-out2-secondary",
                             movieInstanceId: 0,
-                            hostMovieGeneration: 0);
+                            hostMovieGeneration: 0,
+                            guestStreamIdentity: "audio-out2-secondary");
                     }
                 }
                 catch (Exception exception)
