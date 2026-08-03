@@ -14,9 +14,12 @@ one packet and one next frame but stalled at the first future frame and crossed
 the physical-memory safety boundary. A focused independent-context probe then
 supported a separately bounded movie-audio demux/decode context, and the
 production boundary now uses it for movies with audio. The first targeted retail
-listening run reached the later host movies and main menu, but audible artifacts
-and the physical-memory safety boundary prevent accepting the correction; no
-claim is made until comparable confirmation runs pass.
+listening run reached the later host movies and main menu. A subsequent attended
+scalar-diagnostic pilot reached only the grey interval before the unchanged
+physical-memory safety boundary. The independent movie stream drained cleanly
+in that pilot, but the audible artifacts and unresolved guest-stream attribution
+prevent accepting the correction; no claim is made until the remaining boundary
+is corrected and comparable confirmation runs pass.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
@@ -62,6 +65,13 @@ The consequential identifiers for the earlier target findings are:
   `F0F16F2EFF1B88E0926F0D2B81FE4F4F8C16E7FF3F5CAEE33C0178250B4B5ADE`.
   Optional per-event movie and memory diagnostics were disabled for this
   listening-only run; runner metrics and the emulator log remain outside Git.
+- Attended scalar-diagnostic pilot of the current independent-context boundary:
+  `20260803T070043399Z-3e852de-trial-01`, commit
+  `3e852deb61063ed7ac9b797553a1e845f69bd779`, executable SHA-256
+  `45E8ABF21609FA3333B248DFEE949B96B0E473FC7D95A826892E9A46A01F816E`.
+  Audio diagnostics and the existing per-run memory-diagnostics stream were
+  enabled. The runner stopped at the unchanged physical-headroom boundary;
+  raw diagnostics remain outside Git.
 
 Raw target assets, traces, logs, manifests, source samples, movie fingerprints,
 and target paths remain outside Git.
@@ -405,6 +415,36 @@ between embedded movie audio and other guest audio are now the next audio
 frontier. They must be traced separately from the grey/black/flashing rendering
 problem and from the general low-FPS condition.
 
+The subsequent attended scalar-diagnostic pilot reached only the grey interval.
+The maintainer reported the same audible behavior through that point as in the
+first listening run: the first PlayStation Studios audio was not stretched but
+contained persistent noise, and a similar intermittent sound continued over the
+grey interval before the earlier logo tail had finished. The later host movies,
+including `attract_movie.bk2` and `logo_intro.bk2`, were not reached in this
+pilot, so their audible owner remains unresolved.
+
+The scalar records establish a narrower ownership result for the reached route:
+
+- Movie stream 2, owner `movie`, generation 1, decoded 408,960 source frames,
+  converted and submitted all 408,960 output frames, and rejected none. Source
+  PTS ran from `0` to `8.48` seconds; the submitted local audio progress reached
+  `8.52` seconds. Demux EOF, decoder EOF, resampler drain, codec drain, host
+  drain, and disposal all completed without a failure reason.
+- The movie stream recorded one temporary underrun totaling approximately
+  721 ms. Its bounded PCM windows had a maximum peak of approximately `0.58`,
+  RMS of `0.19`, and zero clipping. These scalar values do not establish
+  recognizable or noise-free physical audio.
+- The movie stream was disposed after generation 1 completed. Guest AudioOut2
+  stream 1 and guest AudioOut stream 3 remained active and continued submitting
+  after that disposal, with no rejected submissions. They are candidates for
+  the grey-interval sound, but scalar activity alone cannot identify which one
+  was audible.
+- The runner stopped after approximately 89.493 seconds at 1.990 GiB available
+  physical memory against the unchanged 2 GiB floor. Peak working set was
+  8.157 GiB, peak private memory 13.866 GiB, and minimum commit headroom
+  24.543 GiB. No confirmation run is justified after this falsifying safety
+  result.
+
 ## Evaluated alternatives
 
 ### A. Decode-and-discard late video output — falsified on target
@@ -481,8 +521,10 @@ conversion storage plus packet/sample limits provide the retained-state bound.
 The first attended target run showed the intended temporal improvement and
 later/menu progression, but direct listening found persistent noise, replayed
 or intermittent sound over the grey interval, severe logo-intro noise, and
-sound during the audio-less `attract_movie.bk2`. Scalar attribution has not
-yet been run, so this model remains selected for investigation but is not an
+sound during the audio-less `attract_movie.bk2`. The subsequent scalar pilot
+showed that the reached PS Studios stream can decode, submit, drain, and dispose
+cleanly, while guest streams remain active afterward; it did not reach the
+later assets. This model remains selected for investigation but is not an
 accepted audio correction.
 
 ### C. Unbounded decoded-frame or packet queue
@@ -598,14 +640,15 @@ history and is not production code.
   device/decoder failure must be tied to explicit host error/state transitions,
   not an arbitrary elapsed-time guess.
 - The probe's process deltas are scalar host measurements, not a decomposition
-  of every FFmpeg allocator or device-driver allocation. The target pilot must
-  measure the complete emulator process while the movie runs.
-- The selected implementation has one attended retail listening run, but its
-  audible result is not correct enough to accept: the first logo has noisy
-  artifacts, the grey interval has intermittent/replayed sound, and later
-  movies have noisy or intermittent output. The run reached the main menu and
-  the offline path but not Character Creation; the unchanged physical-memory
-  boundary also prevented a safe confirmation run.
+  of every FFmpeg allocator or device-driver allocation. The attended pilot
+  measured the complete emulator process, but crossed the unchanged physical
+  headroom floor before later movie ownership could be tested.
+- The selected implementation has one attended listening run and one attended
+  scalar-diagnostic pilot, but its audible result is not correct enough to
+  accept: the first logo has noisy artifacts and the grey interval has
+  intermittent/replayed sound. The first run reached the main menu and offline
+  path but not Character Creation; the second reached only grey. The unchanged
+  physical-memory boundary prevents safe confirmation runs.
 - The earlier one-demux pilots did not reach main-menu progression and remain
   no evidence about the selected model. The selected model reached later host
   movies and menu audio once, but still lacks comparable confirmation and a
@@ -659,13 +702,14 @@ git diff --check
 ```
 
 Shader verification is unnecessary because this change touches no shader or
-GPU semantics. Retail target confirmations are still pending; the earlier
-one-demux pilots are not evidence against this separately bounded model.
+GPU semantics. Retail target confirmations remain unjustified after the current
+pilot's physical-headroom boundary; the earlier one-demux pilots are not
+evidence against this separately bounded model.
 
 Verification completed before retail target launch:
 
-- focused media suite: 68 passed;
-- complete solution suite: 883 passed;
+- focused media and audio suite: 135 passed;
+- complete solution suite: 897 passed;
 - Fast verification passed, including the target-memory, VMMap, runner
   supervision, Release build, and complete solution test gates;
 - `git diff --check` passed;
