@@ -12,11 +12,22 @@ Control theme for the shared launcher settings row.
     <Setter Property="Template">
       <ControlTemplate>
         <Border x:Name="PART_RowSurface"
+                Classes="settingRowSurface"
                 Background="#06FFFFFF"
                 BorderBrush="#0AFFFFFF"
                 BorderThickness="1"
                 CornerRadius="14"
                 Padding="18,12">
+          <Border.Transitions>
+            <Transitions>
+              <BrushTransition Property="Background"
+                               Duration="0:0:0.18"
+                               Easing="CubicEaseOut" />
+              <BrushTransition Property="BorderBrush"
+                               Duration="0:0:0.18"
+                               Easing="CubicEaseOut" />
+            </Transitions>
+          </Border.Transitions>
           <Grid ColumnDefinitions="*,Auto">
             <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
               <TextBlock x:Name="PART_Label"
@@ -28,7 +39,7 @@ Control theme for the shared launcher settings row.
               <TextBlock Text="{TemplateBinding Description}"
                          FontSize="11"
                          FontWeight="Normal"
-                         Foreground="{StaticResource MutedBrush}"
+                         Foreground="{StaticResource SettingsDescriptionBrush}"
                          LineHeight="16"
                          MaxWidth="690"
                          HorizontalAlignment="Left"
@@ -37,20 +48,9 @@ Control theme for the shared launcher settings row.
                          IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
                                      Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
             </StackPanel>
-            <StackPanel Grid.Column="1"
-                        Orientation="Horizontal"
-                        Spacing="12"
-                        VerticalAlignment="Center">
-              <ToggleSwitch OnContent="Override"
-                            OffContent="Override"
-                            MinWidth="0"
-                            VerticalAlignment="Center"
-                            IsVisible="{TemplateBinding ShowOverride}"
-                            IsChecked="{Binding IsOverridden, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" />
-              <ContentPresenter x:Name="PART_Slot"
-                                Content="{TemplateBinding Content}"
-                                VerticalAlignment="Center" />
-            </StackPanel>
+            <ContentPresenter Grid.Column="1"
+                              Content="{TemplateBinding Content}"
+                              VerticalAlignment="Center" />
           </Grid>
         </Border>
       </ControlTemplate>

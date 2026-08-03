@@ -918,15 +918,8 @@ public static class KernelPthreadCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
                     }
 
-                    // Several Gen5 runtimes layer their own owner/count bookkeeping
-                    // over a NORMAL kernel mutex. Returning EDEADLK here
-                    // leaves that guest bookkeeping out of sync with the HLE owner and
-                    // turns the wrapper into a permanent lock/unlock retry loop. Keep
-                    // the compatibility recursion used by the original implementation;
-                    // ERRORCHECK mutexes still take the strict EDEADLK path below.
-                    state.RecursionCount++;
-                    TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
-                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                    TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
                 }
                 else
                 {
@@ -1264,15 +1257,15 @@ public static class KernelPthreadCompatExports
             return CreateImplicitMutexState(ctx, mutexAddress, MutexTypeAdaptiveNp, out resolvedAddress, out state);
         }
 
+        if (pointedHandle != 0 && pointedHandle != mutexAddress && _mutexStates.TryGetValue(pointedHandle, out state))
+        {
+            _mutexStates[mutexAddress] = state;
+            resolvedAddress = pointedHandle;
+            return true;
+        }
+
         if (pointedHandle != 0)
         {
-            if (_mutexStates.TryGetValue(pointedHandle, out state))
-            {
-                _mutexStates.TryAdd(mutexAddress, state);
-                resolvedAddress = pointedHandle;
-                return true;
-            }
-
             resolvedAddress = pointedHandle;
             return false;
         }

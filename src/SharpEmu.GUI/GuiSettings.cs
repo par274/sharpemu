@@ -40,6 +40,8 @@ public sealed class GuiSettings
     /// <summary>Loop the selected game's sce_sys/snd0.at9 preview music.</summary>
     public bool PlayTitleMusic { get; set; } = true;
 
+    public string LibraryLayout { get; set; } = "Carousel";
+
     public string? EmulatorPath { get; set; }
 
     /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
@@ -135,6 +137,7 @@ public sealed class GuiSettings
         {
             settings.RenderResolutionScale = 1.0;
         }
+        settings.LibraryLayout = NormalizeChoice(settings.LibraryLayout, "Carousel", "Grid");
         settings.WindowMode = NormalizeChoice(settings.WindowMode, "Windowed", "Borderless", "Exclusive");
         settings.Resolution = NormalizeResolution(settings.Resolution);
         settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");

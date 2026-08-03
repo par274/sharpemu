@@ -99,6 +99,15 @@ public static class NpTrophy2Exports
     public static int NpTrophy2GetTrophyInfo(CpuContext ctx) =>
         SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
 
+    [SysAbiExport(
+        Nid = "y3zHpdZO6ME",
+        ExportName = "sceNpTrophy2GetTrophyInfoArray",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpTrophy2")]
+    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx) =>
+        SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+
+
     private static int WriteIdAndReturn(CpuContext ctx, ulong outAddress, ref int nextId)
     {
         if (outAddress == 0)

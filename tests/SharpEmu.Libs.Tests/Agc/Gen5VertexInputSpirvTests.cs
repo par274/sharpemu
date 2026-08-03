@@ -114,6 +114,96 @@ public sealed class Gen5VertexInputSpirvTests
         }
     }
 
+    [Fact]
+    public void AliasedFetchInstructionsShareOneAttributeLocation()
+    {
+        // Metal caps a vertex function at 31 attributes, so every fetch that
+        // reads one guest stream view must resolve to that view's single
+        // location instead of declaring its own.
+        var firstFetch = CreateVertexFetch(0);
+        var secondFetch = CreateVertexFetch(4);
+        var end = new Gen5ShaderInstruction(
+            8,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [],
+            [],
+            [],
+            null);
+        var state = new Gen5ShaderState(
+            new Gen5ShaderProgram(0, [firstFetch, secondFetch, end]),
+            [],
+            null);
+        var registers = new uint[256];
+        var data = new byte[16];
+        var evaluation = new Gen5ShaderEvaluation(
+            registers,
+            registers,
+            [],
+            [],
+            VertexInputs:
+            [
+                new Gen5VertexInputBinding(
+                    0,
+                    0,
+                    4,
+                    10,
+                    0,
+                    0x1000,
+                    4,
+                    0,
+                    data,
+                    data.Length,
+                    DataPooled: false,
+                    AliasPcs: [4u]),
+            ]);
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileVertexShader(
+                state,
+                evaluation,
+                out var shader,
+                out var error),
+            error);
+
+        var module = ParseModule(shader.Spirv);
+        var locations = module
+            .Where(candidate =>
+                candidate.Opcode == SpirvOp.Decorate &&
+                candidate.Operands.Length >= 3 &&
+                candidate.Operands[1] == (uint)SpirvDecoration.Location)
+            .ToArray();
+        var inputVariable = Assert.Single(locations).Operands[0];
+
+        // Both fetches must read that variable; an unaliased second fetch would
+        // fall through to the generic buffer path and leave only one load.
+        Assert.Equal(
+            2,
+            module.Count(candidate =>
+                candidate.Opcode == SpirvOp.Load &&
+                candidate.Operands.Length >= 3 &&
+                candidate.Operands[2] == inputVariable));
+    }
+
+    private static Gen5ShaderInstruction CreateVertexFetch(uint pc) =>
+        new(
+            pc,
+            Gen5ShaderEncoding.Mubuf,
+            "BufferLoadFormatXyzw",
+            [],
+            [],
+            [],
+            new Gen5BufferMemoryControl(
+                4,
+                5,
+                0,
+                0,
+                0,
+                IndexEnabled: true,
+                OffsetEnabled: false,
+                Glc: false,
+                Slc: false));
+
     private static IReadOnlyList<ParsedInstruction> ParseModule(byte[] spirv)
     {
         var instructions = new List<ParsedInstruction>();

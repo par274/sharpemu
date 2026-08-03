@@ -48,6 +48,8 @@ internal static partial class Program
     {
         ConfigureManagedPluginResolution();
 
+        SharpEmu.Libs.VideoOut.RenderDocCapture.Initialize();
+
         try
         {
             return Run(args);

@@ -5,7 +5,7 @@ using System.Buffers;
 using FFmpeg.AutoGen;
 using SharpEmu.HLE.Host;
 
-namespace SharpEmu.Libs.Bink;
+namespace SharpEmu.Libs.Media;
 
 /// <summary>
 /// Decodes a .bk2 (or any FFmpeg-readable movie) directly via FFmpeg's C API
@@ -13,7 +13,7 @@ namespace SharpEmu.Libs.Bink;
 /// libraries published by github.com/sharpemu/ffmpeg-core -- no native C
 /// bridge of our own to build. See docs/bink2-bridge.md.
 /// </summary>
-internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
+internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
 {
     private const int OutputAudioChannels = 2;
     private const int OutputAudioBytesPerSample = sizeof(short);
@@ -48,7 +48,7 @@ internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
 
     public uint FramesPerSecondDenominator { get; }
 
-    private FfmpegNativeBinkFrameSource(
+    private FfmpegVideoDecoder(
         AVFormatContext* formatContext,
         AVCodecContext* codecContext,
         int videoStreamIndex,
@@ -77,43 +77,14 @@ internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
         _packet = ffmpeg.av_packet_alloc();
     }
 
-    private static bool _rootPathInitialized;
-
-    /// <summary>
-    /// Points FFmpeg.AutoGen at the FFmpeg shared libraries SharpEmu.CLI
-    /// downloads next to the executable (see SharpEmu.CLI.csproj's
-    /// FetchFfmpegRuntime target); kept as loose files rather than embedded
-    /// in the single-file bundle so the OS loader can resolve the normal
-    /// inter-library dependencies (avcodec depends on avutil, etc.) itself.
-    /// </summary>
-    private static void EnsureRootPathInitialized()
-    {
-        if (_rootPathInitialized)
-        {
-            return;
-        }
-
-        _rootPathInitialized = true;
-        // SharpEmu.CLI.csproj publishes FFmpeg's shared libraries into a
-        // "plugins" subfolder next to the executable rather than flat beside
-        // it (see NativeLibraryFolderName in SharpEmu.CLI.csproj).
-        ffmpeg.RootPath = Path.Combine(AppContext.BaseDirectory, "plugins");
-
-        // ffmpeg's static constructor runs DynamicallyLoadedBindings.Initialize()
-        // itself, but that constructor fires on first touch of the ffmpeg type --
-        // which is the RootPath assignment above -- so it binds against the
-        // default (empty) RootPath before the assignment's own setter body runs.
-        // Every function resolved during that first pass permanently throws
-        // NotSupportedException. Re-running Initialize() now, with RootPath
-        // actually set, rebinds everything against the real search path.
-        DynamicallyLoadedBindings.Initialize();
-    }
+    private static void EnsureRootPathInitialized() =>
+        SharpEmu.Libs.Media.FfmpegRuntime.EnsureInitialized();
 
     internal static bool TryOpen(
         string path,
         uint maximumWidth,
         uint maximumHeight,
-        out FfmpegNativeBinkFrameSource? source)
+        out FfmpegVideoDecoder? source)
     {
         source = null;
         EnsureRootPathInitialized();
@@ -222,7 +193,7 @@ internal sealed unsafe class FfmpegNativeBinkFrameSource : IBinkFrameDecoder
                 outputHeight = Math.Max(1, outputHeight);
             }
 
-            source = new FfmpegNativeBinkFrameSource(
+            source = new FfmpegVideoDecoder(
                 formatContext,
                 codecContext,
                 videoStreamIndex,

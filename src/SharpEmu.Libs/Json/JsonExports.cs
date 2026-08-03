@@ -324,6 +324,37 @@ public static class JsonExports
     }
 
     [SysAbiExport(
+        Nid = "wLsJlmgEIaI",
+        ExportName = "_ZN3sce4Json5Value10referValueERKNS0_6StringE",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int ValueReferValue(CpuContext ctx)
+    {
+        var thisAddress = ctx[CpuRegister.Rdi];
+        var keyStringAddress = ctx[CpuRegister.Rsi];
+
+        if (thisAddress == 0 ||
+            !_strings.TryGetValue(keyStringAddress, out var keyState) ||
+            !TryAllocateGuestObject(ctx, ValueObjectSize, out var childAddress))
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return 0;
+        }
+
+        var parent = GetValue(thisAddress);
+
+        var child = parent.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                    parent.TryGetProperty(keyState.Value, out var property)
+                    ? property.Clone() : _nullElement;
+
+        StoreValue(ctx, childAddress, child);
+
+        ctx[CpuRegister.Rax] = childAddress;
+        TraceJsonText("Value.referValue", thisAddress, keyState.Value);
+        return 0;
+    }
+
+    [SysAbiExport(
         Nid = "zTwZdI8AZ5Y",
         ExportName = "_ZNK3sce4Json5Value10getBooleanEv",
         Target = Generation.Gen4 | Generation.Gen5,

@@ -9,6 +9,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ampr;
 
+[Collection("AmprFileRegistry")]
 public sealed class AprStreamingContractTests
 {
     [Fact]
@@ -316,6 +317,53 @@ public sealed class AprStreamingContractTests
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         Assert.True(memory.TryRead(address, bytes));
         return BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+    }
+
+    [Fact]
+    public void Register_AlsoPublishesApp0AndDollarPathAliases()
+    {
+        // Resolve may register "$/asset.bin" while cooked tables look up
+        // FNV("/app0/asset.bin"). Both ids must map to the same host file.
+        var hostPath = Path.Combine(Path.GetTempPath(), $"sharpemu-apr-alias-{Guid.NewGuid():N}.bin");
+        File.WriteAllBytes(hostPath, [1, 2, 3]);
+        try
+        {
+            var dollarId = AmprFileRegistry.Register("$/weapons/demo.cani", hostPath);
+            Assert.True(AmprFileRegistry.TryGetHostPath(dollarId, out var viaDollar));
+            Assert.Equal(hostPath, viaDollar);
+
+            var app0Id = AmprFileRegistry.ComputeFileId("/app0/weapons/demo.cani");
+            Assert.NotEqual(dollarId, app0Id);
+            Assert.True(AmprFileRegistry.TryGetHostPath(app0Id, out var viaApp0));
+            Assert.Equal(hostPath, viaApp0);
+        }
+        finally
+        {
+            File.Delete(hostPath);
+        }
+    }
+
+    [Fact]
+    public void EnsureApp0Indexed_PublishesCookedApp0FileIds()
+    {
+        var mountRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"sharpemu-apr-index-{Guid.NewGuid():N}");
+        var relativeDir = Path.Combine(mountRoot, "weapons");
+        Directory.CreateDirectory(relativeDir);
+        var hostPath = Path.Combine(relativeDir, "demo.cani");
+        File.WriteAllBytes(hostPath, [9, 8, 7]);
+        try
+        {
+            AmprFileRegistry.EnsureApp0Indexed(mountRoot);
+            var cookedId = AmprFileRegistry.ComputeFileId("/app0/weapons/demo.cani");
+            Assert.True(AmprFileRegistry.TryGetHostPath(cookedId, out var resolved));
+            Assert.Equal(Path.GetFullPath(hostPath), Path.GetFullPath(resolved));
+        }
+        finally
+        {
+            Directory.Delete(mountRoot, recursive: true);
+        }
     }
 
     private static ulong ReadUInt64(FakeCpuMemory memory, ulong address)

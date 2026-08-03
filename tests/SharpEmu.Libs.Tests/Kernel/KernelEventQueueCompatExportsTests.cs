@@ -156,7 +156,13 @@ public sealed class KernelEventQueueCompatExportsTests
         Assert.Equal(eventIdent, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x00..]));
         Assert.Equal(KernelEventQueueCompatExports.KernelEventFilterUser,
             BinaryPrimitives.ReadInt16LittleEndian(evt[0x08..]));
-        Assert.Equal(triggerData, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x10..]));
+
+        // sceKernelTriggerUserEvent's third argument is the event's *udata*, not
+        // its data word: the guest reads it back with sceKernelGetEventUserData,
+        // which loads offset 0x18. Routing the payload to data(0x10) instead left
+        // sceKernelGetEventUserData returning 0 for every triggered user event.
+        Assert.Equal(triggerData, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x18..]));
+        Assert.Equal(0UL, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x10..]));
     }
 
     private static ulong CreateEqueue()

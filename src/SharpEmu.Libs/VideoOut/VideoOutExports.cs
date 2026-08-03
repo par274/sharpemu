@@ -122,6 +122,8 @@ public static class VideoOutExports
                 : titleId.Trim();
             _applicationWindowTitle = $"{application}{versionSuffix}";
         }
+
+        RenderDocCapture.SetCaptureDirectory(GetApplicationTitleId());
     }
 
     internal static string GetApplicationTitleId()
@@ -1298,10 +1300,12 @@ public static class VideoOutExports
         var submitted = Interlocked.Exchange(ref _submittedFrameCount, 0);
         var presentedCount = Interlocked.Exchange(ref _presentedFrameCount, 0);
         var (draws, drawMs, pipelines, spirvCompiles) = GuestGpu.Current.ReadAndResetPerfCounters();
+        var (poolLeases, poolCachedBytes) = SharpEmu.Libs.Gpu.GuestDataPool.DiagnosticStats();
         Console.Error.WriteLine(
             $"[LOADER][PERF] videoout submitted_fps={submitted / elapsedSeconds:F1} " +
             $"presented_fps={presentedCount / elapsedSeconds:F1} " +
-            $"draws={draws} draw_ms={drawMs:F0} pipelines={pipelines} spirv={spirvCompiles}");
+            $"draws={draws} draw_ms={drawMs:F0} pipelines={pipelines} spirv={spirvCompiles} " +
+            $"pool_leases={poolLeases} pool_cached_mb={poolCachedBytes / 1024.0 / 1024.0:F1}");
     }
 
     private static readonly bool _flipPacingDisabled = string.Equals(

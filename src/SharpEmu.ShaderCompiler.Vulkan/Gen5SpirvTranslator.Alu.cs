@@ -903,6 +903,22 @@ public static partial class Gen5SpirvTranslator
                         width);
                     break;
                 }
+                case "VBfeI32":
+                {
+                    // Same extract as VBfeU32 but sign-extended from the top bit
+                    // of the extracted field, so the result type must be signed
+                    // and bitcast back for storage.
+                    var width = BitwiseAnd(GetRawSource(instruction, 2), UInt(31));
+                    result = Bitcast(
+                        _uintType,
+                        _module.AddInstruction(
+                            SpirvOp.BitFieldSExtract,
+                            _intType,
+                            Bitcast(_intType, GetRawSource(instruction, 0)),
+                            BitwiseAnd(GetRawSource(instruction, 1), UInt(31)),
+                            width));
+                    break;
+                }
                 case "VBfiB32":
                 {
                     var mask = GetRawSource(instruction, 0);
@@ -2706,20 +2722,31 @@ public static partial class Gen5SpirvTranslator
 
                 if (applySdwaIntegerModifiers)
                 {
+                    // SDWA ABS/NEG are floating-point sign-bit modifiers even on
+                    // a bit-move opcode: ABS clears the sign bit, NEG flips it.
+                    // Two's-complement negating the raw bits instead turns 1.0
+                    // into -4.0 and -3.0 into 1.5, which silently skews every
+                    // pass that y-flips its clip position with an SDWA-negated
+                    // V_MOV_B32 - the whole of UE's DrawRectangle.
+                    var signBit = selector switch
+                    {
+                        <= 3 => 0x80u,
+                        4 or 5 => 0x8000u,
+                        _ => 0x80000000u,
+                    };
+
                     if ((sdwa.AbsoluteMask & (1u << sourceIndex)) != 0)
                     {
-                        value = Bitcast(
-                            _uintType,
-                            Ext(5, _intType, Bitcast(_intType, value)));
+                        value = BitwiseAnd(value, UInt(~signBit));
                     }
 
                     if ((sdwa.NegateMask & (1u << sourceIndex)) != 0)
                     {
                         value = _module.AddInstruction(
-                            SpirvOp.ISub,
+                            SpirvOp.BitwiseXor,
                             _uintType,
-                            UInt(0),
-                            value);
+                            value,
+                            UInt(signBit));
                     }
                 }
             }

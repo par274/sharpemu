@@ -8,7 +8,13 @@ namespace SharpEmu.Libs.Font;
 
 public static class FontExports
 {
+    private const ushort GlyphMagic = 0x0F03;
+    private const int GlyphSize = 0x100;
+    private const int GlyphMetricsSize = 8 * sizeof(float);
+    private const int RenderOutputSize = 0x40;
+
     private static readonly object AllocationGate = new();
+    private static readonly Stack<ulong> FreeGlyphs = new();
     private static ulong _librarySelectionAddress;
     private static ulong _rendererSelectionAddress;
 
@@ -319,6 +325,151 @@ public static class FontExports
         }
 
         return SetSuccess(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "C-4Qw5Srlyw",
+        ExportName = "sceFontGenerateCharGlyph",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GenerateCharGlyph(CpuContext ctx)
+    {
+        var outputAddress = ctx[CpuRegister.Rcx];
+        if (outputAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!TryRentGlyph(ctx, out var glyph) ||
+            !ctx.TryWriteUInt64(outputAddress, glyph))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return SetSuccess(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "8-zmgsxkBek",
+        ExportName = "sceFontGlyphDefineAttribute",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int GlyphDefineAttribute(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "LHDoRWVFGqk",
+        ExportName = "sceFontDeleteGlyph",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int DeleteGlyph(CpuContext ctx)
+    {
+        var glyphPointerAddress = ctx[CpuRegister.Rsi];
+        if (glyphPointerAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!ctx.TryReadUInt64(glyphPointerAddress, out var glyph))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (glyph != 0)
+        {
+            lock (AllocationGate)
+            {
+                FreeGlyphs.Push(glyph);
+            }
+        }
+
+        return ctx.TryWriteUInt64(glyphPointerAddress, 0)
+            ? SetSuccess(ctx)
+            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "kAenWy1Zw5o",
+        ExportName = "sceFontRenderCharGlyphImageHorizontal",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int RenderCharGlyphImageHorizontal(CpuContext ctx)
+    {
+        var metricsAddress = ctx[CpuRegister.Rcx];
+        var resultAddress = ctx[CpuRegister.R8];
+
+        if (metricsAddress != 0)
+        {
+            var values = new[] { 8.0f, 16.0f, 0.0f, 12.0f, 8.0f, 0.0f, 0.0f, 16.0f };
+            for (var index = 0; index < values.Length; index++)
+            {
+                if (!TryWriteUInt32(
+                        ctx,
+                        metricsAddress + (ulong)(index * sizeof(float)),
+                        BitConverter.SingleToUInt32Bits(values[index])))
+                {
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+            }
+        }
+
+        if (resultAddress != 0)
+        {
+            Span<byte> cleared = stackalloc byte[RenderOutputSize];
+            cleared.Clear();
+            if (!ctx.Memory.TryWrite(resultAddress, cleared))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        return SetSuccess(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "vzHs3C8lWJk",
+        ExportName = "sceFontCloseFont",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int CloseFont(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "1QjhKxrsOB8",
+        ExportName = "sceFontUnbindRenderer",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int UnbindRenderer(CpuContext ctx) => SetSuccess(ctx);
+
+    [SysAbiExport(
+        Nid = "exAxkyVLt0s",
+        ExportName = "sceFontDestroyRenderer",
+        Target = Generation.Gen5,
+        LibraryName = "libSceFont")]
+    public static int DestroyRenderer(CpuContext ctx)
+    {
+        var rendererPointerAddress = ctx[CpuRegister.Rdi];
+        if (rendererPointerAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        return ctx.TryWriteUInt64(rendererPointerAddress, 0)
+            ? SetSuccess(ctx)
+            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    private static bool TryRentGlyph(CpuContext ctx, out ulong glyph)
+    {
+        lock (AllocationGate)
+        {
+            if (FreeGlyphs.Count > 0)
+            {
+                glyph = FreeGlyphs.Pop();
+                return TryWriteUInt16(ctx, glyph, GlyphMagic);
+            }
+        }
+
+        return TryAllocateOpaque(ctx, GlyphSize, out glyph) &&
+               TryWriteUInt16(ctx, glyph, GlyphMagic);
     }
 
     private static int ReturnSelection(CpuContext ctx, ref ulong selectionAddress, uint objectSize)

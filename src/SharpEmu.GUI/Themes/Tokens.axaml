@@ -10,25 +10,23 @@ Shared colors and brushes used throughout the launcher.
 
   <Color x:Key="SystemAccentColor">#7C5CFC</Color>
 
-  <LinearGradientBrush x:Key="BgBrush" StartPoint="0%,0%" EndPoint="100%,100%">
-    <GradientStop Offset="0" Color="#12151F" />
-    <GradientStop Offset="0.55" Color="#0D1017" />
-    <GradientStop Offset="1" Color="#0B0D14" />
-  </LinearGradientBrush>
-
-  <SolidColorBrush x:Key="ChromeBrush" Color="#090C12" />
-  <SolidColorBrush x:Key="CardBrush" Color="#141924" />
-  <SolidColorBrush x:Key="CardBorderBrush" Color="#232B3A" />
-  <SolidColorBrush x:Key="ElevatedBrush" Color="#1B2230" />
-  <SolidColorBrush x:Key="TextBrush" Color="#E8ECF4" />
-  <SolidColorBrush x:Key="MutedBrush" Color="#8B94A7" />
-  <SolidColorBrush x:Key="FaintBrush" Color="#5A6478" />
+  <SolidColorBrush x:Key="BgBrush" Color="#0C0C0C" />
+  <SolidColorBrush x:Key="ChromeBrush" Color="#070707" />
+  <SolidColorBrush x:Key="CardBrush" Color="#161616" />
+  <SolidColorBrush x:Key="CardBorderBrush" Color="#12FFFFFF" />
+  <SolidColorBrush x:Key="ElevatedBrush" Color="#1E1E1E" />
+  <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#1B1B1B" />
+  <SolidColorBrush x:Key="TextBrush" Color="#F7F8FB" />
+  <SolidColorBrush x:Key="SecondaryTextBrush" Color="#C0C5CF" />
+  <SolidColorBrush x:Key="MutedBrush" Color="#777F8E" />
+  <SolidColorBrush x:Key="SettingsDescriptionBrush" Color="#8A8A8A" />
+  <SolidColorBrush x:Key="FaintBrush" Color="#4D5461" />
   <SolidColorBrush x:Key="AccentBrush" Color="#7C5CFC" />
   <SolidColorBrush x:Key="AccentHoverBrush" Color="#8F73FF" />
-  <SolidColorBrush x:Key="DangerBrush" Color="#E5484D" />
-  <SolidColorBrush x:Key="DangerHoverBrush" Color="#F2555A" />
-  <SolidColorBrush x:Key="SuccessBrush" Color="#46C46B" />
-  <SolidColorBrush x:Key="InfoBrush" Color="#58A6FF" />
-  <SolidColorBrush x:Key="TileHoverBrush" Color="#1A2130" />
-  <SolidColorBrush x:Key="TileSelectedBrush" Color="#212A3F" />
+  <SolidColorBrush x:Key="DangerBrush" Color="#FF646E" />
+  <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF858D" />
+  <SolidColorBrush x:Key="SuccessBrush" Color="#66F2A3" />
+  <SolidColorBrush x:Key="InfoBrush" Color="#64A7FF" />
+  <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
+  <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
 </ResourceDictionary>

@@ -43,6 +43,23 @@ Shared launcher button variants and page switcher styles.
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
+  <Style Selector="Button.iconGhost">
+    <Setter Property="Width" Value="32" />
+    <Setter Property="Height" Value="32" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
   <Style Selector="ToggleButton.ghost">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />

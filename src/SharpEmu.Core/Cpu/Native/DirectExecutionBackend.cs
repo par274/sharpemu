@@ -344,6 +344,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private bool _logAllImports;
 
+	private bool _logImportPeriodic;
+
 	private bool _logImportFrames;
 
 	private bool _logImportRecent;
@@ -1161,6 +1163,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_logFiber = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_FIBER"), "1", StringComparison.Ordinal);
 		_logBootstrap = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_BOOTSTRAP"), "1", StringComparison.Ordinal);
 		_logAllImports = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_ALL_IMPORTS"), "1", StringComparison.Ordinal);
+		// Periodic Import# spam (every 100k, early bands, NID samples) is on
+		// only when explicitly requested — default stderr traffic was a measurable tax.
+		_logImportPeriodic = string.Equals(
+			Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMPORT_PERIODIC"),
+			"1",
+			StringComparison.Ordinal);
 		_logImportFrames = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMPORT_FRAMES"), "1", StringComparison.Ordinal);
 		_logImportRecent = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMPORT_RECENT"), "1", StringComparison.Ordinal);
 		_logStackCheck = string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_STACK_CHK"), "1", StringComparison.Ordinal);

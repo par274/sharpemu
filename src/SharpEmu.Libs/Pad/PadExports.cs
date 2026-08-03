@@ -373,6 +373,42 @@ public static class PadExports
         return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    // Size taken from the caller's own frame rather than assumed: the guest
+    // reserves 0x10 bytes, points the out-param at rbp-0x30, and stores its
+    // stack cookie at rbp-0x28, so only eight bytes belong to the state. A
+    // sixteen-byte write would land on the cookie and fail the stack check.
+    private const int TriggerEffectStateSize = 8;
+
+    [SysAbiExport(
+        Nid = "znaWI0gpuo8",
+        ExportName = "scePadGetTriggerEffectState",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadGetTriggerEffectState(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var stateAddress = ctx[CpuRegister.Rsi];
+        if (!IsPrimaryPadHandle(handle))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (stateAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // No host pad exposes DualSense adaptive-trigger feedback, so every
+        // trigger reports the neutral "no effect engaged" state. Reporting it
+        // as success is what lets the caller take its normal path instead of
+        // falling back to a cached button bitmask every poll.
+        Span<byte> state = stackalloc byte[TriggerEffectStateSize];
+        state.Clear();
+        return ctx.Memory.TryWrite(stateAddress, state)
+            ? ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
     private static HostAdaptiveTriggerEffect DecodeTriggerEffect(ReadOnlySpan<byte> command)
     {
         var mode = BinaryPrimitives.ReadUInt32LittleEndian(command);

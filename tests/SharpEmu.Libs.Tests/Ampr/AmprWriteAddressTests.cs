@@ -8,6 +8,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ampr;
 
+[Collection("AmprFileRegistry")]
 public sealed class AmprWriteAddressTests
 {
     [Fact]

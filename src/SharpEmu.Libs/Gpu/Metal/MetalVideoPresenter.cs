@@ -646,6 +646,30 @@ internal static partial class MetalVideoPresenter
         var pixelSize = hostWindow.PixelSize;
         var width = (double)pixelSize.Width;
         var height = (double)pixelSize.Height;
+
+        // Retina hosts often present at 3840x2160 into a 1920x1080 window.
+        // Cap is opt-in: defaulting it on silently drops present resolution for
+        // every Metal title. SHARPEMU_METAL_CAP_DRAWABLE=1 enables the long-edge
+        // cap; SHARPEMU_METAL_FULL_DRAWABLE=1 remains a no-op when the cap is off.
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_METAL_CAP_DRAWABLE"),
+                "1",
+                StringComparison.Ordinal) &&
+            !string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_METAL_FULL_DRAWABLE"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            const double maxLongEdge = 1920.0;
+            var longEdge = Math.Max(width, height);
+            if (longEdge > maxLongEdge)
+            {
+                var scale = maxLongEdge / longEdge;
+                width = Math.Round(width * scale);
+                height = Math.Round(height * scale);
+            }
+        }
+
         if (width == _drawableWidth && height == _drawableHeight)
         {
             return;

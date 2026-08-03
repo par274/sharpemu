@@ -3,7 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
-using SharpEmu.Libs.Bink;
+using SharpEmu.Libs.Media;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -97,7 +97,7 @@ public static partial class KernelMemoryCompatExports
 
     private static readonly object _fdGate = new();
     private static readonly Dictionary<int, FileStream> _openFiles = new();
-    private static readonly Dictionary<int, Bink2MovieBridge.BinkGuestCompletionShim>
+    private static readonly Dictionary<int, HostMovieBridge.BinkGuestCompletionShim>
         _binkGuestCompletionShims = new();
     private static readonly Dictionary<int, string> _observedBinkGuestFiles = new();
     private static readonly Dictionary<int, OpenDirectory> _openDirectories = new();
@@ -117,17 +117,12 @@ public static partial class KernelMemoryCompatExports
     private static readonly Dictionary<string, string> _guestMounts = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> _tracedStatResults = new(StringComparer.Ordinal);
     // Both caches memoize host filesystem probe outcomes, so their key
-    // equivalence must match the host filesystem's: Windows resolves names
-    // case-insensitively, but Linux hosts are case-sensitive, and an
-    // ignore-case cache there aliases distinct paths — a cached miss for
-    // "/app0/DATA.BIN" keeps answering NOT_FOUND for "/app0/Data.bin" even
-    // though that file exists and a fresh probe would find it.
-    private static readonly StringComparer HostFsPathComparer =
-        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-    private static readonly StringComparison HostFsPathComparison =
-        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-    private static readonly HashSet<string> _negativeStatCache = new(HostFsPathComparer);
-    private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(HostFsPathComparer);
+    // equivalence must match the host filesystem's — see HostFsPath. On a
+    // case-sensitive host an ignore-case cache aliases distinct paths: a
+    // cached miss for "/app0/DATA.BIN" keeps answering NOT_FOUND for
+    // "/app0/Data.bin" even though that file exists.
+    private static readonly HashSet<string> _negativeStatCache = new(HostFsPath.Comparer);
+    private static readonly ConcurrentDictionary<string, ulong> _aprFileSizeCache = new(HostFsPath.Comparer);
     private static long _nextFileDescriptor = 2;
     private static string _applicationTitleId = "UNKNOWN";
 
@@ -1478,7 +1473,7 @@ public static partial class KernelMemoryCompatExports
         }
         try
         {
-            if (Bink2MovieBridge.ShouldSkipGuestMovie(hostPath))
+            if (HostMovieBridge.ShouldSkipGuestMovie(hostPath))
             {
                 LogOpenTrace(
                     "_open bink-skip path='" + guestPath + "' host='" + hostPath +
@@ -1489,10 +1484,10 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
             }
 
-            Bink2MovieBridge.BinkGuestCompletionShim binkCompletionShim = default;
+            HostMovieBridge.BinkGuestCompletionShim binkCompletionShim = default;
             var observedBinkMovie = false;
             var useBinkCompletionShim = access == FileAccess.Read &&
-                Bink2MovieBridge.TryTakeOverGuestMovie(
+                HostMovieBridge.TryTakeOverGuestMovie(
                     hostPath,
                     out binkCompletionShim,
                     out observedBinkMovie);
@@ -2227,7 +2222,7 @@ public static partial class KernelMemoryCompatExports
 
         if (notifyBinkClose)
         {
-            Bink2MovieBridge.NotifyGuestMovieClosed(observedBinkPath!);
+            HostMovieBridge.NotifyGuestMovieClosed(observedBinkPath!);
         }
         stream.Dispose();
         ctx[CpuRegister.Rax] = 0;
@@ -2256,7 +2251,7 @@ public static partial class KernelMemoryCompatExports
         }
 
         FileStream? stream;
-        Bink2MovieBridge.BinkGuestCompletionShim completionShim = default;
+        HostMovieBridge.BinkGuestCompletionShim completionShim = default;
         var useBinkCompletionShim = false;
         lock (_fdGate)
         {
@@ -2289,7 +2284,7 @@ public static partial class KernelMemoryCompatExports
             // logic can't race ahead of what's still on screen.
             if (completionShim.Patch(positionBefore, buffer.AsSpan(0, read)))
             {
-                Bink2MovieBridge.WaitForHostPlaybackToFinish(stream.Name);
+                HostMovieBridge.WaitForHostPlaybackToFinish(stream.Name);
             }
         }
         if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
@@ -3522,6 +3517,33 @@ public static partial class KernelMemoryCompatExports
             }
 
             _mappedRegionNames[region.Address] = name;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "mkgXxsoxWHg",
+        ExportName = "sceKernelClearVirtualRangeName",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelClearVirtualRangeName(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var length = ctx[CpuRegister.Rsi];
+
+        lock (_memoryGate)
+        {
+            if (!TryFindVirtualQueryRegionLocked(address, findNext: false, out var region) ||
+                length > region.Length ||
+                address < region.Address ||
+                length > region.Address + region.Length - address)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
+
+            _mappedRegionNames.Remove(region.Address);
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -5176,8 +5198,8 @@ public static partial class KernelMemoryCompatExports
         // host would let a relative path escape into a sibling directory that
         // differs from the mount root only by case (root ".../Save" vs
         // sibling ".../save").
-        if (!string.Equals(candidate, matchedHostRoot, HostFsPathComparison) &&
-            !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
+        if (!string.Equals(candidate, matchedHostRoot, HostFsPath.Comparison) &&
+            !candidate.StartsWith(rootWithSeparator, HostFsPath.Comparison))
         {
             return false;
         }
@@ -5278,8 +5300,8 @@ public static partial class KernelMemoryCompatExports
 
         var rootWithSeparator =
             Path.TrimEndingDirectorySeparator(fullRoot) + Path.DirectorySeparatorChar;
-        if (!string.Equals(candidate, fullRoot, HostFsPathComparison) &&
-            !candidate.StartsWith(rootWithSeparator, HostFsPathComparison))
+        if (!string.Equals(candidate, fullRoot, HostFsPath.Comparison) &&
+            !candidate.StartsWith(rootWithSeparator, HostFsPath.Comparison))
         {
             return string.Empty;
         }
@@ -5305,7 +5327,7 @@ public static partial class KernelMemoryCompatExports
     private static bool EscapesMountViaReparsePoint(string mountRoot, string candidate)
     {
         var rootTrimmed = Path.TrimEndingDirectorySeparator(mountRoot);
-        if (string.Equals(candidate, rootTrimmed, HostFsPathComparison))
+        if (string.Equals(candidate, rootTrimmed, HostFsPath.Comparison))
         {
             return false;
         }

@@ -24,8 +24,13 @@
   "Library.Empty.AddFolder": "＋ Добавить папку с играми",
 
   "Library.Loading": "Загрузка библиотеки…",
+  "Library.Stat.Version": "Версия",
+  "Library.Stat.Installed": "Установлено",
+  "Library.Stat.TitleId": "ID игры",
+  "Common.Back": "Назад",
 
   "Options.General": "Основные",
+  "Options.Logging": "Логгирование",
   "Options.Env.Tab": "Окружение",
   "Options.Section.Environment": "ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ",
   "Options.Env.Desc": "Параметры, передаваемые эмулятору как переменные окружения при запуске.",
@@ -37,6 +42,9 @@
   "Options.Env.LogDirectMemory.Desc": "Выводить в консоль выделения прямой памяти и ошибки выделения.\nИспользуйте, если игра аварийно завершает работу или закрывается при запуске.",
   "Options.Env.LogIo.Desc": "Выводить в консоль операции открытия и чтения файлов, а также разрешение путей.\nИспользуйте, если игра не может найти файлы данных при запуске.",
   "Options.Env.LogNp.Desc": "Выводить в консоль вызовы библиотеки NP (PlayStation Network).",
+  "Options.Env.Group.Debug": "Отладка",
+  "Options.Env.Group.General": "Общие",
+  "Options.Env.RenderDoc.Desc": "Загружает внутренний API RenderDoc, чтобы кадры можно было захватывать из эмулятора.\nНажмите F10 во время игры, чтобы захватить один кадр; захваты сохраняются в user/logs/capture_logs/<TITLE_ID>.\nТребует установленного RenderDoc. Замедляет GPU и подвешивает некоторые игры, поэтому оставьте выключенным, если не занимаетесь отладкой.",
   "Options.Env.GuestImageCpuSync.Desc": "Повторно загружать гостевые поверхности, которые переписывает собственный код ЦП игры.\nОбычно оставляйте выключенным. Включайте для игр, чьи отрисованные ЦП поверхности не попадают на экран.\nСнижает производительность и вызывает регрессии в некоторых играх, например в GTA V.",
   "Options.Section.Emulation": "ЭМУЛЯЦИЯ",
   "Options.Section.Logging": "ЛОГГИРОВАНИЕ",
@@ -117,12 +125,6 @@
   "Common.Save": "Сохранить",
   "Common.Cancel": "Отмена",
 
-  "PerGame.Title": "Настройки игры — {0} ({1})",
-  "PerGame.InheritNote": "Неотмеченные строки наследуют глобальные настройки.",
-  "PerGame.Tab.General": "Основные",
-  "PerGame.Tab.Graphics": "Графика",
-  "PerGame.EnvToggles.Label": "Переключатели окружения",
-  "PerGame.EnvToggles.Desc": "Переопределить глобальный набор переключателей SHARPEMU_* для этой игры.",
 
   "Console.Title": "КОНСОЛЬ",
   "Console.SearchWatermark": "Поиск...",

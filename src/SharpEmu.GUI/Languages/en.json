@@ -9,6 +9,8 @@
   "Library.SearchWatermark": "Search library…",
   "Library.AddFolder": "Add folder",
   "Library.OpenFile": "Open file…",
+  "Library.View.Grid": "Stacked view",
+  "Library.View.Carousel": "Row view",
 
   "Library.Context.Launch": "Launch",
   "Library.Context.OpenFolder": "Open game folder",
@@ -24,8 +26,13 @@
   "Library.Empty.AddFolder": "＋ Add game folder",
 
   "Library.Loading": "Loading library…",
+  "Library.Stat.Version": "Version",
+  "Library.Stat.Installed": "Installed",
+  "Library.Stat.TitleId": "Title ID",
+  "Common.Back": "Back",
 
   "Options.General": "General",
+  "Options.Logging": "Logging",
   "Options.Env.Tab": "Environment",
   "Options.Section.Environment": "ENVIRONMENT VARIABLES",
   "Options.Env.Desc": "Switches passed to the emulator as environment variables at launch.",
@@ -37,6 +44,9 @@
   "Options.Env.LogDirectMemory.Desc": "Log direct memory allocations and failures to the console.\nUse when a game aborts or exits during boot.",
   "Options.Env.LogIo.Desc": "Log file open, read, and path-resolve activity to the console.\nUse when a game cannot find its data files during boot.",
   "Options.Env.LogNp.Desc": "Log NP (PlayStation Network) library calls to the console.",
+  "Options.Env.Group.Debug": "Debug",
+  "Options.Env.Group.General": "General",
+  "Options.Env.RenderDoc.Desc": "Load the RenderDoc in-application API so frames can be captured from inside the emulator.\nPress F10 while the game runs to capture one frame; captures land in user/logs/capture_logs/<TITLE_ID>.\nRequires RenderDoc to be installed. Slows the GPU down and hangs some titles, so leave it off unless you are debugging.",
   "Options.Env.GuestImageCpuSync.Desc": "Re-upload guest surfaces the game's own CPU code rewrites.\nLeave off normally. Turn on for titles whose CPU-drawn surfaces never reach the screen.\nCosts performance and regresses some titles, such as GTA V.",
   "Options.DefaultProfile.Label": "Default profile name",
   "Options.DefaultProfile.Desc": "Name used when a game asks for text input. Defaults to Sharp.",
@@ -117,12 +127,6 @@
   "Common.Save": "Save",
   "Common.Cancel": "Cancel",
 
-  "PerGame.Title": "Per-game settings — {0} ({1})",
-  "PerGame.InheritNote": "Unchecked rows inherit the global defaults.",
-  "PerGame.Tab.General": "General",
-  "PerGame.Tab.Graphics": "Graphics",
-  "PerGame.EnvToggles.Label": "Environment toggles",
-  "PerGame.EnvToggles.Desc": "Override the global set of SHARPEMU_* switches for this game.",
 
   "Console.Title": "CONSOLE",
   "Console.SearchWatermark": "Search...",

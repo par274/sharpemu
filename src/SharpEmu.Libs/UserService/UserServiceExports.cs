@@ -144,16 +144,6 @@ public static class UserServiceExports
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
-    // Title-captured alias NID for the same username query.
-    #pragma warning disable SHEM004
-    [SysAbiExport(
-        Nid = "znaWI0gpuo8",
-        ExportName = "sceUserServiceGetUserName",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceUserService")]
-    public static int UserServiceGetUserNameAlt(CpuContext ctx) => UserServiceGetUserName(ctx);
-    #pragma warning restore SHEM004
-
     // Name not yet in ps5_names.txt and the NID was captured from titles; revisit when the symbol is catalogued.
     #pragma warning disable SHEM006
     [SysAbiExport(

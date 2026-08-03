@@ -712,6 +712,8 @@ public static partial class Gen5SpirvTranslator
             if (UsesSubgroupOperations())
             {
                 _module.AddCapability(SpirvCapability.GroupNonUniform);
+                _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
+
                 if (UsesSubgroupShuffle())
                 {
                     _module.AddCapability(SpirvCapability.GroupNonUniformShuffle);
@@ -722,10 +724,6 @@ public static partial class Gen5SpirvTranslator
                     _module.AddCapability(SpirvCapability.GroupNonUniformVote);
                 }
 
-                if (UsesSubgroupBroadcast() || UsesWaveControl())
-                {
-                    _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
-                }
             }
 
             _glsl = _module.ImportExtInst("GLSL.std.450");
@@ -1365,14 +1363,18 @@ public static partial class Gen5SpirvTranslator
                     variable,
                     SpirvDecoration.Location,
                     input.Location);
-                _vertexInputsByPc.TryAdd(
-                    input.Pc,
-                    new SpirvVertexInput(
-                        variable,
-                        type,
-                        componentType,
-                        input.ComponentCount,
-                        componentKind));
+                var vertexInput = new SpirvVertexInput(
+                    variable,
+                    type,
+                    componentType,
+                    input.ComponentCount,
+                    componentKind);
+                _vertexInputsByPc.TryAdd(input.Pc, vertexInput);
+                foreach (var aliasPc in input.AliasPcs ?? [])
+                {
+                    _vertexInputsByPc.TryAdd(aliasPc, vertexInput);
+                }
+
                 _interfaces.Add(variable);
             }
         }
@@ -1799,13 +1801,16 @@ public static partial class Gen5SpirvTranslator
 
             if (instruction.Opcode == "SBarrier")
             {
-                var workgroup = UInt(2);
-                var semantics = UInt(0x108);
-                _module.AddStatement(
-                    SpirvOp.ControlBarrier,
-                    workgroup,
-                    workgroup,
-                    semantics);
+                if (_stage == Gen5SpirvStage.Compute)
+                {
+                    var workgroup = UInt(2);
+                    var semantics = UInt(0x108);
+                    _module.AddStatement(
+                        SpirvOp.ControlBarrier,
+                        workgroup,
+                        workgroup,
+                        semantics);
+                }
                 return true;
             }
 

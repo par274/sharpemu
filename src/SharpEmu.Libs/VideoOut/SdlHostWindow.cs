@@ -487,6 +487,10 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             {
                 PerfOverlay.Toggle();
             }
+            else if (keyEvent.key == SDL_Keycode.SDLK_F10)
+            {
+                RenderDocCapture.RequestCapture();
+            }
             else if (keyEvent.key == SDL_Keycode.SDLK_F11)
             {
                 ToggleFullscreen();

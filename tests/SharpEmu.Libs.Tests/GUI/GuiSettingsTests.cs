@@ -61,6 +61,19 @@ public sealed class GuiSettingsTests
         Assert.Equal(1000, settings.RefreshRate);
     }
 
+    [Theory]
+    [InlineData("""{ }""", "Carousel")]
+    [InlineData("""{ "LibraryLayout": null }""", "Carousel")]
+    [InlineData("""{ "LibraryLayout": "sideways" }""", "Carousel")]
+    [InlineData("""{ "LibraryLayout": "grid" }""", "Grid")]
+    [InlineData("""{ "LibraryLayout": "Grid" }""", "Grid")]
+    public void NormalizeFromJson_LibraryLayout_FallsBackToCarousel(string json, string expected)
+    {
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.Equal(expected, settings.LibraryLayout);
+    }
+
     [Fact]
     public void NormalizeFromJson_CustomResolution_IsPreserved()
     {
