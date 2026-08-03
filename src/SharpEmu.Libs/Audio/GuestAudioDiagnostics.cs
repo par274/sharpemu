@@ -189,14 +189,17 @@ internal readonly record struct GuestAudioSkipObservation(
 /// </summary>
 internal sealed class GuestAudioBufferTrace
 {
+    private const int MaxSignalTransitionEmissions = 8;
     private readonly object _gate = new();
     private long _sequence;
     private ulong _lastAddress;
     private int _lastByteLength;
     private ulong _lastFingerprint;
+    private bool _lastHasSignal;
     private bool _hasLast;
     private long _sameAddressCount;
     private long _sameContentCount;
+    private int _signalTransitionEmissions;
 
     internal GuestAudioBufferObservation Observe(
         ulong address,
@@ -231,9 +234,22 @@ internal sealed class GuestAudioBufferTrace
                 _sameContentCount++;
             }
 
+            var hasSignal = metrics.LeftPeak > 0 ||
+                            metrics.RightPeak > 0 ||
+                            metrics.OtherPeak > 0;
+            var signalTransition = !_hasLast || hasSignal != _lastHasSignal;
+            var contentTransition = hasSignal && !sameContent;
+            var emitTransition = (signalTransition || contentTransition) &&
+                                 _signalTransitionEmissions < MaxSignalTransitionEmissions;
+            if (emitTransition)
+            {
+                _signalTransitionEmissions++;
+            }
+
             _lastAddress = address;
             _lastByteLength = source.Length;
             _lastFingerprint = fingerprint;
+            _lastHasSignal = hasSignal;
             _hasLast = true;
             return new GuestAudioBufferObservation(
                 sequence,
@@ -245,7 +261,7 @@ internal sealed class GuestAudioBufferTrace
                 _sameAddressCount,
                 _sameContentCount,
                 metrics,
-                GuestAudioDiagnostics.ShouldEmit(sequence));
+                GuestAudioDiagnostics.ShouldEmit(sequence) || emitTransition);
         }
     }
 

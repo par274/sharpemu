@@ -124,6 +124,25 @@ public sealed class GuestAudioProducerDiagnosticsTests
     }
 
     [Fact]
+    public void BufferTraceEmitsBoundedSignalTransitionsBetweenSamples()
+    {
+        var trace = new GuestAudioBufferTrace();
+        byte[] silence = [0, 0, 0, 0];
+        byte[] signal = [0x10, 0x00, 0, 0];
+
+        trace.Observe(0x1000, silence, 1, 2, 2, isFloat: false);
+        trace.Observe(0x1000, silence, 1, 2, 2, isFloat: false);
+        trace.Observe(0x1000, silence, 1, 2, 2, isFloat: false);
+        trace.Observe(0x1000, silence, 1, 2, 2, isFloat: false);
+        var transition = trace.Observe(0x1000, signal, 1, 2, 2, isFloat: false);
+
+        Assert.Equal(5, transition.Sequence);
+        Assert.True(transition.Metrics.LeftPeak > 0);
+        Assert.Equal(0, transition.Metrics.RightPeak);
+        Assert.True(transition.Emit);
+    }
+
+    [Fact]
     public void SkippedObservationPreservesPendingStateWithoutFingerprinting()
     {
         var trace = new GuestAudioBufferTrace();
