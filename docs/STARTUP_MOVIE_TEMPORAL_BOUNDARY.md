@@ -485,3 +485,20 @@ git diff --check
 Shader verification is unnecessary because this change touches no shader or
 GPU semantics. Target validation is pending the controlled Release pilot and
 attended-run authorization.
+
+### Release pilot preflight
+
+The clean self-contained Windows Release artifact was published from commit
+`15f6944e283bd643e405a40c1d8d7b34a03015bb` on 2026-08-03. Its `SharpEmu.exe`
+SHA-256 is:
+
+```text
+F62A41247BD76A541964DD486477D9193A45BCDDAFE8AD4445E71D4FBD4A7880
+```
+
+The read-only preflight preserved target `PPSA01341`, Europe, `1.004.000`,
+and the expected eboot SHA-256 above. Windows reported automatic page-file
+management disabled and a 32,768 MiB page file; the configured runner limits
+remain 9 GiB working set, 2 GiB minimum available physical memory, and 4 GiB
+minimum commit headroom. No attended target run has been launched for this
+phase; the pilot is waiting for readiness authorization.
