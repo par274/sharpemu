@@ -490,7 +490,7 @@ public static class KernelExports
 
         if (bufferPtr == 0)
         {
-            ctx[CpuRegister.Rax] = unchecked((ulong)(uint)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
 
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
