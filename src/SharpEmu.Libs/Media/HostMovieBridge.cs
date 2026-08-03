@@ -406,7 +406,10 @@ internal static class HostMovieBridge
                 _activeMovieInstanceId,
                 _activeMovieGeneration);
         }
-        _playback = new MediaFramePlayback(decoder, _activeMovieInstanceId);
+        _playback = new MediaFramePlayback(
+            decoder,
+            _activeMovieInstanceId,
+            _activeMovieGeneration);
         MovieDiagnostics.Attach(
             hostPath,
             _activeMovieInstanceId,

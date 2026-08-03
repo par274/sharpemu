@@ -191,10 +191,8 @@ internal static class MovieDiagnostics
 
     internal static void Start(
         long instanceId,
-        double audioStartSeconds,
-        double audioSeconds,
-        bool audioRunning,
-        bool followGuestAudioClock)
+        MovieAudioProgress audioProgress,
+        MovieTimelineMode timelineMode)
     {
         if (!TryReserveEvent())
         {
@@ -205,22 +203,19 @@ internal static class MovieDiagnostics
         {
             movieInstanceId = instanceId,
             wallSeconds = 0d,
-            audioStartSeconds,
-            audioSeconds,
+            movieAudioSeconds = audioProgress.EstimatedPlayedSeconds,
             selectedPlaybackSeconds = 0d,
-            audioRunning,
-            followGuestAudioClock,
+            audioState = audioProgress.State.ToString(),
+            timelineMode = timelineMode.ToString(),
         });
     }
 
     internal static void Clock(
         long instanceId,
         double wallSeconds,
-        double guestAudioClockSeconds,
-        double audioSeconds,
+        MovieAudioProgress audioProgress,
         double selectedPlaybackSeconds,
-        bool audioRunning,
-        bool followGuestAudioClock,
+        MovieTimelineMode timelineMode,
         long currentFrameIndex,
         double mediaTimestampSeconds,
         long targetFrameIndex,
@@ -230,7 +225,12 @@ internal static class MovieDiagnostics
         long framesHeld,
         long framesSkipped,
         long framesRetired,
-        long framesDiscarded)
+        long framesDiscarded,
+        string pumpState,
+        long lateVideoFrameCount,
+        long retainedNextFrameCount,
+        long retainedPacketCount,
+        long retainedPacketBytes)
     {
         if (!TryReserveEvent())
         {
@@ -241,11 +241,10 @@ internal static class MovieDiagnostics
         {
             movieInstanceId = instanceId,
             wallSeconds,
-            guestAudioClockSeconds,
-            audioSeconds,
+            movieAudioSeconds = audioProgress.EstimatedPlayedSeconds,
             selectedPlaybackSeconds,
-            audioRunning,
-            followGuestAudioClock,
+            audioState = audioProgress.State.ToString(),
+            timelineMode = timelineMode.ToString(),
             currentFrameIndex,
             mediaTimestampSeconds,
             targetFrameIndex,
@@ -256,6 +255,11 @@ internal static class MovieDiagnostics
             framesSkipped,
             framesRetired,
             framesDiscarded,
+            pumpState,
+            lateVideoFrameCount,
+            retainedNextFrameCount,
+            retainedPacketCount,
+            retainedPacketBytes,
         });
     }
 
