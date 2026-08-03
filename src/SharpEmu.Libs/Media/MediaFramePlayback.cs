@@ -21,6 +21,11 @@ internal interface IMediaFrameDecoder : IDisposable
     bool TryDecodeNextFrame(Span<byte> destination, double movieSeconds);
 
     MediaPumpResult PumpAudioWhileVideoBackpressured(double movieSeconds);
+
+    /// <summary>
+    /// Movie time at which a retained future video frame can be reconsidered.
+    /// </summary>
+    double? NextVideoWakeupSeconds { get; }
 }
 
 internal enum MediaPumpResult
@@ -318,6 +323,21 @@ internal sealed class MediaFramePlayback : IDisposable
                 : MovieAudioProgressState.NoTrack,
             0);
 
+    private int GetBackpressureWaitMillisecondsLocked()
+    {
+        var nextWakeupSeconds = _decoder.NextVideoWakeupSeconds;
+        if (nextWakeupSeconds is not double wakeupSeconds)
+        {
+            return 50;
+        }
+
+        var remainingSeconds = wakeupSeconds - CurrentPlaybackSecondsLocked();
+        return (int)Math.Clamp(
+            Math.Ceiling(Math.Max(0.001, remainingSeconds) * 1000),
+            1,
+            50);
+    }
+
     private static readonly bool _traceClockSkew = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_MOVIE_SYNC"),
         "1",
@@ -472,7 +492,9 @@ internal sealed class MediaFramePlayback : IDisposable
                                         _audioDiagnostics.SetDiagnosticPhase(
                                             "frame-buffer-wait");
                                     }
-                                    Monitor.Wait(_gate);
+                                    Monitor.Wait(
+                                        _gate,
+                                        GetBackpressureWaitMillisecondsLocked());
                                 }
                                 break;
                             case MediaPumpResult.EndOfInput:

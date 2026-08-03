@@ -210,6 +210,11 @@ public sealed class MovieAudioPumpContractTests
 
         public bool HasAudioTrack { get; }
 
+        public double? NextVideoWakeupSeconds =>
+            _retainedNextFrame is { } frame
+                ? frame.TimestampSeconds + frame.DurationSeconds
+                : null;
+
         public string PumpState => Volatile.Read(ref _pumpState);
 
         public long RetainedNextFrameCount => _retainedNextFrame is null ? 0 : 1;

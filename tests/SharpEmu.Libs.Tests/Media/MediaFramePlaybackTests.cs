@@ -110,6 +110,8 @@ public sealed class MediaFramePlaybackTests
 
         public bool HasAudioTrack => false;
 
+        public double? NextVideoWakeupSeconds => null;
+
         public bool TryDecodeNextFrame(Span<byte> destination, double movieSeconds)
         {
             var index = Interlocked.Increment(ref _index) - 1;
