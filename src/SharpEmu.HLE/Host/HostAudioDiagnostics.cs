@@ -149,6 +149,24 @@ public static class HostAudioDiagnostics
             });
     }
 
+    /// <summary>
+    /// Records a bounded guest-audio event in the same opt-in stream as host
+    /// audio diagnostics. Callers must check <see cref="Enabled"/> before
+    /// constructing the payload so the disabled path does not inspect PCM,
+    /// allocate, format, or enter diagnostic accounting.
+    /// </summary>
+    public static void RecordGuestAudioEvent(string eventName, object data)
+    {
+        if (!TryReserveEvent())
+        {
+            return;
+        }
+
+        ArgumentNullException.ThrowIfNull(eventName);
+        ArgumentNullException.ThrowIfNull(data);
+        MemoryDiagnostics.RecordEvent("audio.guest." + eventName, data);
+    }
+
     public static void RecordMovieDecoderIdentity(
         string source,
         long movieInstanceId,

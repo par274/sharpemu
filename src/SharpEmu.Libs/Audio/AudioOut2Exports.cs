@@ -72,13 +72,20 @@ public static class AudioOut2Exports
         private readonly object _paceGate = new();
         private long _nextAdvanceTimestamp;
 
-        public ContextState(ulong handle, uint frequency, uint grainSamples, uint queueDepth, IHostAudioStream? backend)
+        public ContextState(
+            ulong handle,
+            uint frequency,
+            uint grainSamples,
+            uint queueDepth,
+            IHostAudioStream? backend,
+            GuestAudioCallTrace? diagnostics)
         {
             Handle = handle;
             Frequency = frequency == 0 ? 48000 : frequency;
             GrainSamples = grainSamples == 0 ? 256 : grainSamples;
             QueueDepth = queueDepth == 0 ? 4 : queueDepth;
             Backend = backend;
+            Diagnostics = diagnostics;
         }
 
         public ulong Handle { get; }
@@ -86,6 +93,7 @@ public static class AudioOut2Exports
         public uint GrainSamples { get; }
         public uint QueueDepth { get; }
         public IHostAudioStream? Backend { get; }
+        public GuestAudioCallTrace? Diagnostics { get; }
 
         public void PaceAdvance()
         {
@@ -118,7 +126,9 @@ public static class AudioOut2Exports
             ushort portType,
             uint dataFormat,
             uint samplingFrequency,
-            uint grainSamples)
+            uint grainSamples,
+            GuestAudioCallTrace? diagnostics,
+            GuestAudioBufferTrace? bufferDiagnostics)
         {
             Handle = handle;
             ContextHandle = contextHandle;
@@ -126,6 +136,8 @@ public static class AudioOut2Exports
             DataFormat = dataFormat;
             SamplingFrequency = samplingFrequency == 0 ? 48000 : samplingFrequency;
             GrainSamples = grainSamples == 0 ? 256 : grainSamples;
+            Diagnostics = diagnostics;
+            BufferDiagnostics = bufferDiagnostics;
         }
 
         public ulong Handle { get; }
@@ -138,6 +150,9 @@ public static class AudioOut2Exports
         public ulong PcmAddress;
 
         public int PcmPending;
+
+        public GuestAudioCallTrace? Diagnostics { get; }
+        public GuestAudioBufferTrace? BufferDiagnostics { get; }
 
     }
 
@@ -282,10 +297,32 @@ public static class AudioOut2Exports
 
         var handle = (ulong)Interlocked.Increment(ref _nextContextHandle);
         // Backend is bound lazily on first real Push (primary vs secondary device).
-        Contexts[handle] = new ContextState(handle, frequency, grain, queueDepth, backend: null);
+        var diagnostics = GuestAudioDiagnostics.Enabled ? new GuestAudioCallTrace() : null;
+        Contexts[handle] = new ContextState(
+            handle,
+            frequency,
+            grain,
+            queueDepth,
+            backend: null,
+            diagnostics);
         TraceAudioOut2(
             $"context-create handle=0x{handle:X} frequency={frequency} grain={grain} " +
             $"queue={queueDepth} memory=0x{memoryAddress:X} size=0x{memorySize:X} backend=pending");
+        if (diagnostics is not null && GuestAudioDiagnostics.Enabled)
+        {
+            GuestAudioDiagnostics.Record(
+                "audioout2.context-create",
+                new
+                {
+                    contextHandle = handle,
+                    frequency,
+                    grainFrames = grain,
+                    queueDepth,
+                    contextMemoryAddress = memoryAddress,
+                    contextMemoryBytes = memorySize,
+                });
+        }
+
         return TryWriteUInt64(ctx, outContextAddress, handle)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -299,7 +336,21 @@ public static class AudioOut2Exports
     public static int AudioOut2ContextDestroy(CpuContext ctx)
     {
         // Shared backend lifetime is process-wide; just drop the context entry.
-        Contexts.TryRemove(ctx[CpuRegister.Rdi], out _);
+        var handle = ctx[CpuRegister.Rdi];
+        if (Contexts.TryRemove(handle, out var context) &&
+            context.Diagnostics is not null &&
+            GuestAudioDiagnostics.Enabled)
+        {
+            GuestAudioDiagnostics.Record(
+                "audioout2.context-destroy",
+                new
+                {
+                    contextHandle = handle,
+                    contextCallCount = context.Diagnostics.Sequence,
+                    primaryContextHandle = PrimaryContextHandle,
+                });
+        }
+
         return SetReturn(ctx, 0);
     }
 
@@ -332,9 +383,26 @@ public static class AudioOut2Exports
             return SetReturn(ctx, 0);
         }
 
+        var diagnosticsEnabled = context.Diagnostics is not null && GuestAudioDiagnostics.Enabled;
+        var callSequence = diagnosticsEnabled ? context.Diagnostics!.Next() : 0;
+        if (diagnosticsEnabled && GuestAudioDiagnostics.ShouldEmit(callSequence))
+        {
+            GuestAudioDiagnostics.Record(
+                "audioout2.context-call",
+                new
+                {
+                    contextHandle = handle,
+                    operation = "push",
+                    callSequence,
+                    blocking,
+                    pendingPorts = CountPendingPorts(handle),
+                    primaryContextHandle = PrimaryContextHandle,
+                });
+        }
+
         // Host Submit already blocks on the waveOut queue; only fall back to
         // software pacing when nothing was queued (silence / non-primary ctx).
-        if (!TrySubmitContextAudio(ctx, context))
+        if (!TrySubmitContextAudio(ctx, context, "push", callSequence))
         {
             context.PaceAdvance();
         }
@@ -349,9 +417,26 @@ public static class AudioOut2Exports
         LibraryName = "libSceAudioOut2")]
     public static int AudioOut2ContextAdvance(CpuContext ctx)
     {
-        if (Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var state))
+        var handle = ctx[CpuRegister.Rdi];
+        if (Contexts.TryGetValue(handle, out var state))
         {
-            if (!TrySubmitContextAudio(ctx, state))
+            var diagnosticsEnabled = state.Diagnostics is not null && GuestAudioDiagnostics.Enabled;
+            var callSequence = diagnosticsEnabled ? state.Diagnostics!.Next() : 0;
+            if (diagnosticsEnabled && GuestAudioDiagnostics.ShouldEmit(callSequence))
+            {
+                GuestAudioDiagnostics.Record(
+                    "audioout2.context-call",
+                    new
+                    {
+                        contextHandle = handle,
+                        operation = "advance",
+                        callSequence,
+                        pendingPorts = CountPendingPorts(handle),
+                        primaryContextHandle = PrimaryContextHandle,
+                    });
+            }
+
+            if (!TrySubmitContextAudio(ctx, state, "advance", callSequence))
             {
                 state.PaceAdvance();
             }
@@ -462,14 +547,41 @@ public static class AudioOut2Exports
                 continue;
             }
 
-            port.PcmAddress = BinaryPrimitives.ReadUInt64LittleEndian(pcm);
-            Volatile.Write(ref port.PcmPending, port.PcmAddress != 0 ? 1 : 0);
+            var pcmAddress = BinaryPrimitives.ReadUInt64LittleEndian(pcm);
+            var pendingBefore = Volatile.Read(ref port.PcmPending);
+            Volatile.Write(ref port.PcmAddress, pcmAddress);
+            var pendingAfter = pcmAddress != 0 ? 1 : 0;
+            Volatile.Write(ref port.PcmPending, pendingAfter);
             var n = Interlocked.Increment(ref _attributePcmTraceCount);
             if (n <= 8 || n % 500 == 0)
             {
                 TraceAudioOut2(
-                    $"port-set-pcm#{n} port=0x{portHandle:X} pcm=0x{port.PcmAddress:X} " +
+                    $"port-set-pcm#{n} port=0x{portHandle:X} pcm=0x{pcmAddress:X} " +
                     $"format=0x{port.DataFormat:X} grains={port.GrainSamples}");
+            }
+
+            var diagnosticsEnabled = port.Diagnostics is not null && GuestAudioDiagnostics.Enabled;
+            var attributeSequence = diagnosticsEnabled ? port.Diagnostics!.Next() : 0;
+            if (diagnosticsEnabled && GuestAudioDiagnostics.ShouldEmit(attributeSequence))
+            {
+                GuestAudioDiagnostics.Record(
+                    "audioout2.port-set-pcm",
+                    new
+                    {
+                        contextHandle = port.ContextHandle,
+                        portHandle,
+                        attributeSequence,
+                        attributeIndex = i,
+                        attributeId,
+                        valueAddress,
+                        valueSize,
+                        pcmAddress,
+                        pendingBefore,
+                        pendingAfter,
+                        dataFormat = port.DataFormat,
+                        sampleRate = port.SamplingFrequency,
+                        grainFrames = port.GrainSamples,
+                    });
             }
         }
 
@@ -521,13 +633,19 @@ public static class AudioOut2Exports
         // Handle encodes only the low type byte; PortState keeps the full type
         // so object ports (0x01xx) can still be filtered at submit time.
         var handle = 0x2000_0000UL | ((ulong)(portType & 0xFF) << 16) | portId;
+        var diagnostics = GuestAudioDiagnostics.Enabled ? new GuestAudioCallTrace() : null;
+        var bufferDiagnostics = GuestAudioDiagnostics.Enabled
+            ? new GuestAudioBufferTrace()
+            : null;
         var portState = new PortState(
             handle,
             contextHandle,
             portType,
             dataFormat,
             samplingFrequency,
-            grainSamples);
+            grainSamples,
+            diagnostics,
+            bufferDiagnostics);
         Ports[handle] = portState;
         if (!TryWriteUInt64(ctx, outPortAddress, handle))
         {
@@ -537,6 +655,29 @@ public static class AudioOut2Exports
         TraceAudioOut2(
             $"port-create handle=0x{handle:X} ctx=0x{contextHandle:X} type=0x{portType:X} " +
             $"format=0x{dataFormat:X} freq={samplingFrequency} out=0x{outPortAddress:X}");
+        if (diagnostics is not null && GuestAudioDiagnostics.Enabled)
+        {
+            var decoded = TryDecodeDataFormat(dataFormat, out var channels, out var bytesPerSample, out var isFloat);
+            GuestAudioDiagnostics.Record(
+                "audioout2.port-create",
+                new
+                {
+                    contextHandle,
+                    portHandle = handle,
+                    portType,
+                    isObjectPort = IsObjectPort(portType),
+                    isMainOrBgmPort = IsMainOrBgmPort(portType),
+                    dataFormat,
+                    sampleRate = samplingFrequency,
+                    grainFrames = grainSamples,
+                    formatDecoded = decoded,
+                    channels = decoded ? channels : 0,
+                    bytesPerSample = decoded ? bytesPerSample : 0,
+                    sampleFormat = decoded ? (isFloat ? "F32" : "S16") : "unknown",
+                    outputAddress = outPortAddress,
+                });
+        }
+
         return SetReturn(ctx, 0);
     }
 
@@ -779,7 +920,25 @@ public static class AudioOut2Exports
         LibraryName = "libSceAudioOut2")]
     public static int AudioOut2PortDestroy(CpuContext ctx)
     {
-        Ports.TryRemove(ctx[CpuRegister.Rdi], out _);
+        var handle = ctx[CpuRegister.Rdi];
+        if (Ports.TryRemove(handle, out var port) &&
+            port.Diagnostics is not null &&
+            GuestAudioDiagnostics.Enabled)
+        {
+            GuestAudioDiagnostics.Record(
+                "audioout2.port-destroy",
+                new
+                {
+                    contextHandle = port.ContextHandle,
+                    portHandle = handle,
+                    portType = port.PortType,
+                    dataFormat = port.DataFormat,
+                    pcmAddress = port.PcmAddress,
+                    pending = Volatile.Read(ref port.PcmPending),
+                    callCount = port.Diagnostics.Sequence,
+                });
+        }
+
         return SetReturn(ctx, 0);
     }
 
@@ -833,6 +992,23 @@ public static class AudioOut2Exports
                             context.Frequency,
                             maxQueuedPcmBytes: 128 * 1024);
                         PrimaryBackendName = audio.BackendName + "-primary";
+                        if (context.Diagnostics is not null && GuestAudioDiagnostics.Enabled)
+                        {
+                            GuestAudioDiagnostics.Record(
+                                "audioout2.host-open",
+                                new
+                                {
+                                    contextHandle = context.Handle,
+                                    role = "primary",
+                                    backend = PrimaryBackendName,
+                                    sampleRate = context.Frequency,
+                                    channels = 2,
+                                    format = "S16",
+                                    maximumQueuedBytes = 128 * 1024,
+                                    primaryContextHandle = PrimaryContextHandle,
+                                });
+                        }
+
                         if (HostAudioDiagnostics.Enabled &&
                             PrimaryBackend is IHostAudioStreamDiagnostics streamDiagnostics)
                         {
@@ -873,6 +1049,23 @@ public static class AudioOut2Exports
                         context.Frequency,
                         maxQueuedPcmBytes: 128 * 1024);
                     SecondaryBackendName = audio.BackendName + "-secondary";
+                    if (context.Diagnostics is not null && GuestAudioDiagnostics.Enabled)
+                    {
+                        GuestAudioDiagnostics.Record(
+                            "audioout2.host-open",
+                            new
+                            {
+                                contextHandle = context.Handle,
+                                role = "secondary",
+                                backend = SecondaryBackendName,
+                                sampleRate = context.Frequency,
+                                channels = 2,
+                                format = "S16",
+                                maximumQueuedBytes = 128 * 1024,
+                                primaryContextHandle = PrimaryContextHandle,
+                            });
+                    }
+
                     if (HostAudioDiagnostics.Enabled &&
                         SecondaryBackend is IHostAudioStreamDiagnostics streamDiagnostics)
                     {
@@ -905,7 +1098,11 @@ public static class AudioOut2Exports
         }
     }
 
-    private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context)
+    private static bool TrySubmitContextAudio(
+        CpuContext ctx,
+        ContextState context,
+        string operation,
+        long callSequence)
     {
         var frames = checked((int)context.GrainSamples);
         if (frames <= 0)
@@ -915,6 +1112,9 @@ public static class AudioOut2Exports
 
         lock (HostSubmitGate)
         {
+            var diagnosticsEnabled = context.Diagnostics is not null && GuestAudioDiagnostics.Enabled;
+            var emitContextSubmit = diagnosticsEnabled &&
+                                    GuestAudioDiagnostics.ShouldEmit(callSequence);
             var mix = ArrayPool<float>.Shared.Rent(frames * 2);
             var source = ArrayPool<byte>.Shared.Rent(frames * 16 * sizeof(float));
             var output = ArrayPool<byte>.Shared.Rent(frames * AudioPcmConversion.OutputFrameSize);
@@ -924,25 +1124,97 @@ public static class AudioOut2Exports
                 var mixedPorts = 0;
                 foreach (var port in Ports.Values)
                 {
-                    if (port.ContextHandle != context.Handle ||
-                        port.PcmAddress == 0 ||
-                        Interlocked.Exchange(ref port.PcmPending, 0) == 0 ||
-                        !TryDecodeDataFormat(port.DataFormat, out var ch, out var bps, out var isFloat))
+                    if (port.ContextHandle != context.Handle)
                     {
                         continue;
                     }
 
-                    var byteLength = checked(frames * ch * bps);
+                    var pcmAddress = Volatile.Read(ref port.PcmAddress);
+                    var pendingBefore = Volatile.Read(ref port.PcmPending);
+                    var byteLength = 0;
+                    if (pcmAddress == 0)
+                    {
+                        RecordPortSkip(
+                            context,
+                            port,
+                            pcmAddress,
+                            byteLength,
+                            pendingBefore,
+                            "no-pcm-address",
+                            diagnosticsEnabled);
+                        continue;
+                    }
+
+                    if (Interlocked.Exchange(ref port.PcmPending, 0) == 0)
+                    {
+                        RecordPortSkip(
+                            context,
+                            port,
+                            pcmAddress,
+                            byteLength,
+                            pendingBefore,
+                            "not-pending",
+                            diagnosticsEnabled);
+                        continue;
+                    }
+
+                    var pendingAfter = Volatile.Read(ref port.PcmPending);
+
+                    var decoded = TryDecodeDataFormat(
+                        port.DataFormat,
+                        out var ch,
+                        out var bps,
+                        out var isFloat);
+                    byteLength = decoded ? checked(frames * ch * bps) : 0;
+                    if (!decoded)
+                    {
+                        RecordPortSkip(
+                            context,
+                            port,
+                            pcmAddress,
+                            byteLength,
+                            pendingBefore,
+                            "unsupported-format",
+                            diagnosticsEnabled);
+                        continue;
+                    }
+
                     if (byteLength <= 0 || byteLength > source.Length)
                     {
+                        RecordPortSkip(
+                            context,
+                            port,
+                            pcmAddress,
+                            byteLength,
+                            pendingBefore,
+                            "invalid-byte-length",
+                            diagnosticsEnabled);
                         continue;
                     }
 
                     var sourceSpan = source.AsSpan(0, byteLength);
-                    if (!ctx.Memory.TryRead(port.PcmAddress, sourceSpan))
+                    if (!ctx.Memory.TryRead(pcmAddress, sourceSpan))
                     {
+                        RecordPortSkip(
+                            context,
+                            port,
+                            pcmAddress,
+                            byteLength,
+                            pendingBefore,
+                            "guest-read-failed",
+                            diagnosticsEnabled);
                         continue;
                     }
+
+                    var bufferObservation = port.BufferDiagnostics is not null && diagnosticsEnabled
+                        ? port.BufferDiagnostics.Observe(
+                            pcmAddress,
+                            sourceSpan,
+                            frames,
+                            ch,
+                            bps,
+                            isFloat)
+                        : default;
 
                     MixPortIntoStereo(
                         sourceSpan,
@@ -953,10 +1225,66 @@ public static class AudioOut2Exports
                         isFloat,
                         additive: mixedPorts > 0);
                     mixedPorts++;
+
+                    if (bufferObservation.Emit)
+                    {
+                        GuestAudioDiagnostics.Record(
+                            "audioout2.port-buffer",
+                            new
+                            {
+                                contextHandle = context.Handle,
+                                portHandle = port.Handle,
+                                portType = port.PortType,
+                                isObjectPort = IsObjectPort(port.PortType),
+                                isMainOrBgmPort = IsMainOrBgmPort(port.PortType),
+                                operation,
+                                contextCallSequence = callSequence,
+                                bufferSequence = bufferObservation.Sequence,
+                                pcmAddress,
+                                byteLength,
+                                frameCount = frames,
+                                channels = ch,
+                                bytesPerSample = bps,
+                                sampleFormat = isFloat ? "F32" : "S16",
+                                pendingBefore,
+                                pendingConsumed = true,
+                                pendingAfter,
+                                fingerprint = bufferObservation.Fingerprint,
+                                sameAddressAsPrevious = bufferObservation.SameAddressAsPrevious,
+                                sameContentAsPrevious = bufferObservation.SameContentAsPrevious,
+                                sameAddressCount = bufferObservation.SameAddressCount,
+                                sameContentCount = bufferObservation.SameContentCount,
+                                input = new
+                                {
+                                    leftPeak = bufferObservation.Metrics.LeftPeak,
+                                    rightPeak = bufferObservation.Metrics.RightPeak,
+                                    leftRms = bufferObservation.Metrics.LeftRms,
+                                    rightRms = bufferObservation.Metrics.RightRms,
+                                    otherPeak = bufferObservation.Metrics.OtherPeak,
+                                },
+                            });
+                    }
                 }
 
                 if (mixedPorts == 0)
                 {
+                    if (emitContextSubmit)
+                    {
+                        GuestAudioDiagnostics.Record(
+                            "audioout2.context-submit",
+                            new
+                            {
+                                contextHandle = context.Handle,
+                                operation,
+                                callSequence,
+                                frames,
+                                mixedPorts,
+                                accepted = false,
+                                reason = "no-pending-port",
+                                primaryContextHandle = PrimaryContextHandle,
+                            });
+                    }
+
                     return false;
                 }
 
@@ -978,6 +1306,23 @@ public static class AudioOut2Exports
                 var backend = ResolveContextBackend(context, out var backendName);
                 if (backend is null)
                 {
+                    if (emitContextSubmit)
+                    {
+                        GuestAudioDiagnostics.Record(
+                            "audioout2.context-submit",
+                            new
+                            {
+                                contextHandle = context.Handle,
+                                operation,
+                                callSequence,
+                                frames,
+                                mixedPorts,
+                                accepted = false,
+                                reason = "backend-unavailable",
+                                primaryContextHandle = PrimaryContextHandle,
+                            });
+                    }
+
                     return false;
                 }
 
@@ -989,7 +1334,61 @@ public static class AudioOut2Exports
                         $"ports={mixedPorts} peak={peak:F4} backend={backendName}");
                 }
 
-                return backend.Submit(outputSpan);
+                var mixedMetrics = diagnosticsEnabled
+                    ? GuestAudioDiagnostics.MeasureStereoFloat(mix.AsSpan(0, frames * 2), frames)
+                    : default;
+                var outputMetrics = diagnosticsEnabled
+                    ? GuestAudioDiagnostics.MeasureInterleaved(
+                        outputSpan,
+                        frames,
+                        channels: 2,
+                        bytesPerSample: sizeof(short),
+                        isFloat: false)
+                    : default;
+                var outputFingerprint = diagnosticsEnabled
+                    ? GuestAudioDiagnostics.Fingerprint(outputSpan)
+                    : 0UL;
+                var submitStart = diagnosticsEnabled ? Stopwatch.GetTimestamp() : 0;
+                var accepted = backend.Submit(outputSpan);
+                var submitTicks = diagnosticsEnabled
+                    ? Stopwatch.GetTimestamp() - submitStart
+                    : 0;
+                if (emitContextSubmit)
+                {
+                    GuestAudioDiagnostics.Record(
+                        "audioout2.context-submit",
+                        new
+                        {
+                            contextHandle = context.Handle,
+                            operation,
+                            callSequence,
+                            frames,
+                            mixedPorts,
+                            accepted,
+                            outputFingerprint,
+                            backend = backendName,
+                            submitTicks,
+                            queuedPcmBytes = backend.QueuedPcmBytes,
+                            queuedMilliseconds = backend.QueuedMilliseconds,
+                            mixed = new
+                            {
+                                leftPeak = mixedMetrics.LeftPeak,
+                                rightPeak = mixedMetrics.RightPeak,
+                                leftRms = mixedMetrics.LeftRms,
+                                rightRms = mixedMetrics.RightRms,
+                            },
+                            afterConversion = new
+                            {
+                                leftPeak = outputMetrics.LeftPeak,
+                                rightPeak = outputMetrics.RightPeak,
+                                leftRms = outputMetrics.LeftRms,
+                                rightRms = outputMetrics.RightRms,
+                            },
+                            primaryContextHandle = PrimaryContextHandle,
+                        });
+                }
+
+                return accepted;
             }
             finally
             {
@@ -998,6 +1397,61 @@ public static class AudioOut2Exports
                 ArrayPool<byte>.Shared.Return(output);
             }
         }
+    }
+
+    private static int CountPendingPorts(ulong contextHandle)
+    {
+        var pending = 0;
+        foreach (var port in Ports.Values)
+        {
+            if (port.ContextHandle == contextHandle &&
+                Volatile.Read(ref port.PcmPending) != 0)
+            {
+                pending++;
+            }
+        }
+
+        return pending;
+    }
+
+    private static void RecordPortSkip(
+        ContextState context,
+        PortState port,
+        ulong pcmAddress,
+        int byteLength,
+        int pendingBefore,
+        string reason,
+        bool diagnosticsEnabled)
+    {
+        if (!diagnosticsEnabled || port.BufferDiagnostics is null)
+        {
+            return;
+        }
+
+        var skipped = port.BufferDiagnostics.ObserveSkipped(
+            pcmAddress,
+            byteLength,
+            pendingBefore);
+        if (!skipped.Emit)
+        {
+            return;
+        }
+
+        GuestAudioDiagnostics.Record(
+            "audioout2.port-skip",
+            new
+            {
+                contextHandle = context.Handle,
+                portHandle = port.Handle,
+                portType = port.PortType,
+                isObjectPort = IsObjectPort(port.PortType),
+                isMainOrBgmPort = IsMainOrBgmPort(port.PortType),
+                bufferSequence = skipped.Sequence,
+                pcmAddress,
+                byteLength,
+                pendingBefore,
+                reason,
+            });
     }
 
     private static bool IsMainOrBgmPort(ushort portType)
