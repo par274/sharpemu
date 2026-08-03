@@ -454,21 +454,36 @@ the first implementation discarded required future frames, while the boundary
 repair stalled audio at the first future frame. It is therefore not a
 production selection despite its finite nominal ownership bound.
 
-### B. Separate audio demux/decode context
+### B. Separate audio demux/decode context — selected production model,
+target correction not yet accepted
 
-The audio context would own its own `AVFormatContext`, audio codec, resampler,
-and input progression. Video would retain the current five-buffer contract, so
-there is no compressed-video deferral in the video context. Audio could continue
-until its bounded host stream is full.
+The audio context owns its own `AVFormatContext`, selected audio codec,
+packet, frame, resampler, conversion storage, and bounded host stream. Video
+retains the current five externally owned destinations and remains the only
+video decoder; there is no compressed-video deferral, second video decoder,
+video packet skipping, or decode-and-discard path.
 
-This requires opening the asset twice or creating a second independent input
-context. Its memory cost is a second format/codec/resampler stack plus codec
-buffers and the existing bounded audio stream; an exact byte cost was not
-measured in this task. It has simpler per-context packet order but two
-EOF/drain/cancel paths and a new synchronization problem between independently
-positioned inputs. It is the smallest remaining credible model because audio
-can continue while the video context is backpressured, but it was not
-implemented or target validated here.
+The lawful scalar probe established that the same asset can be opened through
+two independent FFmpeg input contexts with matching format origin and
+timestamp domain. Three fresh trials measured approximately 16.2–16.6 MiB
+additional working set, 12.4–13.4 MiB additional private memory, and one
+additional process handle for the second FFmpeg context. The separate dummy
+host stream cost approximately 2.7–3.0 MiB and 30 handles in that probe; this
+is backend-specific and is not attributed to FFmpeg state.
+
+Production now uses a generation-local submission boundary. Supported SDL,
+WinMM, CoreAudio, and ALSA streams expose strict, cancellation-aware bounded
+submission and exact queue depth. A calibrated submission-paced capability is
+explicit; an unavailable-progress capability never claims a host drain. Each
+context owns at most one live input packet and one working frame, and fixed
+conversion storage plus packet/sample limits provide the retained-state bound.
+
+The first attended target run showed the intended temporal improvement and
+later/menu progression, but direct listening found persistent noise, replayed
+or intermittent sound over the grey interval, severe logo-intro noise, and
+sound during the audio-less `attract_movie.bk2`. Scalar attribution has not
+yet been run, so this model remains selected for investigation but is not an
+accepted audio correction.
 
 ### C. Unbounded decoded-frame or packet queue
 
@@ -494,6 +509,7 @@ state is explicit:
 | --- | --- | --- |
 | Movie audio running | This movie's host audio progress estimate | Advance monotonically, capped at the movie's local wall origin so future audio cannot select future video. |
 | Temporary underrun | Last movie-local audio value | Hold video; do not read AudioOut or AudioOut2 progress. |
+| Host progress unavailable | No synthetic clock or drain claim | Keep the explicit unsupported capability visible; supported backends must expose exact or calibrated progress before movie completion can be claimed. |
 | Audio unavailable or permanently failed | Movie-local monotonic wall time | Switch once to a wall fallback anchored at the last value; never freeze on a dead audio source. |
 | No audio stream | Movie-local monotonic wall time | Advance independently of every guest audio stream. |
 | Paused | Last selected value | Hold until the owning playback resumes; resume rebases wall/fallback time. |
@@ -506,20 +522,19 @@ current `GuestAudioClock` and does not assert that the PS5 uses the same model.
 
 ## Lifecycle and synchronization invariants
 
-The next implementation must preserve all of these invariants:
+The production implementation must preserve all of these invariants:
 
 1. A decoded RGBA destination has one owner. It is not overwritten, reused, or
    returned to the free pool until that owner releases it.
 2. The demux owns at most one live input `AVPacket`; every read is either sent,
    processed, or unreferenced before the next read.
-3. The decoder owns at most one retained next `AVFrame` reference. The working
-   frame and retained frame are unreferenced exactly once on delivery, late-frame
-   discard, EOF drain, cancellation, replacement, or disposal.
-4. No compressed-video queue exists. Video packets are sent in demux order,
-   audio packets remain ordered, and decoded video may be discarded without
-   skipping codec input or breaking reference state.
-5. EOF means demux exhaustion, not playback completion. Audio, video decoder
-   output, and the one retained next frame must drain before completion.
+3. Each context owns at most one working `AVFrame`; it is unreferenced exactly
+   once on delivery, EOF drain, cancellation, replacement, or disposal.
+4. No compressed-video queue exists. Video packets are never skipped before
+   FFmpeg receives them, audio packets remain ordered, and no decoded video is
+   retained outside the existing externally owned destination model.
+5. EOF means demux exhaustion, not playback completion. Audio and video decoder
+   output, the resampler, and the host stream must drain before completion.
 6. Audio-device failure is observable to the movie timeline. A temporary
    underrun is not treated as permanent failure without an explicit state
    transition.
@@ -542,10 +557,10 @@ The video context owns video packet order, video decoding, frame conversion, and
 the five external RGBA destinations. The audio context independently owns its
 format context, selected audio codec context, packet, frame, resampler, and host
 stream. Each context has at most one live input packet and one working frame;
-audio conversion uses fixed storage, strict host queue bounds where supported,
-and explicit packet/sample limits. No compressed-video queue, second video
-decoder, packet deferral, video packet skipping, or decode-and-discard path was
-added.
+audio conversion uses fixed storage, strict host queue bounds on every supported
+backend, and explicit packet/sample limits. No compressed-video queue, second
+video decoder, packet deferral, video packet skipping, or decode-and-discard path
+was added.
 
 The two contexts use the same path-origin contract: the audio open checks the
 already-open video format start and duration, and both begin demuxing from the
@@ -558,11 +573,12 @@ terminal audio failure uses an anchored movie-local wall continuation while
 video remains. No-audio movies use their own monotonic wall clock.
 
 Pause, resume, cancellation, skip, replacement, and disposal are owned by the
-movie generation. Disposal cancels and joins the audio pump before releasing
-its native resources; the existing presenter generation invalidation boundary
-is unchanged. Diagnostics are opt-in and bounded; the disabled path does not
-construct event payloads, format state, lock the event stream, or perform
-per-event accounting.
+movie generation. Backends that cannot pause expose that unsupported capability
+explicitly; they do not silently claim device pause. Disposal cancels and joins
+the audio pump before releasing its native resources; the existing presenter
+generation invalidation boundary is unchanged. Diagnostics are opt-in and
+bounded; the disabled path does not construct event payloads, format state,
+lock the event stream, or perform per-event accounting.
 
 The authored independent-context contract tests cover saturation, EOF order,
 underrun recovery, normal completion, no-audio behavior, all failure classes,
