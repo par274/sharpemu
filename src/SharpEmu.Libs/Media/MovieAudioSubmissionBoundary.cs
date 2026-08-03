@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.Host;
+using SharpEmu.Libs.Audio;
 
 namespace SharpEmu.Libs.Media;
 
@@ -127,6 +128,7 @@ internal sealed class MovieAudioSubmissionBoundary : IDisposable
     private readonly IHostAudioStream _stream;
     private readonly IHostAudioStreamControl? _control;
     private readonly MovieAudioProgressTracker _progress;
+    private readonly HostAudioSourceIsolationSelection _sourceIsolation;
     private readonly int _outputBytesPerFrame;
     private MovieAudioProgressSample _lastProgress;
     private int _disposed;
@@ -134,10 +136,12 @@ internal sealed class MovieAudioSubmissionBoundary : IDisposable
     internal MovieAudioSubmissionBoundary(
         IHostAudioStream stream,
         int outputBytesPerFrame,
-        int outputSampleRate)
+        int outputSampleRate,
+        HostAudioSourceIsolationSelection? sourceIsolation = null)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _control = stream as IHostAudioStreamControl;
+        _sourceIsolation = sourceIsolation ?? HostAudioSourceIsolation.Current;
         _outputBytesPerFrame = outputBytesPerFrame;
         ProgressSource = _control?.ProgressSource ?? stream.ProgressSource;
         _progress = new MovieAudioProgressTracker(
@@ -156,7 +160,7 @@ internal sealed class MovieAudioSubmissionBoundary : IDisposable
     internal MovieAudioProgressSample LastProgress => _lastProgress;
 
     internal MovieAudioSubmissionResult Submit(
-        ReadOnlySpan<byte> pcm,
+        Span<byte> pcm,
         long outputFrames,
         CancellationToken cancellationToken,
         out MovieAudioProgressSample progress)
@@ -171,6 +175,9 @@ internal sealed class MovieAudioSubmissionBoundary : IDisposable
         bool accepted;
         try
         {
+            _sourceIsolation.SilenceIfSelected(
+                HostAudioSourceOwner.Movie,
+                pcm);
             accepted = _control is not null
                 ? _control.Submit(pcm, cancellationToken)
                 : _stream.Submit(pcm);

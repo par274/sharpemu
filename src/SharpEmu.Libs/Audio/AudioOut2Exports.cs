@@ -989,6 +989,9 @@ public static class AudioOut2Exports
                         $"ports={mixedPorts} peak={peak:F4} backend={backendName}");
                 }
 
+                HostAudioSourceIsolation.Current.SilenceIfSelected(
+                    HostAudioSourceOwner.AudioOut2,
+                    outputSpan);
                 return backend.Submit(outputSpan);
             }
             finally

@@ -362,7 +362,11 @@ public static class AudioOutExports
             try
             {
                 ConvertForHost(port, source, output.AsSpan(0, outputLength));
-                if (!port.Backend.Submit(output.AsSpan(0, outputLength)))
+                var outputSpan = output.AsSpan(0, outputLength);
+                HostAudioSourceIsolation.Current.SilenceIfSelected(
+                    HostAudioSourceOwner.AudioOut,
+                    outputSpan);
+                if (!port.Backend.Submit(outputSpan))
                 {
                     port.PaceSilence();
                 }
@@ -494,13 +498,23 @@ public static class AudioOutExports
             for (var i = 0; i < resolved.Length; i++)
             {
                 ref var output = ref resolved[i];
-                if (output.HostBuffer is null ||
-                    output.Port.Backend is null ||
-                    !output.Port.Backend.Submit(
-                        output.HostBuffer.AsSpan(0, output.HostBufferLength)))
+                if (output.HostBuffer is null || output.Port.Backend is null)
                 {
                     if (pacingPort is null ||
                         HasLongerBufferDuration(output.Port, pacingPort))
+                    {
+                        pacingPort = output.Port;
+                    }
+                }
+                else
+                {
+                    var outputSpan = output.HostBuffer.AsSpan(0, output.HostBufferLength);
+                    HostAudioSourceIsolation.Current.SilenceIfSelected(
+                        HostAudioSourceOwner.AudioOut,
+                        outputSpan);
+                    if (!output.Port.Backend.Submit(outputSpan) &&
+                        (pacingPort is null ||
+                         HasLongerBufferDuration(output.Port, pacingPort)))
                     {
                         pacingPort = output.Port;
                     }

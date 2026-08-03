@@ -1032,7 +1032,7 @@ internal sealed unsafe class FfmpegMovieAudioDecoder :
     }
 
     private MovieAudioSubmissionResult SubmitHostAudio(
-        ReadOnlySpan<byte> samples,
+        Span<byte> samples,
         int outputFrames,
         out MovieAudioProgressSample progress)
     {
