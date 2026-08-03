@@ -140,10 +140,11 @@ public sealed class GuestAudioProducerDiagnosticsTests
     public void SamplingRuleIsBoundedAndDeterministic()
     {
         Assert.True(GuestAudioDiagnostics.ShouldEmit(1));
+        Assert.True(GuestAudioDiagnostics.ShouldEmit(4));
+        Assert.False(GuestAudioDiagnostics.ShouldEmit(5));
+        Assert.True(GuestAudioDiagnostics.ShouldEmit(8));
+        Assert.False(GuestAudioDiagnostics.ShouldEmit(9));
         Assert.True(GuestAudioDiagnostics.ShouldEmit(16));
-        Assert.False(GuestAudioDiagnostics.ShouldEmit(17));
-        Assert.True(GuestAudioDiagnostics.ShouldEmit(32));
-        Assert.False(GuestAudioDiagnostics.ShouldEmit(33));
 
         Assert.NotEqual(
             GuestAudioDiagnostics.Fingerprint([1, 2, 3]),

@@ -1432,6 +1432,11 @@ public static class AudioOut2Exports
             pcmAddress,
             byteLength,
             pendingBefore);
+        if (reason == "no-pcm-address" && skipped.Sequence != 1)
+        {
+            return;
+        }
+
         if (!skipped.Emit)
         {
             return;

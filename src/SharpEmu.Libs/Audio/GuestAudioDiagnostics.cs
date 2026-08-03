@@ -15,8 +15,8 @@ internal static class GuestAudioDiagnostics
     internal static bool Enabled => HostAudioDiagnostics.Enabled;
 
     internal static bool ShouldEmit(long sequence) =>
-        sequence is > 0 and <= 16 ||
-        (sequence > 16 && (sequence & (sequence - 1)) == 0);
+        sequence is > 0 and <= 4 ||
+        (sequence > 4 && (sequence & (sequence - 1)) == 0);
 
     internal static void Record(string eventName, object data)
     {
