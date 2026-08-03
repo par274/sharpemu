@@ -13,9 +13,10 @@ it lost required future video frames. A bounded demux-boundary repair preserved
 one packet and one next frame but stalled at the first future frame and crossed
 the physical-memory safety boundary. A focused independent-context probe then
 supported a separately bounded movie-audio demux/decode context, and the
-production boundary now uses it for movies with audio. Retail target validation
-of the correction remains pending; no claim is made until the controlled pilot
-and two comparable confirmations pass.
+production boundary now uses it for movies with audio. The first targeted retail
+listening run reached the later host movies and main menu, but audible artifacts
+and the physical-memory safety boundary prevent accepting the correction; no
+claim is made until comparable confirmation runs pass.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
@@ -55,6 +56,12 @@ The consequential identifiers for the earlier target findings are:
   replacement, and shutdown. Attended validation showed the former stale-black
   interval became grey; the remaining grey transition is a separate unresolved
   output boundary.
+- First targeted listening run of the independent-context implementation:
+  `20260803T055628280Z-c19e6f0-trial-01`, commit
+  `c19e6f00416fe31cf70ed3a116802b27e270018c`, executable SHA-256
+  `F0F16F2EFF1B88E0926F0D2B81FE4F4F8C16E7FF3F5CAEE33C0178250B4B5ADE`.
+  Optional per-event movie and memory diagnostics were disabled for this
+  listening-only run; runner metrics and the emulator log remain outside Git.
 
 Raw target assets, traces, logs, manifests, source samples, movie fingerprints,
 and target paths remain outside Git.
@@ -359,6 +366,45 @@ blocked the demux. No confirmation runs were justified after the first pilot,
 and the follow-up independently confirmed that the small repair was unsafe and
 ineffective. Grey, black, and flashing output were not investigated.
 
+The first targeted listening run of the independent-context implementation was
+not a confirmation run. It reached `attract_movie.bk2`, `logo_intro.bk2`, and
+`main_menu.bk2`; the bridge attached and guest-closed each asset in order. The
+first `ps_studios_logo.bk2` reached frame 254 in 9.11 seconds. The runner
+stopped after 300.617 seconds at the unchanged physical-headroom boundary:
+peak working set was 8.731 GiB, peak private memory was 17.529 GiB, minimum
+available physical memory was 1.846 GiB against the 2 GiB floor, and minimum
+commit headroom was 21.725 GiB. No confirmation run was justified after this
+boundary.
+
+The following are direct attended observations, not claims inferred from queue
+metrics:
+
+- The first PlayStation Studios logo audio was no longer audibly stretched or
+  delayed, but contained a persistent unpleasant noisy/lagging artifact.
+- The grey interval remained. Near the end of the first logo, its audible tail
+  had not finished before a second similar sound began over the grey output;
+  that second sound played in short bursts separated by silence. The target
+  still showed the later `Sony Interactive Entertainment Presents` visual.
+- Audible output was present during `attract_movie.bk2` but was more severely
+  intermittent and noisy. The authored asset inventory says that movie has no
+  embedded audio stream, so this sound must not be attributed to the
+  independent movie-audio context without a future source trace.
+- `logo_intro.bk2` produced audible output dominated by very loud noise, with
+  the intended audio nearly inaudible. Menu music and button-selection audio
+  were present for the first time in this experiment.
+- The maintainer reached the main menu, selected Play, selected Continue
+  Offline, and then the emulator ended. Character Creation was not observed.
+  No visual improvement was observed: the grey interval and later Sony visual
+  remained.
+
+These observations support that the independent path changes the first logo's
+temporal behavior and allows later movie/menu progression, but they do not
+establish audible correctness. The noisy/intermittent output, the apparent
+overlapping or replayed logo sound during the grey interval, and the difference
+between embedded movie audio and other guest audio are now the next audio
+frontier. They must be traced separately from the grey/black/flashing rendering
+problem and from the general low-FPS condition.
+
 ## Evaluated alternatives
 
 ### A. Decode-and-discard late video output — falsified on target
@@ -538,11 +584,16 @@ history and is not production code.
 - The probe's process deltas are scalar host measurements, not a decomposition
   of every FFmpeg allocator or device-driver allocation. The target pilot must
   measure the complete emulator process while the movie runs.
-- The implementation has not yet been attended on the retail target, so its
-  audible result, later cinematic progression, main-menu progression, offline
-  prompt, and Character Creation behavior remain unverified.
-- The two pilots did not reach main-menu progression or the expected checkpoint,
-  so the earlier one-demux result remains no evidence about the selected model.
+- The selected implementation has one attended retail listening run, but its
+  audible result is not correct enough to accept: the first logo has noisy
+  artifacts, the grey interval has intermittent/replayed sound, and later
+  movies have noisy or intermittent output. The run reached the main menu and
+  the offline path but not Character Creation; the unchanged physical-memory
+  boundary also prevented a safe confirmation run.
+- The earlier one-demux pilots did not reach main-menu progression and remain
+  no evidence about the selected model. The selected model reached later host
+  movies and menu audio once, but still lacks comparable confirmation and a
+  source-level explanation for the later audible output.
 - The title's intended proprietary clock ownership remains unknown. The
   movie-local contract is justified by the authored boundary and target clock
   observations, not by a claim about Sony internals.
