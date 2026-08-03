@@ -14,10 +14,11 @@ movie-audio demux/decode context, and the production boundary uses it for movies
 with audio. The attended source-isolation matrix now attributes the audible
 startup defects to two guest owners: AudioOut2 supplies the noisy logo-like
 sound, while AudioOut supplies the intermittent logo-like music over grey. The
-independent movie stream is clean under isolation and remains a selected,
-bounded production model, but the retail audio correction is not accepted: no
-production mute or guest-audio repair has been proposed, and comparable
-correction confirmations are not justified yet.
+independent movie stream is clean under isolation. A producer trace now
+identifies the narrowest emulator-owned AudioOut2 boundary as the
+type-insensitive primary-context mix of nonzero `0x0100` object-port buffers,
+while the AudioOut left-channel asymmetry is already present in guest memory.
+No production mute, routing, timing, or format correction is accepted yet.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
@@ -79,6 +80,15 @@ The consequential identifiers for the earlier target findings are:
   opt-in scalar diagnostics and source-isolation switch were enabled only for
   these runs. The temporary switch and its tests were removed in commit
   `40a7302`; raw manifests and diagnostics remain outside Git.
+- Guest producer diagnostics were added in commits `eac0911`, `b5661b9`, and
+  `aaa2ef7`; the final diagnostics-only port classification correction is
+  `c2fc337`. The focused target runs were
+  `20260803T082426695Z-eac0911-trial-01`,
+  `20260803T083443495Z-b5661b9-trial-01`, and
+  `20260803T084524289Z-aaa2ef7-trial-01`. The last run used executable
+  SHA-256 `40B452EB03ED56924398CBA05BBBE1C08632C12CDF76137513905DDE029F3E95`.
+  All used the expected target eboot; raw manifests and scalar JSONL remain
+  outside Git.
 
 Raw target assets, traces, logs, manifests, source samples, movie fingerprints,
 and target paths remain outside Git.
@@ -486,13 +496,139 @@ the evidence does not justify changing either guest path yet.
 
 ### Uncertainty
 
-The matrix identifies the stable host owners and their HLE seams, but it does
-not yet identify the guest-side mixer/event that feeds each stream or explain
-the left-channel asymmetry. It also does not attribute `attract_movie.bk2` or
-`logo_intro.bk2`; those later observations remain out of scope. The grey visual
-output, including the later main-menu grey state, remains a separate video
-rendering problem. Scalar PCM statistics do not replace direct listening and
-do not establish the intended title mix.
+The matrix alone did not identify the producer seams; the focused trace below
+does. The exact proprietary contract for `0x0100` object-port routing and
+speaker-array/spatial semantics remains unverified. It also does not attribute
+`attract_movie.bk2` or `logo_intro.bk2`; those later observations remain out of
+scope. The grey visual output, including the later main-menu grey state,
+remains a separate video rendering problem. Scalar PCM statistics do not
+replace direct listening and do not establish the intended title mix.
+
+## Guest startup producer boundary
+
+This section records the producer-facing lifecycle and the first incorrect
+boundary found by the opt-in scalar trace. It is an investigation finding, not
+a production correction.
+
+### Observations
+
+- Context `2` was created at 48 kHz with 512-frame grains and queue depth 4.
+  Its one type-0 port (`0x20000001`) was destroyed without a call or PCM
+  submission, and the context was then destroyed. Context `3` was created at
+  48 kHz with 256-frame grains and queue depth 8; it became the AudioOut2
+  primary context and owns the `audio-out2-primary` /
+  `guest-audio-out2-primary` host stream.
+- Across the run, 84 ports were created. Context `3` owns 83 of them: type
+  `0` (four observed in the final run), type `1`, `2`, `3`, `4`, and `6` (one
+  each), and 74 type `0x0100` object ports; context `2` briefly owned the
+  remaining type-0 port. The type-0 and type-1 ports use eight-channel F32
+  (`0x880`); the
+  object ports use one-channel F32 (`0x100`). The nonzero bounded reads were
+  from 21 object ports, including `0x20000003`, `0x20000004`,
+  `0x20000006`, `0x20000007`, `0x20000009`, `0x2000000B`,
+  `0x2000000C`, `0x2000000E`, `0x20000010`, `0x20000012`,
+  `0x20000013`, `0x20000015`, `0x20000017`, `0x20000019`,
+  `0x2000001B`, `0x2000001C`, `0x2000001E`, `0x20000020`,
+  `0x20000022`, `0x20000024`, and `0x20000026`. Emitted main/BGM reads
+  were zero in the same windows. Object samples were mono, so the measured
+  left and right values matched before mixing.
+- `sceAudioOut2PortSetAttributes` with attribute id 0 reads the guest PCM
+  pointer, stores it in `PcmAddress`, and sets `PcmPending`. The submit loop
+  atomically consumes that pending state before reading the guest buffer.
+  In the final run, 1,222 bounded PCM-attribute updates preceded 239 buffer
+  reads. Repeated address/content observations occurred only with
+  `pendingBefore=1` and `pendingAfter=0`; 73 no-address and 428 not-pending
+  skips were observed. No read occurred with an invalid pending transition.
+- `TrySubmitContextAudio` currently iterates every port belonging to the
+  context, without checking `PortType`, then calls `MixPortIntoStereo`. The
+  mono path duplicates an object sample into both stereo channels and the
+  `additive` path sums each subsequent port. Thus the nonzero object buffers
+  are admitted to the primary stereo stream at this loop, before S16 output
+  conversion and host submission.
+- The final target run's AudioOut2 stream submitted 2,856,704 frames
+  (59.515 seconds) with no rejected submissions. Its host queue ended at
+  13.3 ms, but it recorded 1,921 underruns totaling about 18.8 seconds. Host
+  PCM windows reached peak `0.23` / RMS `0.05`. This supports a separate
+  producer/pacing underrun contribution to the lag; it does not move the
+  object-buffer mix boundary.
+- Classic `port-1` is handle 1, type 0, 48 kHz, eight-channel S16, 256
+  frames, and 4,096 bytes per submission. `sceAudioOutSetVolume` reported
+  unity volume. The host opened an eight-channel S16 stream and selected the
+  `preserved-guest-layout` path; no HLE stereo conversion was used. At the
+  first nonzero transition, guest and host-input metrics were identical and
+  left-only: left peak rose from `0.0027` through `0.164`, right peak stayed
+  `0`, and all other-channel peak stayed `0`.
+- The classic source buffer is copied into SDL on each output call. Sampled
+  source addresses changed, no host submission was rejected, and the queue
+  remained near the configured 60 ms cap. Later host windows reached peak
+  `0.80` / RMS `0.03`, so the direct listening report of intermittent later
+  classic audio is consistent with additional unsampled guest submissions,
+  not with a queue growing to minutes of latency.
+- The independent movie stream remained separate and completed all 408,960
+  frames. AudioOut2 object activity and the classic left-only transition began
+  within the same startup interval, but their guest formats, ports, buffers,
+  and host streams were distinct. This proves related/overlapping startup
+  output, not byte-for-byte duplication of one guest buffer.
+
+### Proven attribution and inference
+
+The first incorrect emulator-owned boundary for the noisy AudioOut2 output is
+the primary-context port-selection/aggregation loop in
+`TrySubmitContextAudio`: nonzero `0x0100` object-port inputs are collapsed into
+the same stereo stream as the primary context without a type-aware routing or
+object spatialization decision. The trace and direct listening establish that
+AudioOut2 is the noisy owner. The exact title contract may require these object
+ports to participate in the primary mix, but the current loop makes that
+decision implicitly and unconditionally; this is the narrowest boundary to
+resolve.
+
+The first incorrect boundary for the classic left-channel defect is earlier:
+the guest buffer presented to `sceAudioOutOutput` is already left-only. Its
+declared 48 kHz/eight-channel/S16/256-frame/4,096-byte shape is internally
+consistent, but captured nonzero data has no right or other-channel energy.
+The preserved-format copy and SDL queue do not create the asymmetry. The
+narrowest classic correction target is therefore the guest producer's buffer
+population/layout contract, not host routing or conversion.
+
+The two guest paths contain related logo-time output because the title feeds
+separate AudioOut2 object ports and classic AudioOut buffers during the same
+startup interval. That overlap is not evidence that the clean movie stream was
+replayed. No exact nonzero classic fingerprint was shown to recur without a
+new guest output call, and no AudioOut2 buffer was read without a new pending
+submission. The audible long/intermittent classic tail remains a producer
+timing/content question, not a proven host-side stale-buffer replay.
+
+### Narrowest recommended correction and remaining uncertainty
+
+Do not mute either stream. First establish the lawful guest-visible contract
+for type `0x0100` object ports and their speaker-array/spatial state. If those
+ports are not primary-stream inputs, the correction belongs immediately before
+`MixPortIntoStereo` as a type-aware eligibility/routing rule. If they are
+primary inputs, the correction belongs at the same boundary as the missing
+object spatialization/normalization, rather than as a global mute or host
+queue change. Treat the classic path separately: verify and repair the earliest
+guest buffer writer or declared channel layout before changing HLE conversion.
+Only after those input contracts are correct should AudioOut2 push/advance
+pacing and queue depth be revisited; the observed underruns do not justify a
+timing change by themselves.
+
+### Falsification conditions
+
+- A lawful AudioOut2 contract showing that all type `0x0100` object ports must
+  be summed directly into the primary stereo stream falsifies the type-aware
+  exclusion hypothesis; the next boundary is then object spatialization,
+  normalization, or timing.
+- A synthetic or target probe that finds balanced right/other-channel data in
+  guest memory but left-only host input falsifies the classic guest-producer
+  attribution and moves the boundary to conversion/backend handling.
+- A bounded trace showing the same nonzero classic buffer fingerprint reaching
+  SDL without a corresponding new `sceAudioOutOutput` read falsifies the
+  current no-stale-replay finding and moves the boundary to host submission.
+- An AudioOut2 read with `PcmPending=0`, or a repeated read without a new PCM
+  attribute update, falsifies the current pending-state conclusion.
+- A contract-correct object mix with no AudioOut2 underruns in a comparable
+  run would falsify the present pacing attribution; a continued empty queue
+  would keep timing as a separate unresolved boundary.
 
 ## Evaluated alternatives
 
@@ -696,9 +832,10 @@ history and is not production code.
   headroom floor before later movie ownership could be tested.
 - The source-isolation matrix attributes the first-logo noise to
   `audio-out2-primary` and the grey-interval intermittent music to AudioOut
-  `port-1`, while the independent movie stream remains clean. It does not yet
-  identify the guest-side mixer/event feeding either stream, explain the
-  left-channel asymmetry, or establish the intended title mix.
+  `port-1`, while the independent movie stream remains clean. The producer
+  trace now identifies the type-insensitive AudioOut2 primary mix as the first
+  emulator-owned boundary to resolve and places the classic asymmetry in the
+  guest buffer; the intended proprietary object-port mix is still unknown.
 - The isolation runs are attribution evidence, not correction confirmations:
   two stopped at the unchanged physical-headroom boundary and the one normal
   exit still showed the unresolved grey video output. No production audio
@@ -762,9 +899,8 @@ evidence against this separately bounded model.
 
 Final cleaned-branch verification:
 
-- focused media and audio suite: 135 passed;
-- complete media suite: 68 passed;
-- complete solution suite: 897 passed;
+- focused audio and media suite: 146 passed;
+- complete solution suite: 908 passed;
 - Fast verification passed, including the target-memory, VMMap, runner
   supervision, Release build, and complete solution test gates;
 - `git diff --check` passed;
