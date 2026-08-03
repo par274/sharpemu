@@ -11,8 +11,11 @@ the authored bounded compressed-packet queue as a practical target model. The
 first one-demux decode-and-discard implementation then failed target validation:
 it lost required future video frames. A bounded demux-boundary repair preserved
 one packet and one next frame but stalled at the first future frame and crossed
-the physical-memory safety boundary. No movie timing correction is accepted;
-the branch stops before production implementation of an unproven pump model.
+the physical-memory safety boundary. A focused independent-context probe then
+supported a separately bounded movie-audio demux/decode context, and the
+production boundary now uses it for movies with audio. Retail target validation
+of the correction remains pending; no claim is made until the controlled pilot
+and two comparable confirmations pass.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
@@ -86,6 +89,36 @@ inputs, not as results inferred from the authored model:
 - SDL queue arithmetic is an input-queue estimate, not a direct physical-device
   playback measurement. The grey transition and intermittent flashing remain
   separate rendering problems.
+
+The independent movie-audio context phase established these additional durable
+facts using the lawful target asset and scalar-only measurements:
+
+- `ps_studios_logo.bk2` opens through two independent FFmpeg input contexts
+  with distinct format, codec, packet, frame, and resampler state. Both
+  contexts report format start `0` and duration `8,500,000` microseconds; the
+  first video and audio packet timestamps are both `0`, with video time base
+  `1/30` and audio time base `1/48000`.
+- The second context owns the selected audio stream and its own decoder,
+  resampler, one live packet, one live frame, fixed 16 KiB PCM conversion
+  storage, and a host stream requested at a 32 KiB queue cap. Audio packets and
+  decoded frames remain ordered; the video context remains the only video
+  decoder and keeps its five externally owned destinations.
+- Three fresh scalar probe trials measured approximately 16.2–16.6 MiB
+  additional working set, 12.4–13.4 MiB additional private memory, and one
+  additional process handle for the second FFmpeg context. The dummy host
+  stream added approximately 2.7–3.0 MiB working set and 30 handles; that
+  device cost is backend-specific and is not attributed to FFmpeg state.
+- The largest packet observed while scanning the logo through either context
+  was `474,552` bytes. The production audio path rejects packets above its
+  explicit 4 MiB bound and decoded frames above its explicit sample bound.
+- `attract_movie.bk2` has no audio stream and therefore does not open the
+  second context. It remains on a movie-local monotonic wall clock.
+- The audio context compares its format start and duration with the already
+  opened video context. Normal completion requires demux EOF, decoder EOF,
+  resampler drain, and exact host queue drain. Open, decoder, submission, and
+  device failures are terminal and visible; temporary queue-empty underrun is
+  a recoverable state. Host generation disposal cancels and joins the audio
+  pump before releasing its native state.
 
 The target assets, raw traces, logs, manifests, and game-derived data remain
 outside Git.
@@ -452,43 +485,45 @@ The next implementation must preserve all of these invariants:
 9. Diagnostics-disabled paths short-circuit before payload construction,
    formatting, event locking, or per-event accounting.
 
-## Stopping boundary and next model
+## Selected model and bounded ownership
 
-No production model was selected. Alternative A is falsified by the attended
-pilots above, and Alternative B was not implemented because its second format
-context, codec lifecycle, cancellation, synchronization, and memory cost still
-need a focused design and measurement. The movie-local timeline behavior above
-remains the exact contract that any future implementation must satisfy; it is
-not installed by this branch.
+The independent audio-context model is selected because the lawful probe closed
+the previous falsifiers without sharing mutable FFmpeg state. The production
+implementation is generation-local and opens the second context only after the
+video context identifies an audio stream. A no-audio movie does not open it.
 
-The authored two-packet/eight-byte queue remains synthetic test coverage for
-ownership and backpressure history, but it is not production code and does not
-set a target limit. The production-facing conversion is intentionally deferred
-until a selected model has deterministic ownership tests and a safe target
-pilot.
+The video context owns video packet order, video decoding, frame conversion, and
+the five external RGBA destinations. The audio context independently owns its
+format context, selected audio codec context, packet, frame, resampler, and host
+stream. Each context has at most one live input packet and one working frame;
+audio conversion uses fixed storage, strict host queue bounds where supported,
+and explicit packet/sample limits. No compressed-video queue, second video
+decoder, packet deferral, video packet skipping, or decode-and-discard path was
+added.
 
-The audio seam must expose local estimated progress without depending on
-`HostAudioDiagnostics`: no-track, running, temporary-underrun, normal completion,
-permanent open/decoder/submission/device failure, and disposal. SDL queue
-arithmetic remains an estimate of input removed from SDL's input queue, not a
-measurement of physical or audible playback. Other host backends may return a
-safe unavailable state until they implement equivalent progress.
+The two contexts use the same path-origin contract: the audio open checks the
+already-open video format start and duration, and both begin demuxing from the
+same source origin. Audio and video EOF are independent. Normal movie
+completion waits for video drain plus audio demux EOF, decoder EOF, resampler
+drain, and host queue drain. A temporary empty host queue holds the movie clock
+and may recover; explicit open, decoder, submission, and device failure enters a
+visible terminal state and releases the host stream. Normal audio completion or
+terminal audio failure uses an anchored movie-local wall continuation while
+video remains. No-audio movies use their own monotonic wall clock.
 
-The timeline must be created for each host movie generation and must use:
+Pause, resume, cancellation, skip, replacement, and disposal are owned by the
+movie generation. Disposal cancels and joins the audio pump before releasing
+its native resources; the existing presenter generation invalidation boundary
+is unchanged. Diagnostics are opt-in and bounded; the disabled path does not
+construct event payloads, format state, lock the event stream, or perform
+per-event accounting.
 
-1. this movie's running audio estimate;
-2. a held value during temporary underrun;
-3. an anchored local wall continuation after normal audio completion with video
-   remaining or after permanent audio failure;
-4. local monotonic wall time for no-track movies;
-5. a held value while paused, with resume rebasing the local wall origin;
-6. a terminal old identity on skip, completion, replacement, and disposal.
-
-This is a finite timeline contract fully specified for deterministic synthetic
-testing. It is not evidence that a one-demux media pump is safe; the attended
-pilots established the opposite. Do not implement a replacement pump until the
-separate-audio-context comparison or another measured finite model closes the
-falsifiers below.
+The authored independent-context contract tests cover saturation, EOF order,
+underrun recovery, normal completion, no-audio behavior, all failure classes,
+pause/resume, lifecycle races, stale generations, native ownership, finite
+retained state, diagnostics bounds, and repeated teardown. The earlier
+two-packet/eight-byte queue remains synthetic coverage for falsified-boundary
+history and is not production code.
 
 ## Remaining uncertainty
 
@@ -500,25 +535,30 @@ falsifiers below.
 - The criterion for distinguishing temporary audio underrun from permanent
   device/decoder failure must be tied to explicit host error/state transitions,
   not an arbitrary elapsed-time guess.
-- Alternative B's duplicate format/codec context cost, EOF synchronization,
-  cancellation, and audio/video lifecycle have not been measured.
+- The probe's process deltas are scalar host measurements, not a decomposition
+  of every FFmpeg allocator or device-driver allocation. The target pilot must
+  measure the complete emulator process while the movie runs.
+- The implementation has not yet been attended on the retail target, so its
+  audible result, later cinematic progression, main-menu progression, offline
+  prompt, and Character Creation behavior remain unverified.
 - The two pilots did not reach main-menu progression or the expected checkpoint,
-  so no claim is made about later startup behavior.
+  so the earlier one-demux result remains no evidence about the selected model.
 - The title's intended proprietary clock ownership remains unknown. The
   movie-local contract is justified by the authored boundary and target clock
   observations, not by a claim about Sony internals.
 
 ## Falsifiers
 
-The next implementation must close these falsifiers before production work:
+The selected implementation remains unaccepted as a target correction if any
+of these falsifiers appears:
 
 - A one-demux model must not lose a source frame, stall at the first future frame,
   or cross the configured physical-memory safety boundary. Both failure modes
   were observed in the pilots and are now accepted evidence against Alternative
   A.
-- A separate audio context must account for duplicate file I/O, exact audio and
-  video EOF/drain ordering, cancellation, disposal, host-stream failure, and
-  bounded memory before it is selected.
+- The separate audio context must preserve duplicate file ownership, exact
+  audio and video EOF/drain ordering, cancellation, disposal, host-stream
+  failure, and bounded memory on the target.
 - A video packet is skipped before being sent to FFmpeg, codec reference state
   becomes invalid, or PTS order is not preserved at the decoder input.
 - A candidate pump overwrites or reuses an owned RGBA destination, retains more
@@ -541,7 +581,7 @@ The next implementation must close these falsifiers before production work:
 This experiment's focused lane is:
 
 ```powershell
-dotnet test tests\SharpEmu.Libs.Tests\SharpEmu.Libs.Tests.csproj -c Release --filter "FullyQualifiedName~MovieAudioPumpContractTests|FullyQualifiedName~MovieTimelineContractTests"
+dotnet test tests\SharpEmu.Libs.Tests\SharpEmu.Libs.Tests.csproj -c Release --filter "FullyQualifiedName~SharpEmu.Libs.Tests.Media"
 ```
 
 The requested repository verification remains:
@@ -552,12 +592,15 @@ git diff --check
 ```
 
 Shader verification is unnecessary because this change touches no shader or
-GPU semantics. Target confirmations were intentionally stopped after the
-falsifying pilots above.
+GPU semantics. Retail target confirmations are still pending; the earlier
+one-demux pilots are not evidence against this separately bounded model.
 
-Verification completed on the evidence-only stopping point:
+Verification completed before retail target launch:
 
-- focused movie/audio contract tests: 21 passed;
-- all media tests: 49 passed;
-- Fast lane: passed, including 864 solution tests;
-- `git diff --check`: passed.
+- focused media suite: 68 passed;
+- complete solution suite: 883 passed;
+- Fast verification passed, including the target-memory, VMMap, runner
+  supervision, Release build, and complete solution test gates;
+- `git diff --check` passed;
+- shader verification is unnecessary because this change touches no shader or
+  GPU semantics.
