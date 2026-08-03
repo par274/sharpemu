@@ -43,6 +43,11 @@ The consequential identifiers for the earlier target findings are:
   `641419B207D507E3F37285B1479B29EA328667CAE858B6120D9B6347BA99211C`.
   The follow-up was intentionally run from a dirty working tree containing
   only the bounded-boundary probe; its raw manifest records that fact.
+- Final evidence-only clean Release from commit
+  `b86f4f8f48fcc35560f1915d0f4d077f5fdceb54`: executable SHA-256
+  `28E541E64E53F6AF05827B7CD5E043E8FD398A586D5B65B3CF52B8B522AF053D`.
+  It was not attended on the target because the pump model had already been
+  falsified and the runner safety boundary had been crossed by the follow-up.
 - PR #17 implemented host-generation invalidation at completion, guest close,
   replacement, and shutdown. Attended validation showed the former stale-black
   interval became grey; the remaining grey transition is a separate unresolved
