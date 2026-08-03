@@ -11307,7 +11307,9 @@ public static partial class AgcExports
             }
         }
 
-        if (evaluationHandledByCpu)
+        // Rejected/CPU-handled dispatches never hand evaluation's pooled buffers to a
+        // consumer that would return them; reclaim here to keep GuestDataPool.Shared bounded.
+        if (evaluationHandledByCpu || !gpuDispatch)
         {
             ReturnPooledEvaluationArrays(evaluation);
         }
