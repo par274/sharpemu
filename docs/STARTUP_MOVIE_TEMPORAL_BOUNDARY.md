@@ -8,18 +8,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
 Status: cumulative target finding with the stale-generation correction and
 movie-local timeline contract established. Lawful packet measurement falsified
 the authored bounded compressed-packet queue as a practical target model. The
-first one-demux decode-and-discard implementation then failed target validation:
-it lost required future video frames. A bounded demux-boundary repair preserved
-one packet and one next frame but stalled at the first future frame and crossed
-the physical-memory safety boundary. A focused independent-context probe then
-supported a separately bounded movie-audio demux/decode context, and the
-production boundary now uses it for movies with audio. The first targeted retail
-listening run reached the later host movies and main menu. A subsequent attended
-scalar-diagnostic pilot reached only the grey interval before the unchanged
-physical-memory safety boundary. The independent movie stream drained cleanly
-in that pilot, but the audible artifacts and unresolved guest-stream attribution
-prevent accepting the correction; no claim is made until the remaining boundary
-is corrected and comparable confirmation runs pass.
+one-demux decode-and-discard alternatives failed target validation and remain
+rejected. A focused independent-context probe supported a separately bounded
+movie-audio demux/decode context, and the production boundary uses it for movies
+with audio. The attended source-isolation matrix now attributes the audible
+startup defects to two guest owners: AudioOut2 supplies the noisy logo-like
+sound, while AudioOut supplies the intermittent logo-like music over grey. The
+independent movie stream is clean under isolation and remains a selected,
+bounded production model, but the retail audio correction is not accepted: no
+production mute or guest-audio repair has been proposed, and comparable
+correction confirmations are not justified yet.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
@@ -72,6 +70,15 @@ The consequential identifiers for the earlier target findings are:
   Audio diagnostics and the existing per-run memory-diagnostics stream were
   enabled. The runner stopped at the unchanged physical-headroom boundary;
   raw diagnostics remain outside Git.
+- Attended source-isolation matrix at commit `2bb2763a8f63a9514690d447dbc819b9a25c9a0c`,
+  executable SHA-256
+  `314F43820D84431198559E306667DB2D5717D627B9D6DB397EB748EA30240871`:
+  `20260803T072518812Z-2bb2763-trial-01` selected `movie` only,
+  `20260803T073325015Z-2bb2763-trial-01` selected `audio-out2` only, and
+  `20260803T073637726Z-2bb2763-trial-01` selected `audio-out` only. The
+  opt-in scalar diagnostics and source-isolation switch were enabled only for
+  these runs. The temporary switch and its tests were removed in commit
+  `40a7302`; raw manifests and diagnostics remain outside Git.
 
 Raw target assets, traces, logs, manifests, source samples, movie fingerprints,
 and target paths remain outside Git.
@@ -415,35 +422,77 @@ between embedded movie audio and other guest audio are now the next audio
 frontier. They must be traced separately from the grey/black/flashing rendering
 problem and from the general low-FPS condition.
 
-The subsequent attended scalar-diagnostic pilot reached only the grey interval.
-The maintainer reported the same audible behavior through that point as in the
-first listening run: the first PlayStation Studios audio was not stretched but
-contained persistent noise, and a similar intermittent sound continued over the
-grey interval before the earlier logo tail had finished. The later host movies,
-including `attract_movie.bk2` and `logo_intro.bk2`, were not reached in this
-pilot, so their audible owner remains unresolved.
+The source-isolation matrix established the following direct observations and
+scalar correlations. Selection was by stable owner identity and replaced only
+the selected PCM bytes immediately before host submission; it did not skip
+packets, change queue admission, or alter movie lifecycle.
 
-The scalar records establish a narrower ownership result for the reached route:
+### Observation
 
-- Movie stream 2, owner `movie`, generation 1, decoded 408,960 source frames,
-  converted and submitted all 408,960 output frames, and rejected none. Source
-  PTS ran from `0` to `8.48` seconds; the submitted local audio progress reached
-  `8.52` seconds. Demux EOF, decoder EOF, resampler drain, codec drain, host
-  drain, and disposal all completed without a failure reason.
-- The movie stream recorded one temporary underrun totaling approximately
-  721 ms. Its bounded PCM windows had a maximum peak of approximately `0.58`,
-  RMS of `0.19`, and zero clipping. These scalar values do not establish
-  recognizable or noise-free physical audio.
-- The movie stream was disposed after generation 1 completed. Guest AudioOut2
-  stream 1 and guest AudioOut stream 3 remained active and continued submitting
-  after that disposal, with no rejected submissions. They are candidates for
-  the grey-interval sound, but scalar activity alone cannot identify which one
-  was audible.
-- The runner stopped after approximately 89.493 seconds at 1.990 GiB available
-  physical memory against the unchanged 2 GiB floor. Peak working set was
-  8.157 GiB, peak private memory 13.866 GiB, and minimum commit headroom
-  24.543 GiB. No confirmation run is justified after this falsifying safety
-  result.
+- `movie` only (`audio-out2,audio-out` silenced): the maintainer heard clear,
+  clean PS Studios audio; the grey interval was silent. Movie audio, the
+  Demon's Souls name animation, menu music, and button audio were absent, as
+  expected with the guest sources silenced. The run reached the later visual
+  sequence and stopped at the unchanged physical-headroom boundary after
+  250.988 seconds; peak working set was 8.138 GiB, peak private memory
+  16.655 GiB, and the boundary sample was 1.653 GiB available physical memory.
+- `audio-out2` only (`movie,audio-out` silenced): the maintainer heard the PS
+  Studios sound as laggy and noisy. No grey-interval noise was heard during the
+  short grey observation before the unchanged physical-headroom boundary after
+  75.988 seconds; peak working set was 8.368 GiB, peak private memory
+  14.169 GiB, and available physical memory reached 1.881 GiB.
+- `audio-out` only (`movie,audio-out2` silenced): the maintainer heard laggy,
+  non-noisy PS Studios audio in the left ear and the same laggy logo-like music
+  intermittently over grey. Movie audio, the name animation, menu music, and
+  button audio were absent. The run later exited normally after 216.874
+  seconds; peak working set was 7.762 GiB, peak private memory 15.956 GiB,
+  minimum available physical memory 2.898 GiB, and minimum commit headroom
+  22.897 GiB.
+
+### Scalar corroboration
+
+- The independent movie stream was `movie`, source `ps_studios_logo.bk2`,
+  generation 1, stream identity 2 only for raw correlation. In all three runs
+  it decoded, converted, and submitted 408,960 frames with zero failed frames;
+  source PTS ran from `0` to `8.48` seconds and local progress reached `8.52`
+  seconds. Demux EOF, decoder EOF, resampler drain, codec drain, host drain,
+  and disposal all completed without a failure reason.
+- The stable guest identities were `audio-out2-primary` / source
+  `guest-audio-out2-primary` for AudioOut2, and `port-1` / source `port-1` for
+  AudioOut. The raw host stream numbers 1, 2, and 3 are reported only as
+  correlation metadata, never as isolation selectors.
+- In the AudioOut2-only run, `audio-out2-primary` submitted 1,841,664 frames
+  with 1,841,376 estimated dequeues, zero rejected frames, and scalar PCM
+  windows up to peak `0.233` / RMS `0.052`; the selected AudioOut and movie
+  streams were zeroed at submission.
+- In the AudioOut-only run, `audio-out` submitted 5,363,456 frames with
+  5,360,640 estimated dequeues, zero rejected frames, and scalar PCM windows
+  up to peak `0.804` / RMS `0.030`; the selected AudioOut2 and movie streams
+  were zeroed at submission.
+- In the movie-only run, the movie decoder's pre-isolation PCM windows remained
+  nonzero, up to peak `0.81` / RMS `0.21`, while both guest streams' submitted
+  windows were zero. The movie submitted 408,960 frames and its host stream
+  disposed at generation completion with no post-disposal submission.
+
+### Inference
+
+The independent movie context is not the source of the audible corruption:
+when it alone remained audible, the PS Studios audio was clean and the grey
+interval was silent. AudioOut2 is the owner of the noisy logo-like duplicate.
+AudioOut is the owner of the intermittent/replayed logo-like music heard over
+grey and also emits a left-channel-only, laggy logo-like signal during the
+opening. Both guest owners therefore produce overlapping logo-related audio;
+the evidence does not justify changing either guest path yet.
+
+### Uncertainty
+
+The matrix identifies the stable host owners and their HLE seams, but it does
+not yet identify the guest-side mixer/event that feeds each stream or explain
+the left-channel asymmetry. It also does not attribute `attract_movie.bk2` or
+`logo_intro.bk2`; those later observations remain out of scope. The grey visual
+output, including the later main-menu grey state, remains a separate video
+rendering problem. Scalar PCM statistics do not replace direct listening and
+do not establish the intended title mix.
 
 ## Evaluated alternatives
 
@@ -521,11 +570,13 @@ conversion storage plus packet/sample limits provide the retained-state bound.
 The first attended target run showed the intended temporal improvement and
 later/menu progression, but direct listening found persistent noise, replayed
 or intermittent sound over the grey interval, severe logo-intro noise, and
-sound during the audio-less `attract_movie.bk2`. The subsequent scalar pilot
-showed that the reached PS Studios stream can decode, submit, drain, and dispose
-cleanly, while guest streams remain active afterward; it did not reach the
-later assets. This model remains selected for investigation but is not an
-accepted audio correction.
+sound during the audio-less `attract_movie.bk2`. The later source-isolation
+matrix proved that the independent movie stream is clean and that the two
+remaining audible defects belong to separate guest owners: noisy logo audio
+from AudioOut2 and intermittent grey-interval logo audio from AudioOut. This
+model remains selected as the bounded movie playback architecture, but it is
+not an accepted retail audio correction; no guest source has been muted or
+changed.
 
 ### C. Unbounded decoded-frame or packet queue
 
@@ -643,16 +694,19 @@ history and is not production code.
   of every FFmpeg allocator or device-driver allocation. The attended pilot
   measured the complete emulator process, but crossed the unchanged physical
   headroom floor before later movie ownership could be tested.
-- The selected implementation has one attended listening run and one attended
-  scalar-diagnostic pilot, but its audible result is not correct enough to
-  accept: the first logo has noisy artifacts and the grey interval has
-  intermittent/replayed sound. The first run reached the main menu and offline
-  path but not Character Creation; the second reached only grey. The unchanged
-  physical-memory boundary prevents safe confirmation runs.
-- The earlier one-demux pilots did not reach main-menu progression and remain
-  no evidence about the selected model. The selected model reached later host
-  movies and menu audio once, but still lacks comparable confirmation and a
-  source-level explanation for the later audible output.
+- The source-isolation matrix attributes the first-logo noise to
+  `audio-out2-primary` and the grey-interval intermittent music to AudioOut
+  `port-1`, while the independent movie stream remains clean. It does not yet
+  identify the guest-side mixer/event feeding either stream, explain the
+  left-channel asymmetry, or establish the intended title mix.
+- The isolation runs are attribution evidence, not correction confirmations:
+  two stopped at the unchanged physical-headroom boundary and the one normal
+  exit still showed the unresolved grey video output. No production audio
+  source has been muted or repaired, so two comparable post-correction runs
+  remain unjustified.
+- Later `attract_movie.bk2` and `logo_intro.bk2` ownership remains out of scope
+  until the guest startup owners are traced. The main-menu grey output is a
+  separate unresolved video-rendering boundary.
 - The title's intended proprietary clock ownership remains unknown. The
   movie-local contract is justified by the authored boundary and target clock
   observations, not by a claim about Sony internals.
@@ -706,9 +760,10 @@ GPU semantics. Retail target confirmations remain unjustified after the current
 pilot's physical-headroom boundary; the earlier one-demux pilots are not
 evidence against this separately bounded model.
 
-Verification completed before retail target launch:
+Final cleaned-branch verification:
 
 - focused media and audio suite: 135 passed;
+- complete media suite: 68 passed;
 - complete solution suite: 897 passed;
 - Fast verification passed, including the target-memory, VMMap, runner
   supervision, Release build, and complete solution test gates;
