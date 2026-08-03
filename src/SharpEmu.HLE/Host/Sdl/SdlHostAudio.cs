@@ -116,8 +116,6 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private SDL_AudioStream* _stream;
         private bool _disposed;
         private long _totalSubmittedInputBytes;
-        private HostAudioProgressState _progressState = HostAudioProgressState.Starting;
-        private double _lastEstimatedPlayedSeconds;
         private string _diagnosticOwner = string.Empty;
         private string _diagnosticSource = string.Empty;
         private string _diagnosticPhase = "open";
@@ -135,6 +133,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private bool _queueIsEmpty;
         private long _clockReportAcceptedCount;
         private long _clockReportRejectedCount;
+        private double _lastEstimatedPlayedSeconds;
         private bool _hasDeviceState;
         private string _lastDeviceSignature = string.Empty;
         private long _deviceStateTransitionCount;
@@ -220,39 +219,6 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             }
         }
 
-        public HostAudioProgress Progress
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return ReadProgressLocked();
-                }
-            }
-        }
-
-        public void MarkCompleted()
-        {
-            lock (_gate)
-            {
-                if (!_disposed && _progressState is not HostAudioProgressState.Failed)
-                {
-                    _progressState = HostAudioProgressState.Completed;
-                }
-            }
-        }
-
-        public void MarkFailed()
-        {
-            lock (_gate)
-            {
-                if (!_disposed)
-                {
-                    _progressState = HostAudioProgressState.Failed;
-                }
-            }
-        }
-
         public bool Submit(ReadOnlySpan<byte> pcm)
         {
             if (pcm.IsEmpty)
@@ -298,11 +264,6 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     submitted = SDL_PutAudioStreamData(_stream, (nint)data, pcm.Length);
                 }
 
-                if (!submitted)
-                {
-                    _progressState = HostAudioProgressState.Failed;
-                }
-
                 if (_sampleAccounting is not null)
                 {
                     _sampleAccounting?.RecordSubmission(pcm.Length, submitted);
@@ -325,19 +286,16 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     // audible device consumption here.
                     _totalSubmittedInputBytes += pcm.Length;
                     var bytesPerSecond = (double)_bytesPerFrame * _sampleRate;
-                    if (bytesPerSecond > 0 && queued >= 0)
+                    if (bytesPerSecond > 0)
                     {
                         var estimatedPlayedSeconds = Math.Max(
                             0,
                             _totalSubmittedInputBytes - queued - pcm.Length) /
                             bytesPerSecond;
                         var reportAccepted = GuestAudioClock.Report(estimatedPlayedSeconds);
-                        _lastEstimatedPlayedSeconds = Math.Max(
-                            _lastEstimatedPlayedSeconds,
-                            estimatedPlayedSeconds);
-                        _progressState = HostAudioProgressState.Running;
                         if (_sampleAccounting is not null)
                         {
+                            _lastEstimatedPlayedSeconds = estimatedPlayedSeconds;
                             if (reportAccepted)
                             {
                                 _clockReportAcceptedCount++;
@@ -508,43 +466,6 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             }
 
             return queuedBytes;
-        }
-
-        private HostAudioProgress ReadProgressLocked()
-        {
-            if (_disposed || _stream is null)
-            {
-                return new(HostAudioProgressState.Disposed, _lastEstimatedPlayedSeconds);
-            }
-
-            if (_progressState is HostAudioProgressState.Completed or
-                HostAudioProgressState.Failed)
-            {
-                return new(_progressState, _lastEstimatedPlayedSeconds);
-            }
-
-            var queuedBytes = ReadQueuedBytesLocked();
-            ObserveQueueLocked(queuedBytes, Stopwatch.GetTimestamp());
-            if (queuedBytes < 0)
-            {
-                return new(HostAudioProgressState.Unavailable, _lastEstimatedPlayedSeconds);
-            }
-
-            var bytesPerSecond = (double)_bytesPerFrame * _sampleRate;
-            if (bytesPerSecond <= 0)
-            {
-                return new(HostAudioProgressState.Unavailable, _lastEstimatedPlayedSeconds);
-            }
-
-            _lastEstimatedPlayedSeconds = Math.Max(
-                _lastEstimatedPlayedSeconds,
-                Math.Max(0, _totalSubmittedInputBytes - queuedBytes) / bytesPerSecond);
-            _progressState = _totalSubmittedInputBytes == 0
-                ? HostAudioProgressState.Starting
-                : queuedBytes == 0
-                    ? HostAudioProgressState.TemporaryUnderrun
-                    : HostAudioProgressState.Running;
-            return new(_progressState, _lastEstimatedPlayedSeconds);
         }
 
         private void ObserveQueueLocked(int queuedBytes, long timestamp)
@@ -733,7 +654,6 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 }
 
                 _disposed = true;
-                _progressState = HostAudioProgressState.Disposed;
                 if (_stream is not null)
                 {
                     SDL_ClearAudioStream(_stream);

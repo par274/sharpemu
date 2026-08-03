@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.Libs.Media;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Media;
@@ -9,117 +8,178 @@ namespace SharpEmu.Libs.Tests.Media;
 public sealed class MovieTimelineContractTests
 {
     [Fact]
-    public void MovieUsesOnlyItsOwnAudioProgressAndCapsItToLocalWallTime()
+    public void CurrentSharedClockAllowsUnrelatedAudioToAdvanceMovieSelection()
     {
-        var time = new FakeMonotonicClock();
-        var movie = Start(time, generation: 1, hasAudio: true, Running(0));
+        var currentSelection = CurrentSharedGuestAudioClockContract.Select(
+            wallSeconds: 1.0,
+            sharedClockAtStart: 100.0,
+            sharedClockSeconds: 101.0,
+            isRunning: true);
 
-        time.Advance(0.75);
-        Assert.Equal(0.60, movie.Read(Running(0.60)));
-        Assert.Equal(MovieTimelineMode.MovieAudio, movie.Mode);
+        // The movie's own authored audio has progressed only 0.2 seconds, but
+        // the current shared clock selects the unrelated stream's full second.
+        Assert.Equal(1.0, currentSelection);
+        Assert.True(currentSelection > 0.2);
     }
 
     [Fact]
-    public void AudioLessMovieUsesLocalMonotonicWallTime()
+    public void CurrentSharedClockCanStretchMovieWhenUnrelatedAudioLags()
     {
-        var time = new FakeMonotonicClock();
-        var movie = Start(time, generation: 1, hasAudio: false, default);
+        var currentSelection = CurrentSharedGuestAudioClockContract.Select(
+            wallSeconds: 1.0,
+            sharedClockAtStart: 50.0,
+            sharedClockSeconds: 50.2,
+            isRunning: true);
 
-        time.Advance(0.75);
-        Assert.Equal(0.75, movie.Read(default));
-        Assert.Equal(MovieTimelineMode.MovieWall, movie.Mode);
+        // The movie's own authored audio has progressed 0.8 seconds, while a
+        // slow unrelated stream limits the current shared selection to 0.2.
+        Assert.Equal(0.2, currentSelection, precision: 10);
+        Assert.True(currentSelection < 0.8);
     }
 
     [Fact]
-    public void StartingAndTemporaryUnderrunHoldUntilAudioRunsAgain()
+    public void MovieAudioAdvancesWhileUnrelatedAudioOut2IsAhead()
     {
-        var time = new FakeMonotonicClock();
-        var movie = Start(
-            time,
-            generation: 1,
-            hasAudio: true,
-            new MovieAudioProgress(MovieAudioProgressState.Starting, 0));
+        var time = new FakeMonotonicTime();
+        var movie = new MovieTimelineFactory(time).Start("with-audio.bk2", hasAudio: true);
+        time.Advance(0.75);
 
+        var selected = movie.Read(new AuthoredMovieAudioProgress(
+            AuthoredMovieAudioState.Running,
+            Seconds: 0.60));
+
+        Assert.Equal(0.60, selected);
+        Assert.Equal(AuthoredMovieTimelineMode.MovieAudio, movie.Mode);
+    }
+
+    [Fact]
+    public void UnrelatedAudioOut2ProgressCannotAdvanceMovieLocalClock()
+    {
+        var time = new FakeMonotonicTime();
+        var movie = new MovieTimelineFactory(time).Start("with-audio.bk2", hasAudio: true);
+        time.Advance(1.0);
+
+        // The unrelated stream is deliberately far ahead. It is not passed to
+        // MovieTimelineExperiment.Read, matching the proposed ownership rule.
+        var unrelatedAudioOut2Seconds = 90.0;
+        _ = unrelatedAudioOut2Seconds;
+        var selected = movie.Read(new AuthoredMovieAudioProgress(
+            AuthoredMovieAudioState.Running,
+            Seconds: 0.20));
+
+        Assert.Equal(0.20, selected);
+        Assert.NotEqual(unrelatedAudioOut2Seconds, selected);
+    }
+
+    [Fact]
+    public void AudioLessMovieUsesItsOwnMonotonicWallTime()
+    {
+        var time = new FakeMonotonicTime();
+        var movie = new MovieTimelineFactory(time).Start("silent.bk2", hasAudio: false);
+        time.Advance(0.75);
+
+        var selected = movie.Read(new AuthoredMovieAudioProgress(
+            AuthoredMovieAudioState.Failed,
+            Seconds: 50));
+
+        Assert.Equal(0.75, selected);
+        Assert.Equal(AuthoredMovieTimelineMode.MovieWall, movie.Mode);
+        time.Advance(0.25);
+        Assert.Equal(1.0, movie.Read(default));
+    }
+
+    [Fact]
+    public void MovieAudioUnderrunHoldsVideoToMovieLocalAudio()
+    {
+        var time = new FakeMonotonicTime();
+        var movie = new MovieTimelineFactory(time).Start("with-audio.bk2", hasAudio: true);
         time.Advance(0.5);
-        Assert.Equal(0, movie.Read(new MovieAudioProgress(
-            MovieAudioProgressState.Starting,
-            0)));
-
-        time.Advance(0.1);
         Assert.Equal(0.4, movie.Read(Running(0.4)));
 
         time.Advance(0.5);
-        Assert.Equal(0.4, movie.Read(new MovieAudioProgress(
-            MovieAudioProgressState.TemporaryUnderrun,
-            0.8)));
-        Assert.Equal(MovieTimelineMode.HeldDuringUnderrun, movie.Mode);
-
-        time.Advance(0.2);
-        Assert.Equal(0.6, movie.Read(Running(0.6)));
+        Assert.Equal(0.4, movie.Read(new AuthoredMovieAudioProgress(
+            AuthoredMovieAudioState.TemporaryUnderrun,
+            Seconds: 12.0)));
+        Assert.Equal(AuthoredMovieTimelineMode.HeldDuringUnderrun, movie.Mode);
     }
 
     [Fact]
-    public void CompletionAndPermanentFailureAnchorWallContinuation()
+    public void PermanentMovieAudioFailureFallsBackToLocalWallTime()
     {
-        var time = new FakeMonotonicClock();
-        var movie = Start(time, generation: 1, hasAudio: true, Running(0));
-
+        var time = new FakeMonotonicTime();
+        var movie = new MovieTimelineFactory(time).Start("with-audio.bk2", hasAudio: true);
         time.Advance(0.5);
-        Assert.Equal(0.5, movie.Read(Running(0.5)));
+        Assert.Equal(0.3, movie.Read(Running(0.3)));
 
         time.Advance(0.2);
-        Assert.Equal(0.5, movie.Read(new MovieAudioProgress(
-            MovieAudioProgressState.Completed,
-            0.5)));
-        Assert.Equal(MovieTimelineMode.FallbackWall, movie.Mode);
+        Assert.Equal(0.3, movie.Read(new AuthoredMovieAudioProgress(
+            AuthoredMovieAudioState.Failed,
+            Seconds: 0.3)));
+        Assert.Equal(AuthoredMovieTimelineMode.FallbackWall, movie.Mode);
 
         time.Advance(0.7);
-        Assert.Equal(1.2, movie.Read(Running(0.5)));
+        Assert.Equal(1.0, movie.Read(Running(0.3)));
     }
 
     [Fact]
-    public void PauseAndResumeRebasesWithoutAnAudioJump()
+    public void TemporaryUnderrunDoesNotSilentlySwitchTimelinesOrJumpForward()
     {
-        var time = new FakeMonotonicClock();
-        var movie = Start(time, generation: 1, hasAudio: true, Running(0));
-
-        time.Advance(0.5);
-        Assert.Equal(0.5, movie.Read(Running(0.5)));
-        movie.Pause(Running(0.5));
-
-        time.Advance(5.0);
-        Assert.Equal(0.5, movie.Read(Running(0.9)));
-
-        movie.Resume(Running(0.9));
-        Assert.Equal(0.5, movie.Read(Running(0.9)));
-
+        var time = new FakeMonotonicTime();
+        var movie = new MovieTimelineFactory(time).Start("with-audio.bk2", hasAudio: true);
         time.Advance(0.2);
-        Assert.Equal(0.7, movie.Read(Running(1.1)), precision: 10);
+        Assert.Equal(0.2, movie.Read(Running(0.2)));
+
+        time.Advance(1.0);
+        var held = movie.Read(new AuthoredMovieAudioProgress(
+            AuthoredMovieAudioState.TemporaryUnderrun,
+            Seconds: 40.0));
+        Assert.Equal(0.2, held);
+        Assert.False(movie.IsFallback);
+
+        time.Advance(0.1);
+        Assert.Equal(0.3, movie.Read(Running(0.3)));
     }
 
     [Fact]
-    public void TerminalGenerationCannotAdvanceAndReplacementStartsAtZero()
+    public void CompletionAndReplacementTerminateTheOldClock()
     {
-        var time = new FakeMonotonicClock();
-        var first = Start(time, generation: 7, hasAudio: false, default);
+        var time = new FakeMonotonicTime();
+        var factory = new MovieTimelineFactory(time);
+        var first = factory.Start("first.bk2", hasAudio: false);
         time.Advance(1.0);
         Assert.Equal(1.0, first.Read(default));
 
-        first.Skip();
+        first.Complete();
         time.Advance(5.0);
         Assert.Equal(1.0, first.Read(default));
         Assert.True(first.IsTerminal);
 
-        var replacement = Start(time, generation: 8, hasAudio: false, default);
+        var replacement = factory.Replace(first, "second.bk2", hasAudio: false);
         Assert.NotEqual(first.Generation, replacement.Generation);
         Assert.Equal(0.0, replacement.Read(default));
     }
 
     [Fact]
-    public void MovieValuesRemainMonotonicWhenAudioEstimateRegresses()
+    public void SamePathReplacementReceivesANewClockIdentity()
     {
-        var time = new FakeMonotonicClock();
-        var movie = Start(time, generation: 1, hasAudio: true, Running(0));
+        var time = new FakeMonotonicTime();
+        var factory = new MovieTimelineFactory(time);
+        var first = factory.Start("same-path.bk2", hasAudio: true);
+        time.Advance(0.4);
+        Assert.Equal(0.4, first.Read(Running(0.4)));
+
+        var replacement = factory.Replace(first, "same-path.bk2", hasAudio: true);
+
+        Assert.Equal(first.Path, replacement.Path);
+        Assert.NotEqual(first.Generation, replacement.Generation);
+        Assert.Equal(0.0, replacement.Read(Running(0.0)));
+    }
+
+    [Fact]
+    public void MovieClockValuesRemainMonotonicWithinOneGeneration()
+    {
+        var time = new FakeMonotonicTime();
+        var movie = new MovieTimelineFactory(time).Start("monotonic.bk2", hasAudio: true);
         var values = new List<double>();
 
         time.Advance(0.4);
@@ -130,43 +190,54 @@ public sealed class MovieTimelineContractTests
         values.Add(movie.Read(Running(0.8)));
 
         Assert.Equal([0.4, 0.4, 0.8], values);
+        Assert.True(values.Zip(values.Skip(1)).All(pair => pair.First <= pair.Second));
     }
 
     [Fact]
-    public void AudioFailureBeforeFirstFrameUsesWallFallback()
+    public void DiagnosticsDisabledDoesNoPayloadConstructionOrEventWork()
     {
-        var time = new FakeMonotonicClock();
-        var movie = Start(
-            time,
-            generation: 1,
+        var time = new FakeMonotonicTime();
+        var diagnostics = new AuthoredTimelineDiagnostics(enabled: false);
+        var movie = new MovieTimelineFactory(time).Start(
+            "diagnostics-off.bk2",
             hasAudio: true,
-            new MovieAudioProgress(MovieAudioProgressState.Failed, 0));
+            diagnostics: diagnostics);
 
-        time.Advance(0.25);
-        Assert.Equal(0.25, movie.Read(new MovieAudioProgress(
-            MovieAudioProgressState.Failed,
-            0)));
-        Assert.Equal(MovieTimelineMode.FallbackWall, movie.Mode);
+        for (var index = 0; index < 8; index++)
+        {
+            time.Advance(0.1);
+            _ = movie.Read(Running(index * 0.1));
+        }
+
+        Assert.Equal(0, diagnostics.PayloadsBuilt);
+        Assert.Empty(diagnostics.Events);
     }
 
-    private static MovieTimeline Start(
-        FakeMonotonicClock time,
-        long generation,
-        bool hasAudio,
-        MovieAudioProgress initial)
+    [Fact]
+    public void PauseSkipAndDisposeKeepLifecycleStateLocalAndTerminal()
     {
-        var movie = new MovieTimeline(generation, hasAudio, time);
-        movie.Start(initial);
-        return movie;
+        var time = new FakeMonotonicTime();
+        var movie = new MovieTimelineFactory(time).Start("lifecycle.bk2", hasAudio: false);
+        time.Advance(0.5);
+        Assert.Equal(0.5, movie.Read(default));
+
+        movie.Pause(default);
+        time.Advance(5.0);
+        Assert.Equal(0.5, movie.Read(default));
+        movie.Resume();
+        time.Advance(0.5);
+        Assert.Equal(1.0, movie.Read(default));
+
+        movie.Skip();
+        time.Advance(5.0);
+        Assert.Equal(1.0, movie.Read(default));
+        Assert.True(movie.IsTerminal);
+
+        movie.Dispose();
+        Assert.Equal(1.0, movie.Read(default));
+        Assert.True(movie.IsTerminal);
     }
 
-    private static MovieAudioProgress Running(double seconds) =>
-        new(MovieAudioProgressState.Running, seconds);
-
-    private sealed class FakeMonotonicClock : IMovieMonotonicClock
-    {
-        public double Seconds { get; private set; }
-
-        internal void Advance(double seconds) => Seconds += seconds;
-    }
+    private static AuthoredMovieAudioProgress Running(double seconds) =>
+        new(AuthoredMovieAudioState.Running, seconds);
 }

@@ -14,15 +14,10 @@ namespace SharpEmu.Libs.Media;
 /// libraries published by github.com/sharpemu/ffmpeg-core -- no native C
 /// bridge of our own to build. See docs/bink2-bridge.md.
 /// </summary>
-internal sealed unsafe class FfmpegVideoDecoder :
-    IMediaFrameDecoder,
-    IMediaAudioDiagnostics,
-    IMovieAudioProgressSource,
-    IMediaPumpDiagnostics
+internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder, IMediaAudioDiagnostics
 {
     private const int OutputAudioChannels = 2;
     private const int OutputAudioBytesPerSample = sizeof(short);
-    private const int MaximumRetainedPacketBytes = 2 * 1024 * 1024;
 
     private readonly object _decodeGate = new();
     private AVFormatContext* _formatContext;
@@ -31,16 +26,11 @@ internal sealed unsafe class FfmpegVideoDecoder :
     private SwsContext* _swsContext;
     private SwrContext* _swrContext;
     private AVFrame* _frame;
-    private AVFrame* _pendingFrame;
     private AVFrame* _audioFrame;
     private AVPacket* _packet;
-    private AVPacket* _retainedPacket;
     private IHostAudioStream? _audioStream;
     private readonly int _videoStreamIndex;
-    private readonly AVRational _videoTimeBase;
-    private readonly double _videoFrameDurationSeconds;
     private readonly int _audioStreamIndex;
-    private readonly bool _hasAudioTrack;
     private readonly int _audioOutputSampleRate;
     private readonly AVRational _audioTimeBase;
     private readonly double _declaredAudioDurationSeconds;
@@ -63,21 +53,8 @@ internal sealed unsafe class FfmpegVideoDecoder :
     private int _swrInputSampleRate;
     private bool _swrInputLayoutValid;
     private bool _draining;
-    private bool _videoFlushSent;
-    private bool _videoFailed;
-    private bool _videoDecoderDrained;
-    private bool _audioFlushSent;
+    private bool _audioDraining;
     private bool _audioFailed;
-    private bool _audioCompleted;
-    private MovieAudioProgressState _audioProgressState;
-    private double _lastMovieAudioSeconds;
-    private double _pendingFrameTimestampSeconds = double.NaN;
-    private double _pendingFrameDurationSeconds;
-    private int _retainedPacketBytes;
-    private bool _retainedPacketOwned;
-    private long _lateVideoFrameCount;
-    private long _retainedNextFrameCount;
-    private string _pumpState = "video-decode";
     private int _disposed;
 
     public uint Width { get; }
@@ -88,33 +65,12 @@ internal sealed unsafe class FfmpegVideoDecoder :
 
     public uint FramesPerSecondDenominator { get; }
 
-    public bool HasAudioTrack => _hasAudioTrack;
-
-    public long LateVideoFrameCount => Interlocked.Read(ref _lateVideoFrameCount);
-
-    public long RetainedNextFrameCount => Interlocked.Read(ref _retainedNextFrameCount);
-
-    public string PumpState => Volatile.Read(ref _pumpState);
-
-    public long RetainedPacketCount => _retainedPacketOwned ? 1 : 0;
-
-    public long RetainedPacketBytes => Volatile.Read(ref _retainedPacketBytes);
-
-    public double? NextVideoWakeupSeconds =>
-        HasPendingFrame && !double.IsNaN(_pendingFrameTimestampSeconds)
-            ? _pendingFrameTimestampSeconds + _pendingFrameDurationSeconds
-            : null;
-
     private FfmpegVideoDecoder(
         AVFormatContext* formatContext,
         AVCodecContext* codecContext,
         int videoStreamIndex,
-        AVRational videoTimeBase,
-        double videoFrameDurationSeconds,
         AVCodecContext* audioCodecContext,
         int audioStreamIndex,
-        bool hasAudioTrack,
-        bool audioOpenFailed,
         IHostAudioStream? audioStream,
         int audioOutputSampleRate,
         AVRational audioTimeBase,
@@ -130,11 +86,8 @@ internal sealed unsafe class FfmpegVideoDecoder :
         _formatContext = formatContext;
         _codecContext = codecContext;
         _videoStreamIndex = videoStreamIndex;
-        _videoTimeBase = videoTimeBase;
-        _videoFrameDurationSeconds = videoFrameDurationSeconds;
         _audioCodecContext = audioCodecContext;
         _audioStreamIndex = audioStreamIndex;
-        _hasAudioTrack = hasAudioTrack;
         _audioStream = audioStream;
         _audioOutputSampleRate = audioOutputSampleRate;
         _audioTimeBase = audioTimeBase;
@@ -142,13 +95,6 @@ internal sealed unsafe class FfmpegVideoDecoder :
         _audioInputSampleRate = audioInputSampleRate;
         _audioInputChannels = audioInputChannels;
         _audioInputFormat = audioInputFormat;
-        _audioFailed = hasAudioTrack &&
-            (audioOpenFailed || audioCodecContext is null || audioStream is null);
-        _audioProgressState = !hasAudioTrack
-            ? MovieAudioProgressState.NoTrack
-            : _audioFailed
-                ? MovieAudioProgressState.Failed
-                : MovieAudioProgressState.Starting;
         _audioStreamDiagnostics = HostAudioDiagnostics.Enabled
             ? audioStream as IHostAudioStreamDiagnostics
             : null;
@@ -157,10 +103,8 @@ internal sealed unsafe class FfmpegVideoDecoder :
         FramesPerSecondNumerator = framesPerSecondNumerator;
         FramesPerSecondDenominator = framesPerSecondDenominator;
         _frame = ffmpeg.av_frame_alloc();
-        _pendingFrame = ffmpeg.av_frame_alloc();
         _audioFrame = audioCodecContext is null ? null : ffmpeg.av_frame_alloc();
         _packet = ffmpeg.av_packet_alloc();
-        _retainedPacket = ffmpeg.av_packet_alloc();
     }
 
     private static void EnsureRootPathInitialized() =>
@@ -179,7 +123,6 @@ internal sealed unsafe class FfmpegVideoDecoder :
         AVCodecContext* codecContext = null;
         AVCodecContext* audioCodecContext = null;
         IHostAudioStream? audioStream = null;
-        var audioOpenFailed = false;
         try
         {
             if (ffmpeg.avformat_open_input(&formatContext, path, null, null) < 0)
@@ -238,29 +181,15 @@ internal sealed unsafe class FfmpegVideoDecoder :
                 frameRate = new AVRational { num = 30, den = 1 };
             }
 
-            AVCodec* audioDecoder = null;
-            var detectedAudioStreamIndex = ffmpeg.av_find_best_stream(
-                formatContext,
-                AVMediaType.AVMEDIA_TYPE_AUDIO,
-                -1,
-                -1,
-                &audioDecoder,
-                0);
-            var hasAudioTrack = detectedAudioStreamIndex >= 0;
             var audioStreamIndex = TryOpenAudioDecoder(
                 formatContext,
                 out audioCodecContext,
                 out var audioOutputSampleRate);
-            if (hasAudioTrack && audioStreamIndex < 0)
-            {
-                audioOpenFailed = true;
-                audioStreamIndex = detectedAudioStreamIndex;
-            }
             var audioTimeBase = default(AVRational);
             var declaredAudioDurationSeconds = 0d;
-            if (detectedAudioStreamIndex >= 0)
+            if (audioStreamIndex >= 0)
             {
-                var audioMediaStream = formatContext->streams[detectedAudioStreamIndex];
+                var audioMediaStream = formatContext->streams[audioStreamIndex];
                 audioTimeBase = audioMediaStream->time_base;
                 if (audioMediaStream->duration > 0 && audioTimeBase.den > 0)
                 {
@@ -288,8 +217,8 @@ internal sealed unsafe class FfmpegVideoDecoder :
                         exception);
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] Bink audio output unavailable: {exception.Message}");
-                    audioOpenFailed = true;
                     ffmpeg.avcodec_free_context(&audioCodecContext);
+                    audioStreamIndex = -1;
                     audioOutputSampleRate = 0;
                 }
             }
@@ -318,12 +247,8 @@ internal sealed unsafe class FfmpegVideoDecoder :
                 formatContext,
                 codecContext,
                 videoStreamIndex,
-                stream->time_base,
-                (double)frameRate.den / frameRate.num,
                 audioCodecContext,
                 audioStreamIndex,
-                hasAudioTrack,
-                audioOpenFailed,
                 audioStream,
                 audioOutputSampleRate,
                 audioTimeBase,
@@ -458,67 +383,13 @@ internal sealed unsafe class FfmpegVideoDecoder :
         }
     }
 
-    public MovieAudioProgress GetMovieAudioProgress()
+    public bool TryDecodeNextFrame(Span<byte> destination)
     {
         lock (_decodeGate)
         {
-            if (Volatile.Read(ref _disposed) != 0)
-            {
-                return new(MovieAudioProgressState.Disposed, _lastMovieAudioSeconds);
-            }
-
-            if (!_hasAudioTrack)
-            {
-                return new(MovieAudioProgressState.NoTrack, 0);
-            }
-
-            if (_audioFailed)
-            {
-                return new(MovieAudioProgressState.Failed, _lastMovieAudioSeconds);
-            }
-
-            if (_audioCompleted)
-            {
-                return new(MovieAudioProgressState.Completed, _lastMovieAudioSeconds);
-            }
-
-            if (_audioStream is null)
-            {
-                return new(MovieAudioProgressState.Failed, _lastMovieAudioSeconds);
-            }
-
-            var hostProgress = _audioStream.Progress;
-            _lastMovieAudioSeconds = Math.Max(
-                _lastMovieAudioSeconds,
-                Math.Max(0, hostProgress.EstimatedPlayedSeconds));
-            _audioProgressState = hostProgress.State switch
-            {
-                HostAudioProgressState.Starting => MovieAudioProgressState.Starting,
-                HostAudioProgressState.Running => MovieAudioProgressState.Running,
-                HostAudioProgressState.TemporaryUnderrun => MovieAudioProgressState.TemporaryUnderrun,
-                HostAudioProgressState.Completed => MovieAudioProgressState.Completed,
-                HostAudioProgressState.Failed => MovieAudioProgressState.Failed,
-                HostAudioProgressState.Disposed => MovieAudioProgressState.Disposed,
-                HostAudioProgressState.Unavailable => MovieAudioProgressState.Unavailable,
-                _ => MovieAudioProgressState.Unavailable,
-            };
-            return new(_audioProgressState, _lastMovieAudioSeconds);
-        }
-    }
-
-    public bool TryDecodeNextFrame(Span<byte> destination, double movieSeconds)
-    {
-        lock (_decodeGate)
-        {
-            Volatile.Write(ref _pumpState, "video-decode");
             if (Volatile.Read(ref _disposed) != 0)
             {
                 return false;
-            }
-
-            if (_draining)
-            {
-                DrainAudioDecoder();
             }
 
             var stride = checked((int)(Width * 4));
@@ -528,467 +399,48 @@ internal sealed unsafe class FfmpegVideoDecoder :
                 return false;
             }
 
-            while (true)
+            if (!TryReceiveFrame())
             {
-                AVFrame* frameToConvert;
-                var retained = false;
-                if (HasPendingFrame)
-                {
-                    if (IsFrameLate(_pendingFrame, movieSeconds))
-                    {
-                        DiscardPendingFrame(late: true);
-                        continue;
-                    }
-
-                    frameToConvert = _pendingFrame;
-                    retained = true;
-                }
-                else
-                {
-                    if (!TryReceiveFrame())
-                    {
-                        RecordMovieDecoderSummaryIfDue();
-                        return false;
-                    }
-
-                    if (IsFrameLate(_frame, movieSeconds))
-                    {
-                        ffmpeg.av_frame_unref(_frame);
-                        Interlocked.Increment(ref _lateVideoFrameCount);
-                        continue;
-                    }
-
-                    frameToConvert = _frame;
-                }
-
-                var converted = ConvertVideoFrame(frameToConvert, destination, stride);
-                if (retained)
-                {
-                    DiscardPendingFrame(late: false);
-                }
-                else
-                {
-                    ffmpeg.av_frame_unref(_frame);
-                }
-
                 RecordMovieDecoderSummaryIfDue();
-                return converted;
-            }
-        }
-    }
-
-    public MediaPumpResult PumpAudioWhileVideoBackpressured(double movieSeconds)
-    {
-        lock (_decodeGate)
-        {
-            Volatile.Write(ref _pumpState, "audio-pump");
-            if (Volatile.Read(ref _disposed) != 0)
-            {
-                return MediaPumpResult.Disposed;
-            }
-
-            if (_videoFailed)
-            {
-                return MediaPumpResult.Failed;
-            }
-
-            if (!_hasAudioTrack || _audioFailed)
-            {
-                return MediaPumpResult.Backpressure;
-            }
-
-            if (HasPendingFrame && IsFrameLate(_pendingFrame, movieSeconds))
-            {
-                DiscardPendingFrame(late: true);
-            }
-
-            // A future decoded frame is the boundary between the video
-            // decoder and the interleaved demux. Do not read past the next
-            // video packet until that frame is either presented or becomes
-            // late. The packet is a single bounded hand-off, not a growing
-            // deferred-video queue.
-            if (HasPendingFrame)
-            {
-                if (HasRetainedPacket)
-                {
-                    return MediaPumpResult.Backpressure;
-                }
-
-                while (true)
-                {
-                    var readResult = ffmpeg.av_read_frame(_formatContext, _packet);
-                    if (readResult < 0)
-                    {
-                        Volatile.Write(ref _pumpState, "drain");
-                        BeginDrain();
-                        DrainVideoFramesForPump(movieSeconds);
-                        if (_videoFailed)
-                        {
-                            Volatile.Write(ref _pumpState, "failed");
-                            return MediaPumpResult.Failed;
-                        }
-
-                        return MediaPumpResult.Backpressure;
-                    }
-
-                    if (_packet->stream_index == _audioStreamIndex)
-                    {
-                        DecodeAudioPacket(_packet);
-                        ffmpeg.av_packet_unref(_packet);
-                        return MediaPumpResult.Progress;
-                    }
-
-                    if (_packet->stream_index == _videoStreamIndex)
-                    {
-                        if (!RetainPacket(_packet))
-                        {
-                            ffmpeg.av_packet_unref(_packet);
-                            Volatile.Write(ref _pumpState, "failed");
-                            return MediaPumpResult.Failed;
-                        }
-
-                        ffmpeg.av_packet_unref(_packet);
-                        return MediaPumpResult.Backpressure;
-                    }
-
-                    ffmpeg.av_packet_unref(_packet);
-                }
-            }
-
-            while (true)
-            {
-                var readResult = TryGetNextPacketForPump(out var packet);
-                if (readResult < 0)
-                {
-                    Volatile.Write(ref _pumpState, "drain");
-                    BeginDrain();
-                    DrainVideoFramesForPump(movieSeconds);
-                    if (_videoFailed)
-                    {
-                        Volatile.Write(ref _pumpState, "failed");
-                        return MediaPumpResult.Failed;
-                    }
-                    return HasPendingFrame || !_videoDecoderDrained
-                        ? MediaPumpResult.Backpressure
-                        : MediaPumpResult.EndOfInput;
-                }
-
-                if (packet->stream_index == _audioStreamIndex)
-                {
-                    DecodeAudioPacket(packet);
-                    ReleasePumpPacket(packet);
-                    return MediaPumpResult.Progress;
-                }
-
-                if (packet->stream_index == _videoStreamIndex)
-                {
-                    var sendResult = SendVideoPacket(packet, movieSeconds);
-                    ReleasePumpPacket(packet);
-                    if (!sendResult)
-                    {
-                        Volatile.Write(ref _pumpState, "failed");
-                        return MediaPumpResult.Failed;
-                    }
-
-                    DrainVideoFramesForPump(movieSeconds);
-                    if (_videoFailed)
-                    {
-                        Volatile.Write(ref _pumpState, "failed");
-                        return MediaPumpResult.Failed;
-                    }
-
-                    if (HasPendingFrame)
-                    {
-                        return MediaPumpResult.Backpressure;
-                    }
-
-                    continue;
-                }
-
-                ReleasePumpPacket(packet);
-            }
-        }
-    }
-
-    private int TryGetNextPacketForPump(out AVPacket* packet)
-    {
-        if (HasRetainedPacket)
-        {
-            packet = _retainedPacket;
-            return 0;
-        }
-
-        packet = _packet;
-        var readResult = ffmpeg.av_read_frame(_formatContext, _packet);
-        if (readResult < 0)
-        {
-            return readResult;
-        }
-
-        return 0;
-    }
-
-    private void ReleasePumpPacket(AVPacket* packet)
-    {
-        if (packet == _retainedPacket)
-        {
-            ClearRetainedPacket();
-            return;
-        }
-
-        ffmpeg.av_packet_unref(packet);
-    }
-
-    private bool RetainPacket(AVPacket* packet)
-    {
-        if (_retainedPacket is null ||
-            _retainedPacketOwned ||
-            packet->size < 0 ||
-            packet->size > MaximumRetainedPacketBytes)
-        {
-            _videoFailed = true;
-            return false;
-        }
-
-        if (ffmpeg.av_packet_ref(_retainedPacket, packet) < 0)
-        {
-            _videoFailed = true;
-            return false;
-        }
-
-        _retainedPacketOwned = true;
-        Volatile.Write(ref _retainedPacketBytes, packet->size);
-        return true;
-    }
-
-    private void ClearRetainedPacket()
-    {
-        if (_retainedPacket is null)
-        {
-            return;
-        }
-
-        ffmpeg.av_packet_unref(_retainedPacket);
-        _retainedPacketOwned = false;
-        Volatile.Write(ref _retainedPacketBytes, 0);
-    }
-
-    private bool SendVideoPacket(AVPacket* packet, double movieSeconds)
-    {
-        while (true)
-        {
-            var sendResult = ffmpeg.avcodec_send_packet(_codecContext, packet);
-            if (sendResult >= 0)
-            {
-                return true;
-            }
-
-            if (sendResult != ffmpeg.AVERROR(ffmpeg.EAGAIN))
-            {
-                _videoFailed = true;
                 return false;
             }
 
-            DrainVideoFramesForPump(movieSeconds);
-            if (_videoFailed)
-            {
-                return false;
-            }
-        }
-    }
-
-    private bool ConvertVideoFrame(AVFrame* frame, Span<byte> destination, int stride)
-    {
-        _swsContext = ffmpeg.sws_getCachedContext(
-            _swsContext,
-            frame->width,
-            frame->height,
-            (AVPixelFormat)frame->format,
-            (int)Width,
-            (int)Height,
-            AVPixelFormat.AV_PIX_FMT_BGRA,
-            ffmpeg.SWS_FAST_BILINEAR,
-            null,
-            null,
-            null);
-        if (_swsContext is null)
-        {
-            return false;
-        }
-
-        fixed (byte* destinationPointer = destination)
-        {
-            var destinationPlanes = new byte*[4] { destinationPointer, null, null, null };
-            var destinationStrides = new int[4] { stride, 0, 0, 0 };
-            var convertedRows = ffmpeg.sws_scale(
+            _swsContext = ffmpeg.sws_getCachedContext(
                 _swsContext,
-                frame->data,
-                frame->linesize,
-                0,
-                frame->height,
-                destinationPlanes,
-                destinationStrides);
-            return convertedRows == (int)Height;
-        }
-    }
-
-    private void DrainVideoFramesForPump(double movieSeconds)
-    {
-        if (_pendingFrame is null)
-        {
-            _videoFailed = true;
-            return;
-        }
-
-        if (HasPendingFrame)
-        {
-            if (IsFrameLate(_pendingFrame, movieSeconds))
-            {
-                DiscardPendingFrame(late: true);
-            }
-            else
-            {
-                // Do not consume a second future frame. The next demux packet
-                // is retained at the boundary and will be sent only after this
-                // frame is presented or becomes irrecoverably late.
-                return;
-            }
-        }
-
-        while (true)
-        {
-            var receiveResult = ffmpeg.avcodec_receive_frame(_codecContext, _frame);
-            if (receiveResult == ffmpeg.AVERROR(ffmpeg.EAGAIN) ||
-                receiveResult == ffmpeg.AVERROR_EOF)
-            {
-                if (receiveResult == ffmpeg.AVERROR_EOF)
-                {
-                    _videoDecoderDrained = true;
-                }
-                else if (_draining && !_videoFlushSent)
-                {
-                    TrySendVideoFlushPacket();
-                }
-                return;
-            }
-
-            if (receiveResult < 0)
-            {
-                _videoFailed = true;
-                _videoDecoderDrained = true;
-                return;
-            }
-
-            if (HasPendingFrame && IsFrameLate(_pendingFrame, movieSeconds))
-            {
-                DiscardPendingFrame(late: true);
-            }
-
-            if (IsFrameLate(_frame, movieSeconds))
+                _frame->width,
+                _frame->height,
+                (AVPixelFormat)_frame->format,
+                (int)Width,
+                (int)Height,
+                AVPixelFormat.AV_PIX_FMT_BGRA,
+                ffmpeg.SWS_FAST_BILINEAR,
+                null,
+                null,
+                null);
+            if (_swsContext is null)
             {
                 ffmpeg.av_frame_unref(_frame);
-                Interlocked.Increment(ref _lateVideoFrameCount);
-                continue;
+                RecordMovieDecoderSummaryIfDue();
+                return false;
             }
 
-            if (!HasPendingFrame)
+            fixed (byte* destinationPointer = destination)
             {
-                if (ffmpeg.av_frame_ref(_pendingFrame, _frame) < 0)
-                {
-                    ffmpeg.av_frame_unref(_frame);
-                    _videoDecoderDrained = true;
-                    return;
-                }
-
-                _pendingFrameTimestampSeconds = GetFrameTimestamp(_frame) ?? double.NaN;
-                _pendingFrameDurationSeconds = GetFrameDuration(_frame);
-                Interlocked.Exchange(ref _retainedNextFrameCount, 1);
-
+                var destinationPlanes = new byte*[4] { destinationPointer, null, null, null };
+                var destinationStrides = new int[4] { stride, 0, 0, 0 };
+                var convertedRows = ffmpeg.sws_scale(
+                    _swsContext,
+                    _frame->data,
+                    _frame->linesize,
+                    0,
+                    _frame->height,
+                    destinationPlanes,
+                    destinationStrides);
                 ffmpeg.av_frame_unref(_frame);
-                return;
+                RecordMovieDecoderSummaryIfDue();
+                return convertedRows == (int)Height;
             }
-
-            ffmpeg.av_frame_unref(_frame);
         }
-    }
-
-    private bool HasPendingFrame =>
-        _pendingFrame is not null && _pendingFrame->data[0] != null;
-
-    private bool HasRetainedPacket =>
-        _retainedPacketOwned && _retainedPacket is not null;
-
-    private void DiscardPendingFrame(bool late)
-    {
-        if (!HasPendingFrame)
-        {
-            return;
-        }
-
-        ffmpeg.av_frame_unref(_pendingFrame);
-        _pendingFrameTimestampSeconds = double.NaN;
-        _pendingFrameDurationSeconds = 0;
-        Interlocked.Exchange(ref _retainedNextFrameCount, 0);
-        if (late)
-        {
-            Interlocked.Increment(ref _lateVideoFrameCount);
-        }
-    }
-
-    private bool IsFrameLate(AVFrame* frame, double movieSeconds)
-    {
-        var timestamp = GetFrameTimestamp(frame);
-        if (timestamp is not double actual)
-        {
-            return false;
-        }
-
-        return actual + GetFrameDuration(frame) <= movieSeconds;
-    }
-
-    private double? GetFrameTimestamp(AVFrame* frame)
-    {
-        var timestamp = frame->best_effort_timestamp != ffmpeg.AV_NOPTS_VALUE
-            ? frame->best_effort_timestamp
-            : frame->pts;
-        return timestamp == ffmpeg.AV_NOPTS_VALUE
-            ? null
-            : timestamp * ((double)_videoTimeBase.num / _videoTimeBase.den);
-    }
-
-    private double GetFrameDuration(AVFrame* frame) =>
-        frame->duration > 0
-            ? frame->duration * ((double)_videoTimeBase.num / _videoTimeBase.den)
-            : _videoFrameDurationSeconds;
-
-    private void BeginDrain()
-    {
-        _draining = true;
-        TrySendVideoFlushPacket();
-        DrainAudioDecoder();
-    }
-
-    private bool TrySendVideoFlushPacket()
-    {
-        if (_videoFlushSent || _videoDecoderDrained || _videoFailed)
-        {
-            return !_videoFailed;
-        }
-
-        var sendResult = ffmpeg.avcodec_send_packet(_codecContext, null);
-        if (sendResult >= 0)
-        {
-            _videoFlushSent = true;
-            return true;
-        }
-
-        if (sendResult == ffmpeg.AVERROR(ffmpeg.EAGAIN))
-        {
-            return false;
-        }
-
-        _videoFailed = true;
-        return false;
     }
 
     private void RecordMovieDecoderSummaryIfDue()
@@ -1033,25 +485,17 @@ internal sealed unsafe class FfmpegVideoDecoder :
 
             if (receiveResult == ffmpeg.AVERROR_EOF)
             {
-                DrainAudioDecoder();
-                _videoDecoderDrained = true;
                 return false;
             }
 
             if (receiveResult != ffmpeg.AVERROR(ffmpeg.EAGAIN))
             {
-                _videoFailed = true;
                 return false;
             }
 
             if (_draining)
             {
-                if (!TrySendVideoFlushPacket())
-                {
-                    return false;
-                }
-
-                continue;
+                return false;
             }
 
             if (!TryFeedPacket())
@@ -1065,63 +509,32 @@ internal sealed unsafe class FfmpegVideoDecoder :
     {
         while (true)
         {
-            AVPacket* packet;
-            int readResult;
-            if (HasRetainedPacket)
-            {
-                packet = _retainedPacket;
-                readResult = 0;
-            }
-            else
-            {
-                packet = _packet;
-                readResult = ffmpeg.av_read_frame(_formatContext, _packet);
-            }
-
+            var readResult = ffmpeg.av_read_frame(_formatContext, _packet);
             if (readResult < 0)
             {
-                BeginDrain();
+                _draining = true;
+                ffmpeg.avcodec_send_packet(_codecContext, null);
+                DrainAudioDecoder();
                 return true;
             }
 
-            if (packet->stream_index == _audioStreamIndex)
+            if (_packet->stream_index == _audioStreamIndex)
             {
-                DecodeAudioPacket(packet);
-                ReleasePumpPacket(packet);
+                DecodeAudioPacket(_packet);
+                ffmpeg.av_packet_unref(_packet);
                 continue;
             }
 
-            if (packet->stream_index != _videoStreamIndex)
+            if (_packet->stream_index != _videoStreamIndex)
             {
-                ReleasePumpPacket(packet);
+                ffmpeg.av_packet_unref(_packet);
                 continue;
             }
 
-            if (packet == _packet && !RetainPacket(_packet))
+            var sendResult = ffmpeg.avcodec_send_packet(_codecContext, _packet);
+            ffmpeg.av_packet_unref(_packet);
+            if (sendResult < 0 && sendResult != ffmpeg.AVERROR(ffmpeg.EAGAIN))
             {
-                ffmpeg.av_packet_unref(_packet);
-                return false;
-            }
-
-            if (packet == _packet)
-            {
-                ffmpeg.av_packet_unref(_packet);
-            }
-
-            var sendResult = ffmpeg.avcodec_send_packet(_codecContext, _retainedPacket);
-            if (sendResult == ffmpeg.AVERROR(ffmpeg.EAGAIN))
-            {
-                // TryReceiveFrame should have drained the codec before asking
-                // for another packet. Keep the packet owned if FFmpeg still
-                // reports EAGAIN; losing it would break dependent frames.
-                _videoFailed = true;
-                return false;
-            }
-
-            ClearRetainedPacket();
-            if (sendResult < 0)
-            {
-                _videoFailed = true;
                 return false;
             }
 
@@ -1155,26 +568,17 @@ internal sealed unsafe class FfmpegVideoDecoder :
     private void DrainAudioDecoder()
     {
         if (_audioCodecContext is null || _audioFrame is null ||
-            _audioCompleted || _audioFailed)
+            _audioDraining || _audioFailed)
         {
             return;
         }
 
-        if (!_audioFlushSent)
+        _audioDraining = true;
+        var sendResult = ffmpeg.avcodec_send_packet(_audioCodecContext, null);
+        if (sendResult >= 0 || sendResult == ffmpeg.AVERROR(ffmpeg.EAGAIN))
         {
-            var sendResult = ffmpeg.avcodec_send_packet(_audioCodecContext, null);
-            if (sendResult >= 0)
-            {
-                _audioFlushSent = true;
-            }
-            else if (sendResult != ffmpeg.AVERROR(ffmpeg.EAGAIN))
-            {
-                DisableAudio("audio flush failed");
-                return;
-            }
+            DrainAvailableAudioFrames();
         }
-
-        DrainAvailableAudioFrames();
     }
 
     private void DrainAvailableAudioFrames()
@@ -1185,12 +589,6 @@ internal sealed unsafe class FfmpegVideoDecoder :
             if (receiveResult == ffmpeg.AVERROR(ffmpeg.EAGAIN) ||
                 receiveResult == ffmpeg.AVERROR_EOF)
             {
-                if (receiveResult == ffmpeg.AVERROR_EOF)
-                {
-                    _audioCompleted = true;
-                    _audioProgressState = MovieAudioProgressState.Completed;
-                    _audioStream?.MarkCompleted();
-                }
                 return;
             }
 
@@ -1387,9 +785,6 @@ internal sealed unsafe class FfmpegVideoDecoder :
         }
 
         _audioFailed = true;
-        _audioProgressState = MovieAudioProgressState.Failed;
-        Volatile.Write(ref _pumpState, "failed");
-        _audioStream?.MarkFailed();
         Console.Error.WriteLine($"[LOADER][WARN] Bink audio disabled: {reason}.");
         FreeAudioResampler();
         _audioStream?.Dispose();
@@ -1419,15 +814,13 @@ internal sealed unsafe class FfmpegVideoDecoder :
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         lock (_decodeGate)
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0)
-            {
-                return;
-            }
-
-            Volatile.Write(ref _pumpState, "disposed");
-            _audioProgressState = MovieAudioProgressState.Disposed;
             FreeAudioResampler();
             _audioStream?.Dispose();
             _audioStream = null;
@@ -1445,30 +838,11 @@ internal sealed unsafe class FfmpegVideoDecoder :
                 _packet = null;
             }
 
-            if (_retainedPacket is not null)
-            {
-                var packet = _retainedPacket;
-                ffmpeg.av_packet_free(&packet);
-                _retainedPacket = null;
-                _retainedPacketOwned = false;
-                Volatile.Write(ref _retainedPacketBytes, 0);
-            }
-
             if (_frame is not null)
             {
                 var frame = _frame;
                 ffmpeg.av_frame_free(&frame);
                 _frame = null;
-            }
-
-            if (_pendingFrame is not null)
-            {
-                var frame = _pendingFrame;
-                ffmpeg.av_frame_free(&frame);
-                _pendingFrame = null;
-                _pendingFrameTimestampSeconds = double.NaN;
-                _pendingFrameDurationSeconds = 0;
-                Interlocked.Exchange(ref _retainedNextFrameCount, 0);
             }
 
             if (_audioFrame is not null)

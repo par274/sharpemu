@@ -11,8 +11,8 @@ the authored bounded compressed-packet queue as a practical target model. The
 production direction is now the smaller decode-and-discard model: keep FFmpeg
 codec state ordered, pump interleaved audio while video destinations are full,
 retain at most one decoded next frame, and discard video that is late against
-the movie-local timeline. The model is implemented; target validation remains
-pending the controlled Release pilot and attended-run authorization.
+the movie-local timeline. Target validation is recorded only when that model
+has been implemented and attended runs have been authorized.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
@@ -78,19 +78,19 @@ inputs, not as results inferred from the authored model:
 The target assets, raw traces, logs, manifests, and game-derived data remain
 outside Git.
 
-## Evidence-gate coverage and production-facing tests
+## Authored experiment
 
-The rejected packet-cap arithmetic remains as a small test-only evidence helper
-in `MoviePacketCapacityEvidenceTests.cs`; it is not a production queue. The
-timeline and media-pump tests now exercise the production
-`MovieTimeline`/`MediaFramePlayback` boundaries with fake monotonic time,
-explicit gates, packet timestamps, and synthetic packets. The old experiment
-model files were removed once the production types covered their distinct
-contracts. No retail content, FFmpeg-generated fixture, sleep, or wall-clock
-assertion is used by these tests.
+The experiment is test-only in
+`tests/SharpEmu.Libs.Tests/Media/MovieAudioPumpExperiment.cs` and
+`MovieTimelineExperiment.cs`. It uses no retail content, FFmpeg-generated file,
+sleep, or wall-clock assertion. The timeline tests advance `FakeMonotonicTime`
+explicitly.
 
-The original authored packet schedule remains useful as a compact description of
-the starvation boundary:
+This is not a parallel media architecture. Once production behavior is
+implemented and production-facing tests cover the distinct contracts, remove or
+collapse test-only model code that no longer protects a separate contract.
+
+The primary authored packet schedule is:
 
 ```text
 V1 V2 V3 V4 V5 A6 V7 A8 V9 A10
@@ -105,21 +105,29 @@ V1 V2 V3 V4 V5 V6(4) V7(4) V8(5) A9
 ```
 
 where the parenthesized values are authored compressed-packet byte sizes. The
-candidate bound was two deferred video packets and eight retained bytes. The
-production test helper retains only scalar count/byte arithmetic; it does not
-recreate a packet queue or retain packet identity.
+candidate bound is two deferred video packets and eight retained bytes. The
+model records packet identity, buffer identity, retained packet count, retained
+bytes, EOF, failure, and disposal state.
 
-The production-facing tests now cover the selected one-frame model with an
-explicit five-destination gate, interleaved audio, timestamped late output,
-complete slow-consumer input, and disposal. The rejected packet-cap arithmetic
-is kept separately as evidence-gate coverage so its byte and count semantics do
-not become production machinery.
+Two current-behavior checks are intentionally separate from the candidate:
+
+1. An actual `MediaFramePlayback` instance is rendezvoused after its fifth
+   authored video frame. Its decoder has made five calls, submitted no later
+   audio, and still has `A6 V7 A8` unread.
+2. A deterministic replay of the current `MediaFramePlayback` and
+   `IMediaFrameDecoder` contract makes the same boundary explicit without
+   relying on thread scheduling.
+
+The current shared-clock expression is also replayed separately: an unrelated
+stream can supply the selected progress when it is ahead, or hold the selection
+back when it is slow. The candidate movie-local clock tests must reject both
+outcomes.
 
 ## Tested facts
 
-### Pre-change packet behavior
+### Current packet behavior
 
-Before the selected production change, the production contract was:
+The current production contract is:
 
 ```text
 if no free RGBA destination:
@@ -213,25 +221,15 @@ reference overhead. A practical finite cap would therefore fill and reproduce
 the measured audio starvation. The largest individual packet is 1,506,800
 bytes, so no small byte cap can hide an oversized packet outside the bound.
 
-The ignored local runtime smoke opened `ps_studios_logo.bk2` through the
-production `FfmpegVideoDecoder` with the SDL dummy audio driver. Direct decode
-reached all 255 video frames without late drops. A separate
-`MediaFramePlayback` run held all five external destinations, reached the
-interleaved audio pump, reported movie audio `Running`, and retained exactly
-one next decoded frame with zero retained compressed packets. Direct smoke
-decodes also opened `attract_movie.bk2` and `main_menu_ngp.bk2` and decoded 600
-frames each. These are local runtime checks, not attended target results.
-
 The authored two-packet/eight-byte candidate remains valid as a synthetic
 ownership and backpressure experiment, but it is falsified as the production
 target model by this evidence gate. It is rejected because the required
 backlog is duration-dependent and material on the 16 GiB host, not because
 FFmpeg reference counting is inherently unreliable.
 
-### Selected timeline behavior
+### Candidate timeline behavior
 
-The production `MovieTimeline` and `MediaFramePlayback` tests establish these
-emulator-owned rules:
+The authored clock tests establish these emulator-owned rules:
 
 1. A movie with its own audio uses that movie's local audio-progress estimate.
 2. An audio-less movie uses its own monotonic wall-time origin.
@@ -248,14 +246,13 @@ emulator-owned rules:
    same-path replacement.
 9. Values are monotonic within one generation, even if an audio estimate
    regresses.
-10. Diagnostics-disabled execution retains the existing diagnostic short-circuit;
-    production media code does not make the movie timeline depend on it.
+10. When timeline diagnostics are disabled, no authored diagnostic payload or
+    event is constructed.
 
-The direct timeline tests cover audio ownership, no-audio wall time, temporary
-underrun, permanent failure, pause/resume, completion, replacement identity,
-and monotonicity. The media-pump tests cover the five-destination gate, audio
-pumping, late-frame discard, EOF/disposal, and zero compressed-packet
-retention.
+The tests cover a movie with audio, an audio-less movie, an unrelated AudioOut2
+clock that is ahead, temporary underrun, permanent audio failure, pause, skip,
+completion, replacement, same-path replacement, disposal, monotonicity, and
+diagnostics-disabled execution.
 
 ## Evaluated alternatives
 
@@ -292,11 +289,10 @@ future decoded video      → retain only the single next frame, or discard
 
 The future-frame rule is deliberately small: the earliest future decoded frame
 is the only frame allowed to cross the no-destination boundary. Later frames are
-decoded to preserve codec reference state and immediately released; they are not
-copied into another queue. The demux continues through the following video run
-until the next audio packet or EOF, so interleaved audio is reached without
-retaining the run. This preserves codec reference state while keeping the
-retained media bound independent of movie duration.
+not copied into another queue; the audio submission boundary paces demux work,
+and the consumer will receive the retained next frame before the decoder reads
+the following video run. This preserves codec reference state while allowing
+the measured audio packets behind a video run to be reached.
 
 At EOF, the demux is marked exhausted, both decoders are drained, the retained
 next frame is delivered or released, and only then can playback complete.
@@ -360,7 +356,7 @@ current `GuestAudioClock` and does not assert that the PS5 uses the same model.
 
 ## Lifecycle and synchronization invariants
 
-The implementation preserves these invariants:
+The next implementation must preserve all of these invariants:
 
 1. A decoded RGBA destination has one owner. It is not overwritten, reused, or
    returned to the free pool until that owner releases it.
@@ -398,10 +394,9 @@ fallback, and unrelated `GuestAudioClock` values are never inputs.
 
 The authored two-packet/eight-byte queue remains synthetic test coverage for
 ownership and backpressure history, but it is not production code and does not
-set a target limit. Production-facing tests cover late-frame discard, PTS
-ordering, the one-frame bound, audio pumping while destinations are full,
-complete slow-consumer input, and disposal ownership. The real FFmpeg path was
-also exercised locally against the lawful assets without retaining payloads.
+set a target limit. Production-facing tests must instead cover late-frame
+discard, PTS ordering, the one-frame bound, audio pumping while destinations are
+full, and exact FFmpeg frame release.
 
 The audio seam must expose local estimated progress without depending on
 `HostAudioDiagnostics`: no-track, running, temporary-underrun, normal completion,
@@ -420,8 +415,8 @@ The timeline must be created for each host movie generation and must use:
 5. a held value while paused, with resume rebasing the local wall origin;
 6. a terminal old identity on skip, completion, replacement, and disposal.
 
-This is a finite ownership model implemented and covered by deterministic
-synthetic testing. It has no target-specific override and does not require a
+This is a finite ownership model fully specified for deterministic synthetic
+testing. It is safe to implement without a target-specific override or a
 separate audio context.
 
 ## Remaining uncertainty
@@ -435,8 +430,8 @@ separate audio context.
   device/decoder failure must be tied to explicit host error/state transitions,
   not an arbitrary elapsed-time guess.
 - The selected one-frame late-discard path has not yet been attended on the
-  target; its frame-drop distribution, exact movie/audio visual alignment, and
-  wall-duration effect remain target validation questions.
+  target; its frame-drop distribution and exact movie/audio visual alignment
+  remain target validation questions.
 - The title's intended proprietary clock ownership remains unknown. The
   selected contract is justified by emulator ownership, target observations,
   and bounded behavior, not by a claim about Sony internals.
@@ -472,7 +467,7 @@ occur:
 This experiment's focused lane is:
 
 ```powershell
-dotnet test tests\SharpEmu.Libs.Tests\SharpEmu.Libs.Tests.csproj -c Release --filter "FullyQualifiedName~MediaFramePlaybackTests|FullyQualifiedName~MovieAudioPumpContractTests|FullyQualifiedName~MovieTimelineContractTests|FullyQualifiedName~MoviePacketCapacityEvidenceTests"
+dotnet test tests\SharpEmu.Libs.Tests\SharpEmu.Libs.Tests.csproj -c Release --filter "FullyQualifiedName~MovieAudioPumpContractTests|FullyQualifiedName~MovieTimelineContractTests"
 ```
 
 The requested repository verification remains:
@@ -483,22 +478,4 @@ git diff --check
 ```
 
 Shader verification is unnecessary because this change touches no shader or
-GPU semantics. Target validation is pending the controlled Release pilot and
-attended-run authorization.
-
-### Release pilot preflight
-
-The clean self-contained Windows Release artifact was published from commit
-`15f6944e283bd643e405a40c1d8d7b34a03015bb` on 2026-08-03. Its `SharpEmu.exe`
-SHA-256 is:
-
-```text
-F62A41247BD76A541964DD486477D9193A45BCDDAFE8AD4445E71D4FBD4A7880
-```
-
-The read-only preflight preserved target `PPSA01341`, Europe, `1.004.000`,
-and the expected eboot SHA-256 above. Windows reported automatic page-file
-management disabled and a 32,768 MiB page file; the configured runner limits
-remain 9 GiB working set, 2 GiB minimum available physical memory, and 4 GiB
-minimum commit headroom. No attended target run has been launched for this
-phase; the pilot is waiting for readiness authorization.
+GPU semantics. No retail target run is required for this experiment.

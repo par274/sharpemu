@@ -17,23 +17,6 @@ public interface IHostAudioStream : IDisposable
     bool Submit(ReadOnlySpan<byte> stereoPcm16);
 
     /// <summary>
-    /// Progress estimated from this stream's own input queue. Backends that
-    /// cannot report equivalent state return <see cref="HostAudioProgress.Unavailable"/>
-    /// through this default implementation.
-    /// </summary>
-    HostAudioProgress Progress => HostAudioProgress.Unavailable;
-
-    /// <summary>Marks normal end of the stream's owned input.</summary>
-    void MarkCompleted()
-    {
-    }
-
-    /// <summary>Marks a permanent submission, decoder, or device failure.</summary>
-    void MarkFailed()
-    {
-    }
-
-    /// <summary>
     /// Audio already handed to the device and not yet played, in milliseconds —
     /// the cushion protecting playback from a late submission. Zero means the
     /// device has run dry and is emitting silence.

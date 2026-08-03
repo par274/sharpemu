@@ -12,9 +12,9 @@ namespace SharpEmu.HLE.Host;
 /// minus the input-format bytes still queued for conversion. SDL queue state
 /// does not expose all conversion, device, or hardware buffering, so this is
 /// not a direct measurement of samples physically played or heard by the user.
-/// Wall clock may run ahead of it when the guest cannot feed the device. This
-/// remains an ordinary guest-audio diagnostic; host movies use their owning
-/// stream's progress instead of this process-wide value.
+/// Wall clock may run ahead of it when the guest cannot feed the device, so
+/// host-decoded video can use this estimate as a diagnostic timeline without
+/// treating it as a hardware playback measurement.
 ///
 /// Reported per stream and kept as the furthest-along value: the guest's ports
 /// all carry one mix, and the leading port is the one whose position the

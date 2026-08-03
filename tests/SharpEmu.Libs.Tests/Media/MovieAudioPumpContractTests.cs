@@ -9,196 +9,312 @@ namespace SharpEmu.Libs.Tests.Media;
 public sealed class MovieAudioPumpContractTests
 {
     [Fact]
-    public void AudioPumpsWhenAllFiveExternalDestinationsAreOwned()
+    public void CurrentMediaFramePlaybackStopsCallingDecoderWhenFiveBuffersAreOwned()
     {
-        var decoder = new SyntheticMovieDecoder(
+        var decoder = new InterleavedDecoder(
         [
-            Video(1), Video(2), Video(3), Video(4), Video(5),
-            Audio(6), Video(7), Audio(8), Video(9), Audio(10),
-        ],
-        hasAudioTrack: true,
-        videoGate: 5,
-        audioGate: 3);
+            Video(1),
+            Video(2),
+            Video(3),
+            Video(4),
+            Video(5),
+            Audio(6),
+            Video(7),
+            Audio(8),
+        ]);
 
-        using var playback = new MediaFramePlayback(decoder);
-
-        decoder.WaitForVideoOutput(5);
-        decoder.WaitForAudioPackets(3);
-
-        Assert.Equal([1, 2, 3, 4, 5], decoder.ExternalVideoPackets);
-        Assert.Equal([6, 8, 10], decoder.SubmittedAudioPackets);
-        Assert.Equal(1, decoder.RetainedNextFrameCount);
-        Assert.Equal(0, decoder.RetainedPacketCount);
-        Assert.Equal(0, decoder.RetainedPacketBytes);
-        Assert.True(decoder.PumpCalls > 0);
-    }
-
-    [Fact]
-    public void SlowConsumerAcrossCompleteMovieKeepsRetainedStateBounded()
-    {
-        var packets = new List<SyntheticPacket>();
-        for (var index = 0; index < 180; index++)
+        using (var playback = new MediaFramePlayback(decoder))
         {
-            packets.Add(Video(index, index / 30.0));
-            if (index % 6 == 5)
-            {
-                packets.Add(Audio(10_000 + index / 6));
-            }
+            Assert.True(
+                decoder.FiveBuffersOwned.Wait(TimeSpan.FromSeconds(2)),
+                "The current decoder contract did not fill all five destinations.");
+            Assert.Equal(5, decoder.DecodedVideoPacketSequences.Count);
+            Assert.Empty(decoder.SubmittedAudioPacketSequences);
+            Assert.Equal(3, decoder.RemainingPacketCount);
+            Assert.Equal(5, decoder.TryDecodeNextFrameCalls);
         }
-
-        var decoder = new SyntheticMovieDecoder(packets, hasAudioTrack: true);
-        var time = new FakeMonotonicClock();
-        using var playback = new MediaFramePlayback(decoder, monotonicClock: time);
-
-        decoder.WaitForVideoOutput(5);
-        decoder.WaitForEndOfInput();
-
-        // One presentation every 500 ms models the measured 2 FPS consumer.
-        if (!playback.TryGetFrame(true, out _, out _))
-        {
-            throw new InvalidOperationException(
-                $"video={decoder.ExternalVideoPackets.Count} remaining={decoder.RemainingPackets} " +
-                $"pump={decoder.PumpCalls} state={decoder.PumpState}");
-        }
-        for (var index = 1; index <= 8; index++)
-        {
-            time.Advance(0.5);
-            decoder.SetAudioProgress(index * 0.5);
-            _ = playback.TryGetFrame(true, out _, out _);
-        }
-
-        Assert.Equal(
-            180,
-            decoder.PumpedVideoPackets.Count + decoder.ExternalVideoPackets.Count);
-        Assert.Equal(30, decoder.SubmittedAudioPackets.Count);
-        Assert.Equal(
-            decoder.SubmittedAudioPackets.OrderBy(sequence => sequence),
-            decoder.SubmittedAudioPackets);
-        Assert.InRange(decoder.MaximumRetainedNextFrameCount, 0, 1);
-        Assert.Equal(0, decoder.RetainedPacketCount);
-        Assert.Equal(0, decoder.RetainedPacketBytes);
-    }
-
-    [Fact]
-    public void LateDecodedVideoIsDiscardedUsingPacketTimestamp()
-    {
-        var decoder = new SyntheticMovieDecoder(
-            [Video(1, 0), Video(2, 1.0 / 30), Audio(3)],
-            hasAudioTrack: true);
-
-        Assert.Equal(
-            MediaPumpResult.EndOfInput,
-            decoder.PumpAudioWhileVideoBackpressured(movieSeconds: 1.0));
-        Assert.Equal([1, 2], decoder.PumpedVideoPackets);
-        Assert.Equal(2, decoder.LateVideoFrameCount);
-        Assert.Equal(0, decoder.RetainedNextFrameCount);
-        Assert.Equal([3], decoder.SubmittedAudioPackets);
-    }
-
-    [Fact]
-    public void NoAudioMovieDoesNotInvokeAudioPumpWhenDestinationsAreFull()
-    {
-        var decoder = new SyntheticMovieDecoder(
-            [Video(1), Video(2), Video(3), Video(4), Video(5), Video(6)],
-            hasAudioTrack: false,
-            videoGate: 5);
-
-        using var playback = new MediaFramePlayback(decoder);
-        decoder.WaitForVideoOutput(5);
-
-        Assert.Equal(0, decoder.PumpCalls);
-        Assert.Equal(0, decoder.RetainedPacketCount);
-        Assert.Equal(0, decoder.RetainedPacketBytes);
-    }
-
-    [Fact]
-    public void DisposalDuringAudioPumpTerminatesTheOldDecoderIdentity()
-    {
-        var decoder = new SyntheticMovieDecoder(
-            [Video(1), Video(2), Video(3), Video(4), Video(5), Audio(6)],
-            hasAudioTrack: true,
-            videoGate: 5,
-            pausePumpUntilDisposed: true);
-
-        var playback = new MediaFramePlayback(decoder);
-        decoder.WaitForVideoOutput(5);
-        decoder.WaitForPumpEntry();
-
-        playback.Dispose();
 
         Assert.True(decoder.IsDisposed);
-        Assert.Equal(0, decoder.RetainedPacketCount);
-        Assert.Equal(0, decoder.RetainedPacketBytes);
     }
 
-    private static SyntheticPacket Video(int sequence, double timestamp = 0) =>
-        new(sequence, SyntheticPacketKind.Video, timestamp, 1.0 / 30.0);
-
-    private static SyntheticPacket Audio(int sequence) =>
-        new(sequence, SyntheticPacketKind.Audio, 0, 0);
-
-    private sealed class SyntheticMovieDecoder :
-        IMediaFrameDecoder,
-        IMovieAudioProgressSource,
-        IMediaPumpDiagnostics
+    [Fact]
+    public void CurrentContractLeavesLaterInterleavedAudioBehindFrameBufferWait()
     {
-        private readonly Queue<SyntheticPacket> _packets;
-        private readonly object _gate = new();
-        private readonly int _videoGate;
-        private readonly int _audioGate;
-        private readonly bool _pausePumpUntilDisposed;
-        private readonly ManualResetEventSlim _videoOutputReached = new();
-        private readonly ManualResetEventSlim _audioPacketsReached = new();
-        private readonly ManualResetEventSlim _endOfInputReached = new();
-        private readonly ManualResetEventSlim _pumpEntered = new();
-        private SyntheticPacket? _retainedNextFrame;
-        private MovieAudioProgress _audioProgress =
-            new(MovieAudioProgressState.Running, 0);
-        private string _pumpState = "video-decode";
-        private int _disposed;
-        private int _videoOutputCount;
+        var audio = new AuthoredAudioSink(acceptsSubmissions: true);
+        var playback = new CurrentMediaFramePlaybackContract(
+        [
+            Video(1),
+            Video(2),
+            Video(3),
+            Video(4),
+            Video(5),
+            Audio(6),
+            Video(7),
+            Audio(8),
+        ],
+        audio);
 
-        internal SyntheticMovieDecoder(
-            IEnumerable<SyntheticPacket> packets,
-            bool hasAudioTrack,
-            int videoGate = 0,
-            int audioGate = 0,
-            bool pausePumpUntilDisposed = false)
+        for (var index = 0; index < CurrentMediaFramePlaybackContract.VideoBufferCount; index++)
         {
-            _packets = new Queue<SyntheticPacket>(packets);
-            HasAudioTrack = hasAudioTrack;
-            _videoGate = videoGate;
-            _audioGate = audioGate;
-            _pausePumpUntilDisposed = pausePumpUntilDisposed;
+            Assert.Equal(AuthoredPumpResult.Progress, playback.PumpOneFrame());
         }
 
-        internal List<int> ExternalVideoPackets { get; } = [];
+        Assert.Equal(AuthoredPumpResult.Backpressure, playback.PumpOneFrame());
+        Assert.True(playback.IsBlockedOnFrameBuffers);
+        Assert.Equal(5, playback.OwnedVideoBufferCount);
+        Assert.Equal(5, playback.DecoderCalls);
+        Assert.Empty(audio.SubmittedPacketSequences);
+        Assert.Equal(3, playback.RemainingPacketCount);
+    }
 
-        internal List<int> PumpedVideoPackets { get; } = [];
+    [Fact]
+    public void BoundedPumpSubmitsAudioAfterAllVideoDestinationsAreOwned()
+    {
+        var audio = new AuthoredAudioSink(acceptsSubmissions: true);
+        using var pump = new BoundedPacketPumpExperiment(
+        [
+            Video(1),
+            Video(2),
+            Video(3),
+            Video(4),
+            Video(5),
+            Audio(6),
+            Video(7, bytes: 3),
+            Audio(8),
+            Video(9, bytes: 3),
+            Audio(10),
+        ],
+        audio,
+        maximumDeferredPacketCount: 2,
+        maximumDeferredBytes: 8);
 
-        internal List<int> SubmittedAudioPackets { get; } = [];
+        var result = pump.PumpUntilBlocked();
 
-        internal int PumpCalls { get; private set; }
+        Assert.Equal(AuthoredPumpResult.Backpressure, result);
+        Assert.Equal(5, pump.OwnedVideoBufferCount);
+        Assert.Equal([6, 8, 10], audio.SubmittedPacketSequences);
+        Assert.Equal([7, 9], pump.DeferredVideoPackets.Select(packet => packet.Sequence));
+        Assert.Equal(2, pump.DeferredPacketCount);
+        Assert.Equal(6, pump.DeferredBytes);
+        Assert.Equal(0, pump.RetainedDecodedFrameQueueCount);
+    }
 
-        public long LateVideoFrameCount { get; private set; }
+    [Fact]
+    public void BoundedPacketDeferralPreservesVideoOrderAndBackpressuresAtBothBounds()
+    {
+        var audio = new AuthoredAudioSink(acceptsSubmissions: true);
+        using var pump = new BoundedPacketPumpExperiment(
+        [
+            Video(1),
+            Video(2),
+            Video(3),
+            Video(4),
+            Video(5),
+            Video(6, bytes: 4),
+            Video(7, bytes: 4),
+            Video(8, bytes: 5),
+            Audio(9),
+        ],
+        audio,
+        maximumDeferredPacketCount: 2,
+        maximumDeferredBytes: 8);
 
-        internal int MaximumRetainedNextFrameCount { get; private set; }
+        Assert.Equal(AuthoredPumpResult.Backpressure, pump.PumpUntilBlocked());
+        Assert.Equal([6, 7], pump.DeferredVideoPackets.Select(packet => packet.Sequence));
+        Assert.Equal(2, pump.MaximumObservedDeferredPacketCount);
+        Assert.Equal(8, pump.MaximumObservedDeferredBytes);
+        Assert.Equal(8, pump.DeferredBytes);
+        Assert.Equal(2, pump.RemainingPacketCount);
+        Assert.Empty(audio.SubmittedPacketSequences);
 
-        internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+        Assert.True(pump.TryGetOwnedBufferForPacket(1, out var firstBuffer), "packet 1 owned");
+        Assert.True(pump.ReleaseVideoBuffer(firstBuffer), "release packet 1");
+        Assert.Equal(AuthoredPumpResult.Backpressure, pump.PumpUntilBlocked());
+        Assert.True(pump.TryGetOwnedBufferForPacket(6, out var decodedSixBuffer), "packet 6 decoded");
+        Assert.Equal(firstBuffer, decodedSixBuffer);
+        Assert.Equal([7], pump.DeferredVideoPackets.Select(packet => packet.Sequence));
 
-        internal void SetAudioProgress(double seconds) =>
-            _audioProgress = new(MovieAudioProgressState.Running, seconds);
+        Assert.True(pump.TryGetOwnedBufferForPacket(2, out var secondBuffer), "packet 2 owned");
+        Assert.True(pump.ReleaseVideoBuffer(secondBuffer), "release packet 2");
+        Assert.Equal(AuthoredPumpResult.Backpressure, pump.PumpUntilBlocked());
+        Assert.True(pump.TryGetOwnedBufferForPacket(7, out var decodedSevenBuffer), "packet 7 decoded");
+        Assert.Equal(secondBuffer, decodedSevenBuffer);
 
-        internal int RemainingPackets
+        Assert.True(pump.TryGetOwnedBufferForPacket(3, out var thirdBuffer), "packet 3 owned");
+        Assert.True(pump.ReleaseVideoBuffer(thirdBuffer), "release packet 3");
+        Assert.Equal(AuthoredPumpResult.EndOfInput, pump.PumpUntilBlocked());
+        Assert.True(pump.TryGetOwnedBufferForPacket(8, out var decodedEightBuffer), "packet 8 decoded");
+        Assert.Equal(thirdBuffer, decodedEightBuffer);
+        Assert.Equal([9], audio.SubmittedPacketSequences);
+        Assert.Empty(pump.DeferredVideoPackets);
+        Assert.True(pump.DemuxReachedEof, "demux EOF");
+        Assert.True(pump.IsCompleted, "pump completed");
+
+        var decodedVideoSequences = pump.Events
+            .Where(pumpEvent => pumpEvent.Kind == "video-decoded")
+            .Select(pumpEvent => pumpEvent.PacketSequence);
+        Assert.Equal([1, 2, 3, 4, 5, 6, 7, 8], decodedVideoSequences);
+    }
+
+    [Fact]
+    public void SlowVideoConsumerDoesNotPermitOwnedBufferReuseWhileAudioPumps()
+    {
+        var audio = new AuthoredAudioSink(acceptsSubmissions: true);
+        using var pump = new BoundedPacketPumpExperiment(
+        [
+            Video(1),
+            Video(2),
+            Video(3),
+            Video(4),
+            Video(5),
+            Audio(6),
+            Audio(7),
+            Audio(8),
+            Video(9),
+        ],
+        audio,
+        maximumDeferredPacketCount: 1,
+        maximumDeferredBytes: 4);
+
+        Assert.Equal(AuthoredPumpResult.Backpressure, pump.PumpUntilBlocked());
+        Assert.Equal([6, 7, 8], audio.SubmittedPacketSequences);
+        Assert.Equal(5, pump.OwnedVideoBufferCount);
+        Assert.Equal(0, pump.RetainedDecodedFrameQueueCount);
+
+        var ownedBeforeRelease = pump.OwnedFrames.Values
+            .ToDictionary(frame => frame.PacketSequence, frame => frame.BufferId);
+        Assert.True(pump.TryGetOwnedBufferForPacket(1, out var releasedBuffer));
+        Assert.True(pump.ReleaseVideoBuffer(releasedBuffer));
+        Assert.Equal(AuthoredPumpResult.EndOfInput, pump.PumpUntilBlocked());
+        Assert.True(pump.TryGetOwnedBufferForPacket(9, out var newBuffer));
+        Assert.Equal(releasedBuffer, newBuffer);
+
+        foreach (var sequence in new[] { 2, 3, 4, 5 })
+        {
+            var currentBuffer = pump.OwnedFrames
+                .Single(frame => frame.Value.PacketSequence == sequence)
+                .Key;
+            Assert.Equal(ownedBeforeRelease[sequence], currentBuffer);
+        }
+    }
+
+    [Fact]
+    public void AudioDeviceFailureDoesNotTurnTheVideoPumpIntoAnUnboundedQueue()
+    {
+        var audio = new AuthoredAudioSink(acceptsSubmissions: false);
+        using var pump = new BoundedPacketPumpExperiment(
+        [
+            Video(1),
+            Video(2),
+            Video(3),
+            Video(4),
+            Video(5),
+            Audio(6),
+            Video(7),
+            Audio(8),
+        ],
+        audio,
+        maximumDeferredPacketCount: 1,
+        maximumDeferredBytes: 4);
+
+        Assert.Equal(AuthoredPumpResult.Backpressure, pump.PumpUntilBlocked());
+        Assert.True(pump.AudioFailed);
+        Assert.Equal(2, audio.FailedSubmissions);
+        Assert.Equal(1, pump.DeferredPacketCount);
+        Assert.Equal(5, pump.OwnedVideoBufferCount);
+
+        Assert.True(pump.TryGetOwnedBufferForPacket(1, out var buffer));
+        Assert.True(pump.ReleaseVideoBuffer(buffer));
+        Assert.Equal(AuthoredPumpResult.EndOfInput, pump.PumpUntilBlocked());
+        Assert.True(pump.TryGetOwnedBufferForPacket(7, out _));
+        Assert.Equal(0, pump.RetainedDecodedFrameQueueCount);
+    }
+
+    [Fact]
+    public void NoAudioMovieReachesEofWithoutInventingAudioWork()
+    {
+        var audio = new AuthoredAudioSink(acceptsSubmissions: true);
+        using var pump = new BoundedPacketPumpExperiment(
+        [Video(1), Video(2)],
+        audio,
+        maximumDeferredPacketCount: 1,
+        maximumDeferredBytes: 4);
+
+        Assert.Equal(AuthoredPumpResult.EndOfInput, pump.PumpUntilBlocked());
+        Assert.True(pump.DemuxReachedEof);
+        Assert.True(pump.IsCompleted);
+        Assert.Empty(audio.SubmittedPacketSequences);
+        Assert.Empty(pump.DeferredVideoPackets);
+    }
+
+    [Fact]
+    public void DisposalReleasesDeferredPacketsAndStopsAnActivePump()
+    {
+        var audio = new AuthoredAudioSink(acceptsSubmissions: true);
+        var pump = new BoundedPacketPumpExperiment(
+        [
+            Video(1),
+            Video(2),
+            Video(3),
+            Video(4),
+            Video(5),
+            Video(6),
+            Audio(7),
+        ],
+        audio,
+        maximumDeferredPacketCount: 1,
+        maximumDeferredBytes: 4);
+
+        Assert.Equal(AuthoredPumpResult.Backpressure, pump.PumpUntilBlocked());
+        Assert.Equal(1, pump.DeferredPacketCount);
+        Assert.Equal(1, pump.DeferredBytes);
+        var ownedBeforeDispose = pump.OwnedVideoBufferCount;
+
+        pump.Dispose();
+
+        Assert.True(pump.IsDisposed);
+        Assert.Equal(1, pump.ReleasedDeferredPacketCount);
+        Assert.Equal(0, pump.DeferredPacketCount);
+        Assert.Equal(0, pump.DeferredBytes);
+        Assert.Equal(ownedBeforeDispose, pump.OwnedVideoBufferCount);
+        Assert.True(audio.IsDisposed);
+        Assert.Equal(1, audio.DisposeCount);
+        Assert.Equal(AuthoredPumpResult.Disposed, pump.PumpOne());
+        pump.Dispose();
+        Assert.Equal(1, audio.DisposeCount);
+    }
+
+    private static AuthoredPacket Video(int sequence, int bytes = 1) =>
+        new(sequence, AuthoredPacketKind.Video, bytes);
+
+    private static AuthoredPacket Audio(int sequence, double seconds = 0.1) =>
+        new(sequence, AuthoredPacketKind.Audio, 1, seconds);
+
+    private sealed class InterleavedDecoder(IEnumerable<AuthoredPacket> packets) :
+        IMediaFrameDecoder
+    {
+        private readonly Queue<AuthoredPacket> _packets = new(packets);
+
+        internal ManualResetEventSlim FiveBuffersOwned { get; } = new();
+
+        internal List<int> DecodedVideoPacketSequences { get; } = [];
+
+        internal List<int> SubmittedAudioPacketSequences { get; } = [];
+
+        internal int TryDecodeNextFrameCalls { get; private set; }
+
+        internal int RemainingPacketCount
         {
             get
             {
-                lock (_gate)
+                lock (_packets)
                 {
                     return _packets.Count;
                 }
             }
         }
+
+        internal bool IsDisposed { get; private set; }
 
         public uint Width => 1;
 
@@ -208,237 +324,48 @@ public sealed class MovieAudioPumpContractTests
 
         public uint FramesPerSecondDenominator => 1;
 
-        public bool HasAudioTrack { get; }
-
-        public double? NextVideoWakeupSeconds =>
-            _retainedNextFrame is { } frame
-                ? frame.TimestampSeconds + frame.DurationSeconds
-                : null;
-
-        public string PumpState => Volatile.Read(ref _pumpState);
-
-        public long RetainedNextFrameCount => _retainedNextFrame is null ? 0 : 1;
-
-        public long RetainedPacketCount => 0;
-
-        public long RetainedPacketBytes => 0;
-
-        public MovieAudioProgress GetMovieAudioProgress() => _audioProgress;
-
-        public bool TryDecodeNextFrame(Span<byte> destination, double movieSeconds)
+        public bool TryDecodeNextFrame(Span<byte> destination)
         {
-            lock (_gate)
+            TryDecodeNextFrameCalls++;
+            while (true)
             {
-                if (IsDisposed)
+                AuthoredPacket packet;
+                lock (_packets)
                 {
-                    return false;
-                }
-
-                Volatile.Write(ref _pumpState, "video-decode");
-                while (true)
-                {
-                    var packet = TakeNextVideoPacket(movieSeconds);
-                    if (packet is null)
+                    if (_packets.Count == 0)
                     {
                         return false;
                     }
 
-                    destination.Fill((byte)packet.Value.Sequence);
-                    ExternalVideoPackets.Add(packet.Value.Sequence);
-                    _videoOutputCount++;
-                    if (_videoGate > 0 && _videoOutputCount >= _videoGate)
-                    {
-                        _videoOutputReached.Set();
-                    }
-
-                    return true;
+                    packet = _packets.Dequeue();
                 }
-            }
-        }
 
-        public MediaPumpResult PumpAudioWhileVideoBackpressured(double movieSeconds)
-        {
-            lock (_gate)
-            {
-                if (IsDisposed)
+                if (packet.Kind == AuthoredPacketKind.Audio)
                 {
-                    return MediaPumpResult.Disposed;
+                    SubmittedAudioPacketSequences.Add(packet.Sequence);
+                    continue;
                 }
 
-                _pumpEntered.Set();
-                PumpCalls++;
-                Volatile.Write(ref _pumpState, "audio-pump");
-
-                if (_pausePumpUntilDisposed)
+                if (packet.Kind != AuthoredPacketKind.Video)
                 {
-                    SpinWait.SpinUntil(() => IsDisposed, TimeSpan.FromSeconds(2));
-                    return MediaPumpResult.Disposed;
+                    continue;
                 }
 
-                while (_packets.TryDequeue(out var packet))
+                destination.Fill((byte)packet.Sequence);
+                DecodedVideoPacketSequences.Add(packet.Sequence);
+                if (DecodedVideoPacketSequences.Count == CurrentMediaFramePlaybackContract.VideoBufferCount)
                 {
-                    if (packet.Kind == SyntheticPacketKind.Audio)
-                    {
-                        SubmittedAudioPackets.Add(packet.Sequence);
-                        if (_audioGate > 0 && SubmittedAudioPackets.Count >= _audioGate)
-                        {
-                            _audioPacketsReached.Set();
-                        }
-
-                        continue;
-                    }
-
-                    if (packet.Kind != SyntheticPacketKind.Video)
-                    {
-                        continue;
-                    }
-
-                    PumpedVideoPackets.Add(packet.Sequence);
-                    if (IsLate(packet, movieSeconds))
-                    {
-                        LateVideoFrameCount++;
-                        continue;
-                    }
-
-                    if (_retainedNextFrame is null)
-                    {
-                        _retainedNextFrame = packet;
-                        MaximumRetainedNextFrameCount = Math.Max(
-                            MaximumRetainedNextFrameCount,
-                            1);
-                    }
+                    FiveBuffersOwned.Set();
                 }
 
-                _endOfInputReached.Set();
-                Volatile.Write(ref _pumpState, "drain");
-                return _retainedNextFrame is null
-                    ? MediaPumpResult.EndOfInput
-                    : MediaPumpResult.Backpressure;
+                return true;
             }
         }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0)
-            {
-                return;
-            }
-
-            lock (_gate)
-            {
-                _packets.Clear();
-                _retainedNextFrame = null;
-                Volatile.Write(ref _pumpState, "disposed");
-            }
-
-            _videoOutputReached.Dispose();
-            _audioPacketsReached.Dispose();
-            _endOfInputReached.Dispose();
-            _pumpEntered.Dispose();
+            IsDisposed = true;
+            FiveBuffersOwned.Dispose();
         }
-
-        internal void WaitForVideoOutput(int count)
-        {
-            if (_videoGate >= count && _videoGate > 0)
-            {
-                Assert.True(_videoOutputReached.Wait(TimeSpan.FromSeconds(2)));
-                return;
-            }
-
-            if (!SpinWait.SpinUntil(
-                    () => ExternalVideoPackets.Count >= count,
-                    TimeSpan.FromSeconds(2)))
-            {
-                throw new InvalidOperationException(
-                    $"video={ExternalVideoPackets.Count} remaining={RemainingPackets} " +
-                    $"pump={PumpCalls} state={PumpState}");
-            }
-        }
-
-        internal void WaitForAudioPackets(int count)
-        {
-            if (_audioGate >= count && _audioGate > 0)
-            {
-                Assert.True(_audioPacketsReached.Wait(TimeSpan.FromSeconds(2)));
-                return;
-            }
-
-            Assert.True(
-                SpinWait.SpinUntil(
-                    () => SubmittedAudioPackets.Count >= count,
-                    TimeSpan.FromSeconds(2)));
-        }
-
-        internal void WaitForEndOfInput()
-        {
-            if (!_endOfInputReached.Wait(TimeSpan.FromSeconds(2)))
-            {
-                throw new InvalidOperationException(
-                    $"video={ExternalVideoPackets.Count} pumped={PumpedVideoPackets.Count} " +
-                    $"remaining={RemainingPackets} pump={PumpCalls} state={PumpState}");
-            }
-        }
-
-        internal void WaitForPumpEntry() =>
-            Assert.True(_pumpEntered.Wait(TimeSpan.FromSeconds(2)));
-
-        private SyntheticPacket? TakeNextVideoPacket(double movieSeconds)
-        {
-            while (true)
-            {
-                SyntheticPacket packet;
-                if (_retainedNextFrame is { } retained)
-                {
-                    _retainedNextFrame = null;
-                    packet = retained;
-                }
-                else if (!_packets.TryDequeue(out packet))
-                {
-                    _endOfInputReached.Set();
-                    return null;
-                }
-
-                if (packet.Kind == SyntheticPacketKind.Audio)
-                {
-                    SubmittedAudioPackets.Add(packet.Sequence);
-                    continue;
-                }
-
-                if (packet.Kind != SyntheticPacketKind.Video)
-                {
-                    continue;
-                }
-
-                if (IsLate(packet, movieSeconds))
-                {
-                    LateVideoFrameCount++;
-                    continue;
-                }
-
-                return packet;
-            }
-        }
-
-        private static bool IsLate(SyntheticPacket packet, double movieSeconds) =>
-            packet.TimestampSeconds + packet.DurationSeconds <= movieSeconds;
-    }
-
-    private readonly record struct SyntheticPacket(
-        int Sequence,
-        SyntheticPacketKind Kind,
-        double TimestampSeconds,
-        double DurationSeconds);
-
-    private enum SyntheticPacketKind
-    {
-        Video,
-        Audio,
-    }
-
-    private sealed class FakeMonotonicClock : IMovieMonotonicClock
-    {
-        public double Seconds { get; private set; }
-
-        internal void Advance(double seconds) => Seconds += seconds;
     }
 }
