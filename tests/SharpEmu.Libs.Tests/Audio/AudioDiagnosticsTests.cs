@@ -149,6 +149,49 @@ public sealed class AudioDiagnosticsTests
     }
 
     [Fact]
+    public void PcmStatisticsRemainScalarAndResetPerWindow()
+    {
+        var statistics = new AudioPcmStatistics(HostPcmFormat.Signed16, channels: 2);
+        statistics.Record(
+        [
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x80, 0x00, 0x80,
+        ]);
+
+        var window = statistics.SnapshotAndReset();
+        Assert.Equal(2, window.FrameCount);
+        Assert.Equal(4, window.SampleCount);
+        Assert.Equal(1, window.Peak, precision: 5);
+        Assert.True(window.Rms > 0.6 && window.Rms < 0.8);
+        Assert.Equal(2, window.ClippingCount);
+        Assert.Equal(2, window.ZeroCrossingCount);
+
+        var empty = statistics.SnapshotAndReset();
+        Assert.Equal(0, empty.FrameCount);
+        Assert.Equal(0, empty.SampleCount);
+        Assert.Equal(0, empty.Peak);
+        Assert.Equal(0, empty.ZeroCrossingCount);
+    }
+
+    [Fact]
+    public void SubmissionTimestampsAreBoundedAndResetWithAccounting()
+    {
+        var accounting = new AudioSampleAccounting(bytesPerStreamFrame: 4);
+        accounting.RecordSubmission(4, accepted: true);
+        accounting.RecordSubmission(4, accepted: false);
+
+        var snapshot = accounting.Snapshot(queuedInputBytes: 0);
+        Assert.NotEqual(0, snapshot.FirstSubmissionTimestamp);
+        Assert.True(snapshot.LastSubmissionTimestamp >=
+                    snapshot.FirstSubmissionTimestamp);
+
+        accounting.Reset();
+        snapshot = accounting.Snapshot(queuedInputBytes: 0);
+        Assert.Equal(0, snapshot.FirstSubmissionTimestamp);
+        Assert.Equal(0, snapshot.LastSubmissionTimestamp);
+    }
+
+    [Fact]
     public void DiagnosticsDisabledPathDoesNotReserveAnEvent()
     {
         var budget = new AudioDiagnosticEventBudget(maximum: 1);

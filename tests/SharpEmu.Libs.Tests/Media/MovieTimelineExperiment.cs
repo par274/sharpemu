@@ -134,9 +134,8 @@ internal sealed class MovieTimelineExperiment
                 case AuthoredMovieAudioState.Running:
                     Mode = AuthoredMovieTimelineMode.MovieAudio;
                     // Do not select an audio estimate from the future. The
-                    // current production policy also caps its shared estimate
-                    // by wall time; this experiment preserves that safety edge
-                    // without sharing the clock with another stream.
+                    // production policy caps this movie-owned estimate by wall
+                    // time without sharing the clock with another stream.
                     selectedSeconds = Math.Min(
                         wallSeconds,
                         Math.Max(0, audio.Seconds));

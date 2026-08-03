@@ -29,6 +29,38 @@ internal interface IMediaAudioDiagnostics
     void SetDiagnosticPhase(string phase);
 }
 
+internal enum MovieAudioProgressState
+{
+    NoTrack,
+    NotStarted,
+    Running,
+    TemporaryUnderrun,
+    Paused,
+    Completed,
+    Failed,
+    Disposed,
+}
+
+internal readonly record struct MovieAudioProgress(
+    MovieAudioProgressState State,
+    double Seconds,
+    bool IsDrainComplete,
+    string FailureReason,
+    bool PauseSupported = true);
+
+internal interface IMediaMovieAudio
+{
+    bool HasAudioTrack { get; }
+
+    void Start();
+
+    MovieAudioProgress GetMovieAudioProgress();
+
+    void Pause();
+
+    void Resume();
+}
+
 /// <summary>
 /// Keeps blocking codec work away from the Vulkan presentation thread and
 /// releases decoded frames according to the movie time base.
@@ -39,6 +71,7 @@ internal sealed class MediaFramePlayback : IDisposable
 
     private readonly object _gate = new();
     private readonly IMediaFrameDecoder _decoder;
+    private readonly IMediaMovieAudio? _movieAudio;
     private readonly IMediaAudioDiagnostics? _audioDiagnostics;
     private readonly long _diagnosticMovieInstanceId;
     private readonly Queue<byte[]> _freeBuffers = new();
@@ -49,7 +82,9 @@ internal sealed class MediaFramePlayback : IDisposable
     private long _currentFrameIndex = -1;
     private long _nextDecodedFrameIndex;
     private long _playbackStartTimestamp;
-    private double _audioStartSeconds;
+    private long _fallbackStartTimestamp;
+    private double _fallbackBaseSeconds;
+    private double _lastPlaybackSeconds;
     private long _lastSkewTraceTimestamp;
     private long _diagnosticFramesAdvanced;
     private long _diagnosticFramesHeld;
@@ -57,6 +92,8 @@ internal sealed class MediaFramePlayback : IDisposable
     private long _diagnosticFramesRetired;
     private long _diagnosticFramesDiscarded;
     private bool _playbackClockStarted;
+    private bool _fallbackClockStarted;
+    private bool _paused;
     private bool _decoderCompleted;
     private bool _stopRequested;
     private bool _finished;
@@ -67,6 +104,7 @@ internal sealed class MediaFramePlayback : IDisposable
         long diagnosticMovieInstanceId = 0)
     {
         _decoder = decoder;
+        _movieAudio = decoder as IMediaMovieAudio;
         _audioDiagnostics = HostAudioDiagnostics.Enabled
             ? decoder as IMediaAudioDiagnostics
             : null;
@@ -121,9 +159,7 @@ internal sealed class MediaFramePlayback : IDisposable
             lock (_gate)
             {
                 return (
-                    _playbackClockStarted
-                        ? Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds
-                        : 0,
+                    _lastPlaybackSeconds,
                     _currentFrameIndex);
             }
         }
@@ -147,7 +183,7 @@ internal sealed class MediaFramePlayback : IDisposable
             {
                 if (_decodedFrames.Count == 0)
                 {
-                    if (_decoderCompleted)
+                    if (_decoderCompleted && IsAudioCompletionReadyLocked())
                     {
                         _finished = true;
                     }
@@ -164,14 +200,17 @@ internal sealed class MediaFramePlayback : IDisposable
             if (advanceClock && !_playbackClockStarted)
             {
                 _playbackStartTimestamp = Stopwatch.GetTimestamp();
-                _audioStartSeconds = GuestAudioClock.PlayedSeconds;
                 _playbackClockStarted = true;
-                MovieDiagnostics.Start(
-                    _diagnosticMovieInstanceId,
-                    _audioStartSeconds,
-                    GuestAudioClock.PlayedSeconds,
-                    GuestAudioClock.IsRunning,
-                    _followGuestAudioClock);
+                _movieAudio?.Start();
+                if (MovieDiagnostics.Enabled)
+                {
+                    var audioProgress = GetMovieAudioProgressLocked();
+                    MovieDiagnostics.Start(
+                        _diagnosticMovieInstanceId,
+                        audioProgress.Seconds,
+                        audioProgress.State,
+                        _movieAudio is { HasAudioTrack: true });
+                }
             }
 
             var elapsedSeconds = CurrentPlaybackSecondsLocked();
@@ -214,6 +253,7 @@ internal sealed class MediaFramePlayback : IDisposable
             if (_playbackClockStarted &&
                 _decoderCompleted &&
                 _decodedFrames.Count == 0 &&
+                IsAudioCompletionReadyLocked() &&
                 elapsedSeconds >= (_currentFrameIndex + 1) * frameDurationSeconds)
             {
                 _finished = true;
@@ -236,23 +276,6 @@ internal sealed class MediaFramePlayback : IDisposable
         }
     }
 
-    /// <summary>
-    /// Time base for playback. A host-decoded movie runs on whatever clock it is
-    /// given, but the audio that belongs to it comes from the guest, which does
-    /// not advance at wall-clock rate on a slow frame. Following the audio keeps
-    /// the two together; SHARPEMU_MOVIE_CLOCK=wall restores the old behaviour.
-    /// </summary>
-    private static readonly bool _followGuestAudioClock = !string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_MOVIE_CLOCK"),
-        "wall",
-        StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// Seconds of playback elapsed on the movie's time base. Falls back to wall
-    /// clock whenever guest audio is not flowing: a movie whose audio never
-    /// starts — or stops early — must still finish rather than hang on a clock
-    /// that will never advance again.
-    /// </summary>
     private double CurrentPlaybackSecondsLocked()
     {
         if (!_playbackClockStarted)
@@ -261,28 +284,66 @@ internal sealed class MediaFramePlayback : IDisposable
         }
 
         var wallSeconds = Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds;
-        if (!_followGuestAudioClock || !GuestAudioClock.IsRunning)
+        var audioProgress = GetMovieAudioProgressLocked();
+        double selectedSeconds;
+        if (_movieAudio is null ||
+            audioProgress.State == MovieAudioProgressState.NoTrack)
         {
-            return wallSeconds;
+            selectedSeconds = wallSeconds;
+        }
+        else if (_paused || audioProgress.State is
+                 MovieAudioProgressState.NotStarted or
+                 MovieAudioProgressState.TemporaryUnderrun or
+                 MovieAudioProgressState.Paused)
+        {
+            selectedSeconds = _lastPlaybackSeconds;
+        }
+        else if (audioProgress.State is
+                 MovieAudioProgressState.Failed or
+                 MovieAudioProgressState.Completed)
+        {
+            BeginFallbackClockLocked();
+            selectedSeconds = _fallbackBaseSeconds +
+                Stopwatch.GetElapsedTime(_fallbackStartTimestamp).TotalSeconds;
+        }
+        else
+        {
+            selectedSeconds = Math.Min(wallSeconds, Math.Max(0, audioProgress.Seconds));
         }
 
-        return Math.Clamp(GuestAudioClock.PlayedSeconds - _audioStartSeconds, 0, wallSeconds);
+        _lastPlaybackSeconds = Math.Max(_lastPlaybackSeconds, selectedSeconds);
+        return _lastPlaybackSeconds;
     }
 
-    private static readonly bool _traceClockSkew = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_LOG_MOVIE_SYNC"),
-        "1",
-        StringComparison.Ordinal);
+    private MovieAudioProgress GetMovieAudioProgressLocked() =>
+        _movieAudio?.GetMovieAudioProgress() ??
+        new(MovieAudioProgressState.NoTrack, 0, true, string.Empty);
+
+    private bool IsAudioCompletionReadyLocked() =>
+        _movieAudio is null ||
+        !_movieAudio.HasAudioTrack ||
+        GetMovieAudioProgressLocked() is { IsDrainComplete: true } or
+        { State: MovieAudioProgressState.Failed };
+
+    private void BeginFallbackClockLocked()
+    {
+        if (_fallbackClockStarted)
+        {
+            return;
+        }
+
+        _fallbackClockStarted = true;
+        _fallbackStartTimestamp = Stopwatch.GetTimestamp();
+        _fallbackBaseSeconds = _lastPlaybackSeconds;
+    }
 
     /// <summary>
-    /// Logs how far the movie's wall clock has drifted from the guest audio the
-    /// movie is supposed to be in step with. A skew that is flat across playback
-    /// is a late audio start; one that grows is a rate mismatch, and the two need
-    /// different fixes. Caller holds <see cref="_gate"/>.
+    /// Emits the bounded movie-local timing sample. Caller holds
+    /// <see cref="_gate"/>.
     /// </summary>
     private void TraceClockSkewLocked()
     {
-        if ((!_traceClockSkew && !MovieDiagnostics.Enabled) ||
+        if (!MovieDiagnostics.Enabled ||
             !_playbackClockStarted)
         {
             return;
@@ -297,28 +358,18 @@ internal sealed class MediaFramePlayback : IDisposable
 
         _lastSkewTraceTimestamp = now;
         var wallSeconds = Stopwatch.GetElapsedTime(_playbackStartTimestamp).TotalSeconds;
-        var guestAudioClockSeconds = GuestAudioClock.PlayedSeconds;
-        var audioSeconds = guestAudioClockSeconds - _audioStartSeconds;
+        var audioProgress = GetMovieAudioProgressLocked();
+        var audioSeconds = audioProgress.Seconds;
         var selectedPlaybackSeconds = CurrentPlaybackSecondsLocked();
         var targetFrameIndex = CurrentTargetFrameIndexLocked();
-        var audioRunning = GuestAudioClock.IsRunning;
-        if (_traceClockSkew)
-        {
-            Console.Error.WriteLine(
-                $"[PERF][MOVIE] wall_s={wallSeconds:F2} audio_s={audioSeconds:F2} " +
-                $"playback_s={selectedPlaybackSeconds:F2} " +
-                $"skew_s={wallSeconds - audioSeconds:F2} frame={_currentFrameIndex} " +
-                $"audio_running={audioRunning}");
-        }
 
         MovieDiagnostics.Clock(
             _diagnosticMovieInstanceId,
             wallSeconds,
-            guestAudioClockSeconds,
             audioSeconds,
             selectedPlaybackSeconds,
-            audioRunning,
-            _followGuestAudioClock,
+            audioProgress.State,
+            _movieAudio is { HasAudioTrack: true },
             _currentFrameIndex,
             _currentFrameIndex < 0
                 ? -1
@@ -337,6 +388,58 @@ internal sealed class MediaFramePlayback : IDisposable
         _diagnosticFramesSkipped = 0;
         _diagnosticFramesRetired = 0;
         _diagnosticFramesDiscarded = 0;
+    }
+
+    internal void Pause()
+    {
+        lock (_gate)
+        {
+            if (_finished || _paused)
+            {
+                return;
+            }
+
+            _ = CurrentPlaybackSecondsLocked();
+            _paused = true;
+            _movieAudio?.Pause();
+        }
+    }
+
+    internal void Resume()
+    {
+        lock (_gate)
+        {
+            if (_finished || !_paused)
+            {
+                return;
+            }
+
+            _paused = false;
+            _movieAudio?.Resume();
+            if (_movieAudio is null ||
+                !_movieAudio.HasAudioTrack ||
+                _fallbackClockStarted)
+            {
+                var now = Stopwatch.GetTimestamp();
+                _playbackStartTimestamp = RebasedTimestamp(
+                    now,
+                    _lastPlaybackSeconds);
+                _fallbackStartTimestamp = now;
+            }
+        }
+    }
+
+    private static long RebasedTimestamp(long now, double elapsedSeconds)
+    {
+        if (elapsedSeconds <= 0)
+        {
+            return now;
+        }
+
+        var ticks = elapsedSeconds * Stopwatch.Frequency;
+        return ticks >= long.MaxValue
+            ? long.MinValue
+            : now - (long)ticks;
     }
 
     /// <summary>

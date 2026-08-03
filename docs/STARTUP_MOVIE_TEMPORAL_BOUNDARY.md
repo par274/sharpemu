@@ -8,11 +8,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
 Status: cumulative target finding with the stale-generation correction and
 movie-local timeline contract established. Lawful packet measurement falsified
 the authored bounded compressed-packet queue as a practical target model. The
-first one-demux decode-and-discard implementation then failed target validation:
-it lost required future video frames. A bounded demux-boundary repair preserved
-one packet and one next frame but stalled at the first future frame and crossed
-the physical-memory safety boundary. No movie timing correction is accepted;
-the branch stops before production implementation of an unproven pump model.
+one-demux decode-and-discard alternatives failed target validation and remain
+rejected. A focused independent-context probe supported a separately bounded
+movie-audio demux/decode context, and the production boundary uses it for movies
+with audio. The attended source-isolation matrix now attributes the audible
+startup defects to two guest owners: AudioOut2 supplies the noisy logo-like
+sound, while AudioOut supplies the intermittent logo-like music over grey. The
+independent movie stream is clean under isolation and remains a selected,
+bounded production model, but the retail audio correction is not accepted: no
+production mute or guest-audio repair has been proposed, and comparable
+correction confirmations are not justified yet.
 
 The finding concerns host-decoded Bink video used by the Demon’s Souls v1.004.000
 startup route. It is an emulator-owned contract. It does not claim to know the
@@ -52,6 +57,28 @@ The consequential identifiers for the earlier target findings are:
   replacement, and shutdown. Attended validation showed the former stale-black
   interval became grey; the remaining grey transition is a separate unresolved
   output boundary.
+- First targeted listening run of the independent-context implementation:
+  `20260803T055628280Z-c19e6f0-trial-01`, commit
+  `c19e6f00416fe31cf70ed3a116802b27e270018c`, executable SHA-256
+  `F0F16F2EFF1B88E0926F0D2B81FE4F4F8C16E7FF3F5CAEE33C0178250B4B5ADE`.
+  Optional per-event movie and memory diagnostics were disabled for this
+  listening-only run; runner metrics and the emulator log remain outside Git.
+- Attended scalar-diagnostic pilot of the current independent-context boundary:
+  `20260803T070043399Z-3e852de-trial-01`, commit
+  `3e852deb61063ed7ac9b797553a1e845f69bd779`, executable SHA-256
+  `45E8ABF21609FA3333B248DFEE949B96B0E473FC7D95A826892E9A46A01F816E`.
+  Audio diagnostics and the existing per-run memory-diagnostics stream were
+  enabled. The runner stopped at the unchanged physical-headroom boundary;
+  raw diagnostics remain outside Git.
+- Attended source-isolation matrix at commit `2bb2763a8f63a9514690d447dbc819b9a25c9a0c`,
+  executable SHA-256
+  `314F43820D84431198559E306667DB2D5717D627B9D6DB397EB748EA30240871`:
+  `20260803T072518812Z-2bb2763-trial-01` selected `movie` only,
+  `20260803T073325015Z-2bb2763-trial-01` selected `audio-out2` only, and
+  `20260803T073637726Z-2bb2763-trial-01` selected `audio-out` only. The
+  opt-in scalar diagnostics and source-isolation switch were enabled only for
+  these runs. The temporary switch and its tests were removed in commit
+  `40a7302`; raw manifests and diagnostics remain outside Git.
 
 Raw target assets, traces, logs, manifests, source samples, movie fingerprints,
 and target paths remain outside Git.
@@ -86,6 +113,36 @@ inputs, not as results inferred from the authored model:
 - SDL queue arithmetic is an input-queue estimate, not a direct physical-device
   playback measurement. The grey transition and intermittent flashing remain
   separate rendering problems.
+
+The independent movie-audio context phase established these additional durable
+facts using the lawful target asset and scalar-only measurements:
+
+- `ps_studios_logo.bk2` opens through two independent FFmpeg input contexts
+  with distinct format, codec, packet, frame, and resampler state. Both
+  contexts report format start `0` and duration `8,500,000` microseconds; the
+  first video and audio packet timestamps are both `0`, with video time base
+  `1/30` and audio time base `1/48000`.
+- The second context owns the selected audio stream and its own decoder,
+  resampler, one live packet, one live frame, fixed 16 KiB PCM conversion
+  storage, and a host stream requested at a 32 KiB queue cap. Audio packets and
+  decoded frames remain ordered; the video context remains the only video
+  decoder and keeps its five externally owned destinations.
+- Three fresh scalar probe trials measured approximately 16.2–16.6 MiB
+  additional working set, 12.4–13.4 MiB additional private memory, and one
+  additional process handle for the second FFmpeg context. The dummy host
+  stream added approximately 2.7–3.0 MiB working set and 30 handles; that
+  device cost is backend-specific and is not attributed to FFmpeg state.
+- The largest packet observed while scanning the logo through either context
+  was `474,552` bytes. The production audio path rejects packets above its
+  explicit 4 MiB bound and decoded frames above its explicit sample bound.
+- `attract_movie.bk2` has no audio stream and therefore does not open the
+  second context. It remains on a movie-local monotonic wall clock.
+- The audio context compares its format start and duration with the already
+  opened video context. Normal completion requires demux EOF, decoder EOF,
+  resampler drain, and exact host queue drain. Open, decoder, submission, and
+  device failures are terminal and visible; temporary queue-empty underrun is
+  a recoverable state. Host generation disposal cancels and joins the audio
+  pump before releasing its native state.
 
 The target assets, raw traces, logs, manifests, and game-derived data remain
 outside Git.
@@ -326,6 +383,117 @@ blocked the demux. No confirmation runs were justified after the first pilot,
 and the follow-up independently confirmed that the small repair was unsafe and
 ineffective. Grey, black, and flashing output were not investigated.
 
+The first targeted listening run of the independent-context implementation was
+not a confirmation run. It reached `attract_movie.bk2`, `logo_intro.bk2`, and
+`main_menu.bk2`; the bridge attached and guest-closed each asset in order. The
+first `ps_studios_logo.bk2` reached frame 254 in 9.11 seconds. The runner
+stopped after 300.617 seconds at the unchanged physical-headroom boundary:
+peak working set was 8.731 GiB, peak private memory was 17.529 GiB, minimum
+available physical memory was 1.846 GiB against the 2 GiB floor, and minimum
+commit headroom was 21.725 GiB. No confirmation run was justified after this
+boundary.
+
+The following are direct attended observations, not claims inferred from queue
+metrics:
+
+- The first PlayStation Studios logo audio was no longer audibly stretched or
+  delayed, but contained a persistent unpleasant noisy/lagging artifact.
+- The grey interval remained. Near the end of the first logo, its audible tail
+  had not finished before a second similar sound began over the grey output;
+  that second sound played in short bursts separated by silence. The target
+  still showed the later `Sony Interactive Entertainment Presents` visual.
+- Audible output was present during `attract_movie.bk2` but was more severely
+  intermittent and noisy. The authored asset inventory says that movie has no
+  embedded audio stream, so this sound must not be attributed to the
+  independent movie-audio context without a future source trace.
+- `logo_intro.bk2` produced audible output dominated by very loud noise, with
+  the intended audio nearly inaudible. Menu music and button-selection audio
+  were present for the first time in this experiment.
+- The maintainer reached the main menu, selected Play, selected Continue
+  Offline, and then the emulator ended. Character Creation was not observed.
+  No visual improvement was observed: the grey interval and later Sony visual
+  remained.
+
+These observations support that the independent path changes the first logo's
+temporal behavior and allows later movie/menu progression, but they do not
+establish audible correctness. The noisy/intermittent output, the apparent
+overlapping or replayed logo sound during the grey interval, and the difference
+between embedded movie audio and other guest audio are now the next audio
+frontier. They must be traced separately from the grey/black/flashing rendering
+problem and from the general low-FPS condition.
+
+The source-isolation matrix established the following direct observations and
+scalar correlations. Selection was by stable owner identity and replaced only
+the selected PCM bytes immediately before host submission; it did not skip
+packets, change queue admission, or alter movie lifecycle.
+
+### Observation
+
+- `movie` only (`audio-out2,audio-out` silenced): the maintainer heard clear,
+  clean PS Studios audio; the grey interval was silent. Movie audio, the
+  Demon's Souls name animation, menu music, and button audio were absent, as
+  expected with the guest sources silenced. The run reached the later visual
+  sequence and stopped at the unchanged physical-headroom boundary after
+  250.988 seconds; peak working set was 8.138 GiB, peak private memory
+  16.655 GiB, and the boundary sample was 1.653 GiB available physical memory.
+- `audio-out2` only (`movie,audio-out` silenced): the maintainer heard the PS
+  Studios sound as laggy and noisy. No grey-interval noise was heard during the
+  short grey observation before the unchanged physical-headroom boundary after
+  75.988 seconds; peak working set was 8.368 GiB, peak private memory
+  14.169 GiB, and available physical memory reached 1.881 GiB.
+- `audio-out` only (`movie,audio-out2` silenced): the maintainer heard laggy,
+  non-noisy PS Studios audio in the left ear and the same laggy logo-like music
+  intermittently over grey. Movie audio, the name animation, menu music, and
+  button audio were absent. The run later exited normally after 216.874
+  seconds; peak working set was 7.762 GiB, peak private memory 15.956 GiB,
+  minimum available physical memory 2.898 GiB, and minimum commit headroom
+  22.897 GiB.
+
+### Scalar corroboration
+
+- The independent movie stream was `movie`, source `ps_studios_logo.bk2`,
+  generation 1, stream identity 2 only for raw correlation. In all three runs
+  it decoded, converted, and submitted 408,960 frames with zero failed frames;
+  source PTS ran from `0` to `8.48` seconds and local progress reached `8.52`
+  seconds. Demux EOF, decoder EOF, resampler drain, codec drain, host drain,
+  and disposal all completed without a failure reason.
+- The stable guest identities were `audio-out2-primary` / source
+  `guest-audio-out2-primary` for AudioOut2, and `port-1` / source `port-1` for
+  AudioOut. The raw host stream numbers 1, 2, and 3 are reported only as
+  correlation metadata, never as isolation selectors.
+- In the AudioOut2-only run, `audio-out2-primary` submitted 1,841,664 frames
+  with 1,841,376 estimated dequeues, zero rejected frames, and scalar PCM
+  windows up to peak `0.233` / RMS `0.052`; the selected AudioOut and movie
+  streams were zeroed at submission.
+- In the AudioOut-only run, `audio-out` submitted 5,363,456 frames with
+  5,360,640 estimated dequeues, zero rejected frames, and scalar PCM windows
+  up to peak `0.804` / RMS `0.030`; the selected AudioOut2 and movie streams
+  were zeroed at submission.
+- In the movie-only run, the movie decoder's pre-isolation PCM windows remained
+  nonzero, up to peak `0.81` / RMS `0.21`, while both guest streams' submitted
+  windows were zero. The movie submitted 408,960 frames and its host stream
+  disposed at generation completion with no post-disposal submission.
+
+### Inference
+
+The independent movie context is not the source of the audible corruption:
+when it alone remained audible, the PS Studios audio was clean and the grey
+interval was silent. AudioOut2 is the owner of the noisy logo-like duplicate.
+AudioOut is the owner of the intermittent/replayed logo-like music heard over
+grey and also emits a left-channel-only, laggy logo-like signal during the
+opening. Both guest owners therefore produce overlapping logo-related audio;
+the evidence does not justify changing either guest path yet.
+
+### Uncertainty
+
+The matrix identifies the stable host owners and their HLE seams, but it does
+not yet identify the guest-side mixer/event that feeds each stream or explain
+the left-channel asymmetry. It also does not attribute `attract_movie.bk2` or
+`logo_intro.bk2`; those later observations remain out of scope. The grey visual
+output, including the later main-menu grey state, remains a separate video
+rendering problem. Scalar PCM statistics do not replace direct listening and
+do not establish the intended title mix.
+
 ## Evaluated alternatives
 
 ### A. Decode-and-discard late video output — falsified on target
@@ -375,21 +543,40 @@ the first implementation discarded required future frames, while the boundary
 repair stalled audio at the first future frame. It is therefore not a
 production selection despite its finite nominal ownership bound.
 
-### B. Separate audio demux/decode context
+### B. Separate audio demux/decode context — selected production model,
+target correction not yet accepted
 
-The audio context would own its own `AVFormatContext`, audio codec, resampler,
-and input progression. Video would retain the current five-buffer contract, so
-there is no compressed-video deferral in the video context. Audio could continue
-until its bounded host stream is full.
+The audio context owns its own `AVFormatContext`, selected audio codec,
+packet, frame, resampler, conversion storage, and bounded host stream. Video
+retains the current five externally owned destinations and remains the only
+video decoder; there is no compressed-video deferral, second video decoder,
+video packet skipping, or decode-and-discard path.
 
-This requires opening the asset twice or creating a second independent input
-context. Its memory cost is a second format/codec/resampler stack plus codec
-buffers and the existing bounded audio stream; an exact byte cost was not
-measured in this task. It has simpler per-context packet order but two
-EOF/drain/cancel paths and a new synchronization problem between independently
-positioned inputs. It is the smallest remaining credible model because audio
-can continue while the video context is backpressured, but it was not
-implemented or target validated here.
+The lawful scalar probe established that the same asset can be opened through
+two independent FFmpeg input contexts with matching format origin and
+timestamp domain. Three fresh trials measured approximately 16.2–16.6 MiB
+additional working set, 12.4–13.4 MiB additional private memory, and one
+additional process handle for the second FFmpeg context. The separate dummy
+host stream cost approximately 2.7–3.0 MiB and 30 handles in that probe; this
+is backend-specific and is not attributed to FFmpeg state.
+
+Production now uses a generation-local submission boundary. Supported SDL,
+WinMM, CoreAudio, and ALSA streams expose strict, cancellation-aware bounded
+submission and exact queue depth. A calibrated submission-paced capability is
+explicit; an unavailable-progress capability never claims a host drain. Each
+context owns at most one live input packet and one working frame, and fixed
+conversion storage plus packet/sample limits provide the retained-state bound.
+
+The first attended target run showed the intended temporal improvement and
+later/menu progression, but direct listening found persistent noise, replayed
+or intermittent sound over the grey interval, severe logo-intro noise, and
+sound during the audio-less `attract_movie.bk2`. The later source-isolation
+matrix proved that the independent movie stream is clean and that the two
+remaining audible defects belong to separate guest owners: noisy logo audio
+from AudioOut2 and intermittent grey-interval logo audio from AudioOut. This
+model remains selected as the bounded movie playback architecture, but it is
+not an accepted retail audio correction; no guest source has been muted or
+changed.
 
 ### C. Unbounded decoded-frame or packet queue
 
@@ -415,6 +602,7 @@ state is explicit:
 | --- | --- | --- |
 | Movie audio running | This movie's host audio progress estimate | Advance monotonically, capped at the movie's local wall origin so future audio cannot select future video. |
 | Temporary underrun | Last movie-local audio value | Hold video; do not read AudioOut or AudioOut2 progress. |
+| Host progress unavailable | No synthetic clock or drain claim | Keep the explicit unsupported capability visible; supported backends must expose exact or calibrated progress before movie completion can be claimed. |
 | Audio unavailable or permanently failed | Movie-local monotonic wall time | Switch once to a wall fallback anchored at the last value; never freeze on a dead audio source. |
 | No audio stream | Movie-local monotonic wall time | Advance independently of every guest audio stream. |
 | Paused | Last selected value | Hold until the owning playback resumes; resume rebases wall/fallback time. |
@@ -427,20 +615,19 @@ current `GuestAudioClock` and does not assert that the PS5 uses the same model.
 
 ## Lifecycle and synchronization invariants
 
-The next implementation must preserve all of these invariants:
+The production implementation must preserve all of these invariants:
 
 1. A decoded RGBA destination has one owner. It is not overwritten, reused, or
    returned to the free pool until that owner releases it.
 2. The demux owns at most one live input `AVPacket`; every read is either sent,
    processed, or unreferenced before the next read.
-3. The decoder owns at most one retained next `AVFrame` reference. The working
-   frame and retained frame are unreferenced exactly once on delivery, late-frame
-   discard, EOF drain, cancellation, replacement, or disposal.
-4. No compressed-video queue exists. Video packets are sent in demux order,
-   audio packets remain ordered, and decoded video may be discarded without
-   skipping codec input or breaking reference state.
-5. EOF means demux exhaustion, not playback completion. Audio, video decoder
-   output, and the one retained next frame must drain before completion.
+3. Each context owns at most one working `AVFrame`; it is unreferenced exactly
+   once on delivery, EOF drain, cancellation, replacement, or disposal.
+4. No compressed-video queue exists. Video packets are never skipped before
+   FFmpeg receives them, audio packets remain ordered, and no decoded video is
+   retained outside the existing externally owned destination model.
+5. EOF means demux exhaustion, not playback completion. Audio and video decoder
+   output, the resampler, and the host stream must drain before completion.
 6. Audio-device failure is observable to the movie timeline. A temporary
    underrun is not treated as permanent failure without an explicit state
    transition.
@@ -452,43 +639,46 @@ The next implementation must preserve all of these invariants:
 9. Diagnostics-disabled paths short-circuit before payload construction,
    formatting, event locking, or per-event accounting.
 
-## Stopping boundary and next model
+## Selected model and bounded ownership
 
-No production model was selected. Alternative A is falsified by the attended
-pilots above, and Alternative B was not implemented because its second format
-context, codec lifecycle, cancellation, synchronization, and memory cost still
-need a focused design and measurement. The movie-local timeline behavior above
-remains the exact contract that any future implementation must satisfy; it is
-not installed by this branch.
+The independent audio-context model is selected because the lawful probe closed
+the previous falsifiers without sharing mutable FFmpeg state. The production
+implementation is generation-local and opens the second context only after the
+video context identifies an audio stream. A no-audio movie does not open it.
 
-The authored two-packet/eight-byte queue remains synthetic test coverage for
-ownership and backpressure history, but it is not production code and does not
-set a target limit. The production-facing conversion is intentionally deferred
-until a selected model has deterministic ownership tests and a safe target
-pilot.
+The video context owns video packet order, video decoding, frame conversion, and
+the five external RGBA destinations. The audio context independently owns its
+format context, selected audio codec context, packet, frame, resampler, and host
+stream. Each context has at most one live input packet and one working frame;
+audio conversion uses fixed storage, strict host queue bounds on every supported
+backend, and explicit packet/sample limits. No compressed-video queue, second
+video decoder, packet deferral, video packet skipping, or decode-and-discard path
+was added.
 
-The audio seam must expose local estimated progress without depending on
-`HostAudioDiagnostics`: no-track, running, temporary-underrun, normal completion,
-permanent open/decoder/submission/device failure, and disposal. SDL queue
-arithmetic remains an estimate of input removed from SDL's input queue, not a
-measurement of physical or audible playback. Other host backends may return a
-safe unavailable state until they implement equivalent progress.
+The two contexts use the same path-origin contract: the audio open checks the
+already-open video format start and duration, and both begin demuxing from the
+same source origin. Audio and video EOF are independent. Normal movie
+completion waits for video drain plus audio demux EOF, decoder EOF, resampler
+drain, and host queue drain. A temporary empty host queue holds the movie clock
+and may recover; explicit open, decoder, submission, and device failure enters a
+visible terminal state and releases the host stream. Normal audio completion or
+terminal audio failure uses an anchored movie-local wall continuation while
+video remains. No-audio movies use their own monotonic wall clock.
 
-The timeline must be created for each host movie generation and must use:
+Pause, resume, cancellation, skip, replacement, and disposal are owned by the
+movie generation. Backends that cannot pause expose that unsupported capability
+explicitly; they do not silently claim device pause. Disposal cancels and joins
+the audio pump before releasing its native resources; the existing presenter
+generation invalidation boundary is unchanged. Diagnostics are opt-in and
+bounded; the disabled path does not construct event payloads, format state,
+lock the event stream, or perform per-event accounting.
 
-1. this movie's running audio estimate;
-2. a held value during temporary underrun;
-3. an anchored local wall continuation after normal audio completion with video
-   remaining or after permanent audio failure;
-4. local monotonic wall time for no-track movies;
-5. a held value while paused, with resume rebasing the local wall origin;
-6. a terminal old identity on skip, completion, replacement, and disposal.
-
-This is a finite timeline contract fully specified for deterministic synthetic
-testing. It is not evidence that a one-demux media pump is safe; the attended
-pilots established the opposite. Do not implement a replacement pump until the
-separate-audio-context comparison or another measured finite model closes the
-falsifiers below.
+The authored independent-context contract tests cover saturation, EOF order,
+underrun recovery, normal completion, no-audio behavior, all failure classes,
+pause/resume, lifecycle races, stale generations, native ownership, finite
+retained state, diagnostics bounds, and repeated teardown. The earlier
+two-packet/eight-byte queue remains synthetic coverage for falsified-boundary
+history and is not production code.
 
 ## Remaining uncertainty
 
@@ -500,25 +690,39 @@ falsifiers below.
 - The criterion for distinguishing temporary audio underrun from permanent
   device/decoder failure must be tied to explicit host error/state transitions,
   not an arbitrary elapsed-time guess.
-- Alternative B's duplicate format/codec context cost, EOF synchronization,
-  cancellation, and audio/video lifecycle have not been measured.
-- The two pilots did not reach main-menu progression or the expected checkpoint,
-  so no claim is made about later startup behavior.
+- The probe's process deltas are scalar host measurements, not a decomposition
+  of every FFmpeg allocator or device-driver allocation. The attended pilot
+  measured the complete emulator process, but crossed the unchanged physical
+  headroom floor before later movie ownership could be tested.
+- The source-isolation matrix attributes the first-logo noise to
+  `audio-out2-primary` and the grey-interval intermittent music to AudioOut
+  `port-1`, while the independent movie stream remains clean. It does not yet
+  identify the guest-side mixer/event feeding either stream, explain the
+  left-channel asymmetry, or establish the intended title mix.
+- The isolation runs are attribution evidence, not correction confirmations:
+  two stopped at the unchanged physical-headroom boundary and the one normal
+  exit still showed the unresolved grey video output. No production audio
+  source has been muted or repaired, so two comparable post-correction runs
+  remain unjustified.
+- Later `attract_movie.bk2` and `logo_intro.bk2` ownership remains out of scope
+  until the guest startup owners are traced. The main-menu grey output is a
+  separate unresolved video-rendering boundary.
 - The title's intended proprietary clock ownership remains unknown. The
   movie-local contract is justified by the authored boundary and target clock
   observations, not by a claim about Sony internals.
 
 ## Falsifiers
 
-The next implementation must close these falsifiers before production work:
+The selected implementation remains unaccepted as a target correction if any
+of these falsifiers appears:
 
 - A one-demux model must not lose a source frame, stall at the first future frame,
   or cross the configured physical-memory safety boundary. Both failure modes
   were observed in the pilots and are now accepted evidence against Alternative
   A.
-- A separate audio context must account for duplicate file I/O, exact audio and
-  video EOF/drain ordering, cancellation, disposal, host-stream failure, and
-  bounded memory before it is selected.
+- The separate audio context must preserve duplicate file ownership, exact
+  audio and video EOF/drain ordering, cancellation, disposal, host-stream
+  failure, and bounded memory on the target.
 - A video packet is skipped before being sent to FFmpeg, codec reference state
   becomes invalid, or PTS order is not preserved at the decoder input.
 - A candidate pump overwrites or reuses an owned RGBA destination, retains more
@@ -541,7 +745,7 @@ The next implementation must close these falsifiers before production work:
 This experiment's focused lane is:
 
 ```powershell
-dotnet test tests\SharpEmu.Libs.Tests\SharpEmu.Libs.Tests.csproj -c Release --filter "FullyQualifiedName~MovieAudioPumpContractTests|FullyQualifiedName~MovieTimelineContractTests"
+dotnet test tests\SharpEmu.Libs.Tests\SharpEmu.Libs.Tests.csproj -c Release --filter "FullyQualifiedName~SharpEmu.Libs.Tests.Media"
 ```
 
 The requested repository verification remains:
@@ -552,12 +756,17 @@ git diff --check
 ```
 
 Shader verification is unnecessary because this change touches no shader or
-GPU semantics. Target confirmations were intentionally stopped after the
-falsifying pilots above.
+GPU semantics. Retail target confirmations remain unjustified after the current
+pilot's physical-headroom boundary; the earlier one-demux pilots are not
+evidence against this separately bounded model.
 
-Verification completed on the evidence-only stopping point:
+Final cleaned-branch verification:
 
-- focused movie/audio contract tests: 21 passed;
-- all media tests: 49 passed;
-- Fast lane: passed, including 864 solution tests;
-- `git diff --check`: passed.
+- focused media and audio suite: 135 passed;
+- complete media suite: 68 passed;
+- complete solution suite: 897 passed;
+- Fast verification passed, including the target-memory, VMMap, runner
+  supervision, Release build, and complete solution test gates;
+- `git diff --check` passed;
+- shader verification is unnecessary because this change touches no shader or
+  GPU semantics.

@@ -191,10 +191,9 @@ internal static class MovieDiagnostics
 
     internal static void Start(
         long instanceId,
-        double audioStartSeconds,
         double audioSeconds,
-        bool audioRunning,
-        bool followGuestAudioClock)
+        MovieAudioProgressState audioState,
+        bool hasAudioTrack)
     {
         if (!TryReserveEvent())
         {
@@ -202,25 +201,23 @@ internal static class MovieDiagnostics
         }
 
         WriteReserved("start", new
-        {
-            movieInstanceId = instanceId,
-            wallSeconds = 0d,
-            audioStartSeconds,
-            audioSeconds,
-            selectedPlaybackSeconds = 0d,
-            audioRunning,
-            followGuestAudioClock,
-        });
+            {
+                movieInstanceId = instanceId,
+                wallSeconds = 0d,
+                audioSeconds,
+                audioState = audioState.ToString(),
+                hasAudioTrack,
+                selectedPlaybackSeconds = 0d,
+            });
     }
 
     internal static void Clock(
         long instanceId,
         double wallSeconds,
-        double guestAudioClockSeconds,
         double audioSeconds,
         double selectedPlaybackSeconds,
-        bool audioRunning,
-        bool followGuestAudioClock,
+        MovieAudioProgressState audioState,
+        bool hasAudioTrack,
         long currentFrameIndex,
         double mediaTimestampSeconds,
         long targetFrameIndex,
@@ -238,14 +235,13 @@ internal static class MovieDiagnostics
         }
 
         WriteReserved("clock", new
-        {
-            movieInstanceId = instanceId,
-            wallSeconds,
-            guestAudioClockSeconds,
-            audioSeconds,
-            selectedPlaybackSeconds,
-            audioRunning,
-            followGuestAudioClock,
+            {
+                movieInstanceId = instanceId,
+                wallSeconds,
+                audioSeconds,
+                selectedPlaybackSeconds,
+                audioState = audioState.ToString(),
+                hasAudioTrack,
             currentFrameIndex,
             mediaTimestampSeconds,
             targetFrameIndex,
