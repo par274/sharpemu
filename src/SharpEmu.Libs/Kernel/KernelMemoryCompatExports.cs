@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Media;
+using SharpEmu.Logging;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -50,7 +51,10 @@ public static partial class KernelMemoryCompatExports
     private const int SeekSet = 0;
     private const int SeekCur = 1;
     private const int SeekEnd = 2;
-    private const ulong DirectMemorySizeBytes = 16384UL * 1024 * 1024;
+    // Host-aware: on ~16 GiB PCs this is smaller than the real PS5 16 GiB pool so
+    // titles that size themselves from sceKernelGetDirectMemorySize do not push
+    // the host into OOM. Override with SHARPEMU_DIRECT_MEMORY_MB.
+    private static readonly ulong DirectMemorySizeBytes = HostMemoryBudget.AdvertisedDirectMemoryBytes;
     private const ulong UnsetMainDirectMemoryPoolBase = ulong.MaxValue;
     private const ulong FlexibleMemorySizeBytes = 448UL * 1024 * 1024;
     private const int OrbisVirtualQueryInfoSize = 72;
@@ -5264,7 +5268,7 @@ public static partial class KernelMemoryCompatExports
                 continue;
             }
 
-            resolved.Add(segment);
+            resolved.Add(HostFsPath.EncodeHostPathSegment(segment));
         }
 
         return string.Join(Path.DirectorySeparatorChar, resolved);
@@ -7374,12 +7378,15 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var entryName = directory.Entries[currentIndex];
+        var hostEntryName = directory.Entries[currentIndex];
         directory.NextIndex = currentIndex + 1;
 
-        var entryBytes = Encoding.UTF8.GetBytes(entryName);
+        // Host names may be percent-encoded (#683); the guest must see the
+        // original FreeBSD-legal filename, including characters Windows rejects.
+        var guestEntryName = HostFsPath.DecodeHostPathSegment(hostEntryName);
+        var entryBytes = Encoding.UTF8.GetBytes(guestEntryName);
         var nameLength = Math.Min(entryBytes.Length, 255);
-        var entryPath = Path.Combine(directory.Path, entryName);
+        var entryPath = Path.Combine(directory.Path, hostEntryName);
         var entryType = Directory.Exists(entryPath) ? (byte)4 : (byte)8;
 
         var payload = new byte[512];
