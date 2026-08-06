@@ -2929,7 +2929,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
 		int hostPauseJump = offset;
 		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4C);
+		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4D);
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0xB1); EmitByte(code, ref offset, 0x11); // lock cmpxchg [r9], r10
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
 		int hostRetryJump = offset;
@@ -3012,7 +3012,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
 		int guestPauseJump = offset;
 		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4C);
+		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4D);
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0xB1); EmitByte(code, ref offset, 0x11);
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
 		int guestRetryJump = offset;
