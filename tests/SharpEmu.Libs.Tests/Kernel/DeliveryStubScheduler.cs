@@ -73,7 +73,10 @@ internal sealed class DeliveryStubScheduler : IGuestThreadScheduler
     public bool TryJoinThread(CpuContext callerContext, ulong threadHandle, out ulong returnValue, out string? error) =>
         throw new NotSupportedException();
 
-    public void Pump(CpuContext callerContext, string reason) => throw new NotSupportedException();
+    // The event-flag park pumps the scheduler on every tick; nothing to advance here.
+    public void Pump(CpuContext callerContext, string reason)
+    {
+    }
 
     public bool TrySetGuestThreadPriority(ulong guestThreadHandle, int guestPriority) =>
         throw new NotSupportedException();
