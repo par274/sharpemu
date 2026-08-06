@@ -8,11 +8,6 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Kernel;
 
-[CollectionDefinition("GuestThreadSchedulerState", DisableParallelization = true)]
-public sealed class GuestThreadSchedulerStateCollection
-{
-}
-
 /// <summary>
 /// A guest thread that blocks in sceKernelWaitSema without a cooperative identity parks on the
 /// host inside the HLE export, so it never reaches the import boundary where queued kernel
@@ -40,7 +35,7 @@ public sealed class KernelSemaphoreExceptionDeliveryTests
     {
         var context = CreateContext();
         var handle = CreateSemaphore(context, initialCount: 0);
-        var scheduler = new StubScheduler();
+        var scheduler = new DeliveryStubScheduler();
         var signalContext = CreateContext();
 
         // Post the token from the delivery hook, standing in for a guest handler that
@@ -72,7 +67,7 @@ public sealed class KernelSemaphoreExceptionDeliveryTests
     {
         var context = CreateContext();
         var handle = CreateSemaphore(context, initialCount: 0);
-        var scheduler = new StubScheduler();
+        var scheduler = new DeliveryStubScheduler();
         var signalContext = CreateContext();
 
         using var _ = new SchedulerScope(scheduler);
@@ -103,7 +98,7 @@ public sealed class KernelSemaphoreExceptionDeliveryTests
     {
         var context = CreateContext();
         var handle = CreateSemaphore(context, initialCount: 0);
-        var scheduler = new StubScheduler();
+        var scheduler = new DeliveryStubScheduler();
 
         using var _ = new SchedulerScope(scheduler);
         context[CpuRegister.Rdi] = handle;
@@ -128,7 +123,7 @@ public sealed class KernelSemaphoreExceptionDeliveryTests
     {
         var context = CreateContext();
         var handle = CreateSemaphore(context, initialCount: 1);
-        var scheduler = new StubScheduler();
+        var scheduler = new DeliveryStubScheduler();
 
         using var _ = new SchedulerScope(scheduler);
         context[CpuRegister.Rdi] = handle;
@@ -201,107 +196,5 @@ public sealed class KernelSemaphoreExceptionDeliveryTests
         var bytes = new byte[sizeof(uint)];
         Assert.True(context.Memory.TryRead(address, bytes));
         return BitConverter.ToUInt32(bytes);
-    }
-
-    /// <summary>GuestThreadExecution.Scheduler is process-wide; put it back afterwards.</summary>
-    private sealed class SchedulerScope : IDisposable
-    {
-        private readonly IGuestThreadScheduler? _previous;
-
-        public SchedulerScope(IGuestThreadScheduler scheduler)
-        {
-            _previous = GuestThreadExecution.Scheduler;
-            GuestThreadExecution.Scheduler = scheduler;
-        }
-
-        public void Dispose() => GuestThreadExecution.Scheduler = _previous;
-    }
-
-    /// <summary>
-    /// Only the members a blocking semaphore wait reaches are implemented. Anything else throws so
-    /// a future change that starts routing through this stub cannot pass by accident.
-    /// </summary>
-    private sealed class StubScheduler : IGuestThreadScheduler
-    {
-        private int _deliverCalls;
-
-        public Action? OnDeliver { get; set; }
-
-        public int DeliverCalls => Volatile.Read(ref _deliverCalls);
-
-        public volatile bool SignalCompleted;
-
-        public bool SupportsGuestContextTransfer => false;
-
-        public bool TryDeliverPendingGuestException(CpuContext callerContext)
-        {
-            // Only act once: the wait polls this on every tick, and the production hook likewise
-            // returns false once the queue for this thread is drained.
-            if (Interlocked.Increment(ref _deliverCalls) != 1)
-            {
-                return false;
-            }
-
-            OnDeliver?.Invoke();
-            return true;
-        }
-
-        // sceKernelSignalSema notifies the cooperative scheduler after posting; nothing is
-        // registered here, so report that nothing was woken.
-        public int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue) => 0;
-
-        public void RegisterGuestThreadContext(ulong threadHandle, CpuContext context) =>
-            throw new NotSupportedException();
-
-        public bool TryStartThread(CpuContext creatorContext, GuestThreadStartRequest request, out string? error) =>
-            throw new NotSupportedException();
-
-        public bool TryJoinThread(CpuContext callerContext, ulong threadHandle, out ulong returnValue, out string? error) =>
-            throw new NotSupportedException();
-
-        public void Pump(CpuContext callerContext, string reason) => throw new NotSupportedException();
-
-        public bool TrySetGuestThreadPriority(ulong guestThreadHandle, int guestPriority) =>
-            throw new NotSupportedException();
-
-        public bool TrySetGuestThreadAffinity(ulong guestThreadHandle, ulong affinityMask) =>
-            throw new NotSupportedException();
-
-        public IReadOnlyList<GuestThreadSnapshot> SnapshotThreads() => throw new NotSupportedException();
-
-        public bool TryCallGuestFunction(
-            CpuContext callerContext,
-            ulong entryPoint,
-            ulong arg0,
-            ulong arg1,
-            ulong stackAddress,
-            ulong stackSize,
-            string reason,
-            out string? error) => throw new NotSupportedException();
-
-        public bool TryCallGuestFunction(
-            CpuContext callerContext,
-            ulong entryPoint,
-            ulong arg0,
-            ulong arg1,
-            ulong arg2,
-            ulong stackAddress,
-            ulong stackSize,
-            string reason,
-            out ulong returnValue,
-            out string? error) => throw new NotSupportedException();
-
-        public bool TryCallGuestContinuation(
-            CpuContext callerContext,
-            GuestCpuContinuation continuation,
-            string reason,
-            out string? error) => throw new NotSupportedException();
-
-        public bool TryRaiseGuestException(
-            CpuContext callerContext,
-            ulong threadHandle,
-            ulong handler,
-            int exceptionType,
-            out string? error) => throw new NotSupportedException();
     }
 }
