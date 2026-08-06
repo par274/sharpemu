@@ -53,6 +53,7 @@ public static partial class AgcExports
     private const uint ItDispatchDirect = 0x15;
     private const uint ItDispatchIndirect = 0x16;
     private const uint ItSetPredication = 0x20;
+    private const uint ItCondExec = 0x22;
     private const uint ItWaitRegMem = 0x3C;
     private const uint ItIndirectBuffer = 0x3F;
     private const uint ItEventWrite = 0x46;
@@ -65,6 +66,17 @@ public static partial class AgcExports
     private const uint RewindValidBit = 1u << 31;
     private const uint RewindOffloadEnableBit = 1u << 24;
     private const uint ItGetLodStats = 0x8E;
+
+    private static readonly HashSet<uint> KnownPm4Opcodes =
+    [
+        ItNop, ItSetBase, ItIndexBufferSize, ItIndexBase, ItDrawIndirect,
+        ItDrawIndexIndirect, ItDrawIndex2, ItIndexType, ItDrawIndexAuto,
+        ItNumInstances, ItDrawIndexMultiAuto, ItDrawIndexOffset2, ItWriteData,
+        ItDispatchDirect, ItDispatchIndirect, ItCondExec, ItWaitRegMem,
+        ItIndirectBuffer, ItEventWrite, ItReleaseMem, ItDmaData,
+        ItSetContextReg, ItSetShReg, ItSetUconfigReg, ItGetLodStats,
+    ];
+
     private const uint RZero = 0x00;
     private const uint RDrawIndexAuto = 0x04;
     private const uint RDrawReset = 0x05;
@@ -82,6 +94,947 @@ public static partial class AgcExports
     private const uint RFlip = 0x17;
     private const uint RReleaseMem = 0x18;
     private const uint RDmaData = 0x19;
+
+    // Command rings advance through contiguous fixed-size chunks; the sentinel
+    // terminator (IT_INDIRECT_BUFFER target=1 size=0) continues at the next one.
+    private const uint RingChunkBytes = 0x10000;
+
+    // release_mem here raises an EOP interrupt; above this range it's
+    // GPU-internal queue sync with no interrupt.
+    private const ulong GpuLabelPoolBase = 0x2000000000UL;
+    private const ulong GpuLabelPoolSize = 0x10000UL;
+
+    private static bool IsCpuVisibleLabel(ulong address) =>
+        address >= GpuLabelPoolBase &&
+        address < GpuLabelPoolBase + GpuLabelPoolSize;
+
+    // Async-compute ring tracking, env-gated. Off by default; only
+    // validated against Ghost of Yotei.
+    private static readonly bool _forceSubmitOrphanPreamblesEnabled = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES"),
+        "1",
+        StringComparison.Ordinal);
+    private static readonly object _orphanPreambleGate = new();
+    // Multiple producers can share one target label; last-writer-wins would
+    // starve waits on the others.
+    private static readonly Dictionary<ulong, List<ulong>> _cbReleaseMemTargets = new();
+    // header -> {ring base, write cursor} of the last submitted slice.
+    // Submissions stay cursor-bounded since rings aren't zeroed. Lap
+    // distinguishes a stale cursor from a previous pass over the same base.
+    private static readonly Dictionary<ulong, (ulong Base, ulong Cursor, long Lap)> _orphanPreambleSubmitted = new();
+    private static readonly HashSet<ulong> _orphanPreambleUnreadableLogged = new();
+    // Last {base, cursor} per builder header, to detect arena switches.
+    // Updated only from release_mem builds, not every packet.
+    private static readonly Dictionary<ulong, (ulong Base, ulong Cursor, ulong ThreadHandle, long Timestamp)> _builderArenaLastSeen = new();
+
+    // Keyed by the literal write address (rounded to its 64KB chunk), not
+    // the builder header's self-reported Base — that can be far from where
+    // a persistent ring is actually stalled.
+    private static readonly Dictionary<ulong, (ulong ThreadHandle, long Timestamp)> _ringChunkWriters = new();
+
+    private static void RecordRingChunkWriter(ulong writeAddress)
+    {
+        if (!_forceSubmitOrphanPreamblesEnabled || writeAddress == 0)
+        {
+            return;
+        }
+
+        var chunkKey = writeAddress & ~(ulong)(RingChunkBytes - 1);
+        lock (_orphanPreambleGate)
+        {
+            _ringChunkWriters[chunkKey] = (GuestThreadExecution.CurrentGuestThreadHandle, System.Diagnostics.Stopwatch.GetTimestamp());
+        }
+    }
+
+    /// <summary>
+    /// Stall diagnostics: which guest thread last wrote near
+    /// <paramref name="ringWindowStart"/>, and how long ago.
+    /// </summary>
+    public static bool TryFindRingProducer(ulong ringWindowStart, out ulong threadHandle, out double secondsSinceLastWrite)
+    {
+        threadHandle = 0;
+        secondsSinceLastWrite = 0;
+
+        var chunkKey = ringWindowStart & ~(ulong)(RingChunkBytes - 1);
+        lock (_orphanPreambleGate)
+        {
+            if (_ringChunkWriters.TryGetValue(chunkKey, out var writer))
+            {
+                threadHandle = writer.ThreadHandle;
+                secondsSinceLastWrite =
+                    (System.Diagnostics.Stopwatch.GetTimestamp() - writer.Timestamp) / (double)System.Diagnostics.Stopwatch.Frequency;
+                return true;
+            }
+        }
+
+        // Fallback: match by chunk-range membership, preferring the closest
+        // base at or below the wait address (CommandBufferAddress is the
+        // parse window start, not the arena's absolute base).
+        var bestBase = 0UL;
+        var found = false;
+        (ulong Base, ulong Cursor, ulong ThreadHandle, long Timestamp) bestSeen = default;
+        lock (_orphanPreambleGate)
+        {
+            foreach (var (_, seen) in _builderArenaLastSeen)
+            {
+                if (seen.Base > ringWindowStart ||
+                    ringWindowStart >= seen.Base + RingChunkBytes ||
+                    (found && seen.Base <= bestBase))
+                {
+                    continue;
+                }
+
+                bestBase = seen.Base;
+                bestSeen = seen;
+                found = true;
+            }
+        }
+
+        if (!found)
+        {
+            lock (_orphanPreambleGate)
+            {
+                var count = _builderArenaLastSeen.Count;
+                var closestDelta = ulong.MaxValue;
+                var closestBase = 0UL;
+                foreach (var (_, seen) in _builderArenaLastSeen)
+                {
+                    var delta = seen.Base > ringWindowStart ? seen.Base - ringWindowStart : ringWindowStart - seen.Base;
+                    if (delta < closestDelta)
+                    {
+                        closestDelta = delta;
+                        closestBase = seen.Base;
+                    }
+                }
+
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] agc.ring_producer_miss window=0x{ringWindowStart:X16} entries={count} " +
+                    $"closest_base=0x{closestBase:X16} delta=0x{closestDelta:X16}");
+            }
+
+            return false;
+        }
+
+        threadHandle = bestSeen.ThreadHandle;
+        secondsSinceLastWrite =
+            (System.Diagnostics.Stopwatch.GetTimestamp() - bestSeen.Timestamp) / (double)System.Diagnostics.Stopwatch.Frequency;
+        return true;
+    }
+
+    private static readonly HashSet<ulong> _knownBuilderHeaders = new();
+    // Unsubmitted tails of abandoned arenas — still valid, ring memory isn't zeroed.
+    private static readonly List<(ulong Header, ulong Base, ulong Start, ulong End)> _orphanPreambleClosedSlices = new();
+
+    private static bool IsKnownBuilderVtable(ulong vtable) =>
+        vtable is 0x8009F5750UL or 0x800AB4550UL;
+    // Ranges the game itself submitted; a header overlapping one is not an orphan.
+    private static readonly Dictionary<ulong, (ulong End, long Seq)> _gameSubmittedRanges = new();
+    private static long _orphanTrackSequence;
+    private static readonly Dictionary<(ulong Header, ulong Base), long> _arenaLapStartSequences = new();
+    // Submission is deferred here, not inline, since IsSuspended isn't set
+    // until the suspending queue's parse call unwinds.
+    private static readonly List<ulong> _orphanPreamblePendingTargets = new();
+    private static uint _orphanPreambleSyntheticOwner = 900000;
+
+    // Last packet address to write each fence label, for salvaging a stuck one.
+    private static readonly Dictionary<ulong, List<(ulong Packet, ulong OwnerHeader)>> _fenceWritePacketSites = new();
+    private static long _lastFenceSalvageTimestamp;
+    private static long _lastFenceScanTimestamp;
+
+    private const ulong FenceLabelRegionStart = 0x2000000000UL;
+    private const ulong FenceLabelRegionEnd = 0x2000001000UL;
+
+    private static void RecordFenceWritePacketSite(ulong packetAddress, ulong destinationAddress)
+    {
+        if (!_forceSubmitOrphanPreamblesEnabled ||
+            destinationAddress < FenceLabelRegionStart ||
+            destinationAddress >= FenceLabelRegionEnd)
+        {
+            return;
+        }
+
+        lock (_orphanPreambleGate)
+        {
+            if (!_fenceWritePacketSites.TryGetValue(destinationAddress, out var sites))
+            {
+                sites = new List<(ulong, ulong)>();
+                _fenceWritePacketSites[destinationAddress] = sites;
+            }
+
+            foreach (var (existingPacket, _) in sites)
+            {
+                if (existingPacket == packetAddress)
+                {
+                    return;
+                }
+            }
+
+            if (sites.Count >= 8)
+            {
+                return;
+            }
+
+            // Resolve the owning builder now, before its header moves on.
+            ulong owner = 0;
+            foreach (var (headerAddress, seen) in _builderArenaLastSeen)
+            {
+                if (seen.Base != 0 &&
+                    packetAddress >= seen.Base &&
+                    packetAddress < seen.Base + 0x10000)
+                {
+                    owner = headerAddress;
+                    break;
+                }
+            }
+
+            sites.Add((packetAddress, owner));
+        }
+    }
+
+    private static void SalvageStuckFenceWrites(CpuContext ctx, SubmittedGpuState gpuState)
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now - Volatile.Read(ref _lastFenceSalvageTimestamp) <
+            System.Diagnostics.Stopwatch.Frequency / 10)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _lastFenceSalvageTimestamp, now);
+
+        var candidates = new List<(ulong Dest, ulong Packet, ulong Owner)>();
+        lock (_orphanPreambleGate)
+        {
+            foreach (var (dest, sites) in _fenceWritePacketSites)
+            {
+                foreach (var (packet, owner) in sites)
+                {
+                    candidates.Add((dest, packet, owner));
+                }
+            }
+        }
+
+        var salvagedAny = false;
+        foreach (var (dest, packet, recordedOwner) in candidates)
+        {
+            salvagedAny |= TrySalvageFenceWritePacket(ctx, gpuState, dest, packet, recordedOwner);
+        }
+
+        // Fallback when the learned-site probe finds nothing: a bounded scan
+        // over tracked arenas, matching the label's high dword, handed to
+        // the same strict validator (throttled to once a second).
+        if (salvagedAny ||
+            now - Volatile.Read(ref _lastFenceScanTimestamp) <
+                System.Diagnostics.Stopwatch.Frequency)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _lastFenceScanTimestamp, now);
+
+        var destinations = new HashSet<ulong>();
+        var windows = new HashSet<ulong>();
+        lock (_orphanPreambleGate)
+        {
+            foreach (var (dest, sites) in _fenceWritePacketSites)
+            {
+                destinations.Add(dest);
+                foreach (var (site, _) in sites)
+                {
+                    windows.Add(site & ~0xFFFFUL);
+                }
+            }
+
+            foreach (var (_, seen) in _builderArenaLastSeen)
+            {
+                if (seen.Base != 0)
+                {
+                    windows.Add(seen.Base & ~0xFFFFUL);
+                }
+            }
+        }
+
+        foreach (var window in windows)
+        {
+            var end = window + 0x20000;
+            for (var address = window + 12; address + 4 <= end; address += 4)
+            {
+                if (!TryReadUInt32(ctx, address, out var destinationHigh))
+                {
+                    break;
+                }
+
+                if (destinationHigh != 0x20u ||
+                    !TryReadUInt32(ctx, address - 4, out var destinationLow))
+                {
+                    continue;
+                }
+
+                var dest = ((ulong)destinationHigh << 32) | destinationLow;
+                if (destinations.Contains(dest))
+                {
+                    _ = TrySalvageFenceWritePacket(ctx, gpuState, dest, address - 12, recordedOwner: 0);
+                }
+            }
+        }
+    }
+
+    private static bool TrySalvageFenceWritePacket(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong dest,
+        ulong packet,
+        ulong recordedOwner)
+    {
+        if (!TryReadUInt32(ctx, packet, out var header) ||
+            (header >> 30) != 3)
+        {
+            return false;
+        }
+
+        var length = Pm4Length(header);
+        var op = (header >> 8) & 0xFFu;
+        var register = (header >> 2) & 0x3Fu;
+        if (length < 4 || length > 16 ||
+            (op != ItWriteData && !(op == ItNop && register == RWriteData)))
+        {
+            return false;
+        }
+
+        if (!TryReadUInt64(ctx, packet + 8, out var packetDest) ||
+            packetDest != dest ||
+            !TryReadUInt32(ctx, packet + 16, out var value) ||
+            !TryReadUInt32(ctx, dest, out var current) ||
+            value != current + 1)
+        {
+            return false;
+        }
+
+        var owner = recordedOwner;
+        if (owner == 0)
+        {
+            lock (_orphanPreambleGate)
+            {
+                foreach (var (headerAddress, seen) in _builderArenaLastSeen)
+                {
+                    if (seen.Base != 0 &&
+                        packet >= seen.Base &&
+                        packet < seen.Base + 0x10000)
+                    {
+                        owner = headerAddress;
+                        break;
+                    }
+                }
+
+                if (owner == 0)
+                {
+                    // Any known builder's queue can parse this; identity only affects ordering.
+                    foreach (var headerAddress in _builderArenaLastSeen.Keys)
+                    {
+                        owner = headerAddress;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (owner == 0)
+        {
+            return false;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][WARN] agc.fence_write_salvage packet=0x{packet:X16} " +
+            $"dst=0x{dest:X16} value=0x{value:X} current=0x{current:X} header=0x{owner:X}");
+        // Deliberately unclipped: the packet may sit inside a range the
+        // game submitted on an earlier lap; the strict current+1 check
+        // already proves the content is this lap's, and re-executing a
+        // literal write of the same value later is idempotent.
+        SubmitOrphanSlice(ctx, gpuState, owner, packet, packet + (ulong)length * sizeof(uint), 0);
+        return true;
+    }
+
+    private static ulong ExtendClosedSliceOverTrailingFenceWrites(
+        CpuContext ctx,
+        ulong sliceEnd)
+    {
+        // Crosses decoration packets (EVENT_WRITE, NOPs); only commits through a qualifying write_data.
+        var tentativeEnd = sliceEnd;
+        for (var walked = 0; walked < 8; walked++)
+        {
+            if (!TryReadUInt32(ctx, tentativeEnd, out var header) ||
+                (header >> 30) != 3)
+            {
+                return sliceEnd;
+            }
+
+            var length = Pm4Length(header);
+            if (length == 0 || length > 64)
+            {
+                return sliceEnd;
+            }
+
+            var op = (header >> 8) & 0xFFu;
+            var register = (header >> 2) & 0x3Fu;
+            var standardWriteData = op == ItWriteData && length >= 4;
+            var agcWriteData = op == ItNop && register == RWriteData && length >= 4;
+            if (!standardWriteData && !agcWriteData)
+            {
+                if (op == ItEventWrite || (op == ItNop && register == 0))
+                {
+                    tentativeEnd += (ulong)length * sizeof(uint);
+                    continue;
+                }
+
+                return sliceEnd;
+            }
+
+            if (!TryReadUInt32(ctx, tentativeEnd + 4, out var control) ||
+                !TryReadUInt64(ctx, tentativeEnd + 8, out var destination) ||
+                destination == 0)
+            {
+                return sliceEnd;
+            }
+
+            var (dst, _, _, _) = standardWriteData
+                ? DecodeStandardWriteDataControl(control)
+                : DecodeAgcWriteDataControl(control);
+            if (dst is not (1 or 2 or 4 or 5) ||
+                !TryReadUInt32(ctx, tentativeEnd + 16, out var packetValue) ||
+                !TryReadUInt32(ctx, destination, out var currentValue) ||
+                packetValue <= currentValue)
+            {
+                return sliceEnd;
+            }
+
+            tentativeEnd += (ulong)length * sizeof(uint);
+            sliceEnd = tentativeEnd;
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] agc.orphan_slice_tail_extend end=0x{sliceEnd:X16} " +
+                $"dst=0x{destination:X16} value=0x{packetValue:X} current=0x{currentValue:X}");
+        }
+
+        return sliceEnd;
+    }
+
+    private static void TrackCbReleaseMemTarget(
+        CpuContext ctx,
+        ulong commandBufferAddress,
+        ulong destinationAddress)
+    {
+        // Deliberately NOT filtered to a CPU-visible-label pool: this tracker
+        // needs every release_mem target, not just a subset.
+        if (!_forceSubmitOrphanPreamblesEnabled || destinationAddress == 0)
+        {
+            return;
+        }
+
+        // Snapshot the header on every packet the builder records; when its
+        // base changes, queue the closed arena's remaining slice for the
+        // next drain, or its unsubmitted tail is lost for good.
+        ulong closedBase = 0, closedStart = 0, closedEnd = 0;
+        ulong arenaCursor = 0;
+        var haveHeader =
+            TryReadUInt64(ctx, commandBufferAddress, out var arenaBase) &&
+            TryReadUInt64(ctx, commandBufferAddress + 0x10, out arenaCursor) &&
+            arenaBase != 0;
+
+        lock (_orphanPreambleGate)
+        {
+            if (!_cbReleaseMemTargets.TryGetValue(destinationAddress, out var headers))
+            {
+                headers = new List<ulong>();
+                _cbReleaseMemTargets[destinationAddress] = headers;
+            }
+
+            if (!headers.Contains(commandBufferAddress))
+            {
+                headers.Add(commandBufferAddress);
+            }
+
+            _knownBuilderHeaders.Add(commandBufferAddress);
+            if (haveHeader)
+            {
+                var hadSeen = _builderArenaLastSeen.TryGetValue(commandBufferAddress, out var seen);
+                if (hadSeen &&
+                    seen.Base != 0 &&
+                    seen.Base != arenaBase &&
+                    seen.Cursor > seen.Base)
+                {
+                    closedBase = seen.Base;
+                    closedEnd = ExtendClosedSliceOverTrailingFenceWrites(ctx, seen.Cursor);
+                    _arenaLapStartSequences.TryGetValue(
+                        (commandBufferAddress, seen.Base),
+                        out var closingLap);
+                    closedStart =
+                        _orphanPreambleSubmitted.TryGetValue(commandBufferAddress, out var submitted) &&
+                        submitted.Base == seen.Base &&
+                        submitted.Lap == closingLap
+                            ? submitted.Cursor
+                            : seen.Base;
+                    if (closedStart < closedEnd)
+                    {
+                        _orphanPreambleClosedSlices.Add(
+                            (commandBufferAddress, closedBase, closedStart, closedEnd));
+                    }
+                }
+
+                if (!hadSeen || seen.Base != arenaBase)
+                {
+                    // The builder just (re-)entered this arena: a fresh lap
+                    // begins, invalidating earlier-lap game submissions of
+                    // these addresses for clipping purposes.
+                    _arenaLapStartSequences[(commandBufferAddress, arenaBase)] =
+                        ++_orphanTrackSequence;
+                }
+
+                _builderArenaLastSeen[commandBufferAddress] =
+                    (arenaBase, arenaCursor, GuestThreadExecution.CurrentGuestThreadHandle, System.Diagnostics.Stopwatch.GetTimestamp());
+            }
+        }
+
+        if (closedBase != 0 && closedStart < closedEnd)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] agc.orphan_arena_closed header=0x{commandBufferAddress:X16} " +
+                $"base=0x{closedBase:X16} slice=0x{closedStart:X16}-0x{closedEnd:X16}");
+        }
+    }
+
+    // Hooked at the exact WAIT_REG_MEM suspend site so ctx/gpuState identity
+    // matches what GpuWaitRegistry filters waiters on.
+    private static void TryForceSubmitOrphanPreamble(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong targetAddress)
+    {
+        if (!_forceSubmitOrphanPreamblesEnabled)
+        {
+            return;
+        }
+
+        // Actual submission is deferred to DrainPendingOrphanPreambles.
+        lock (_orphanPreambleGate)
+        {
+            if (_cbReleaseMemTargets.ContainsKey(targetAddress) &&
+                !_orphanPreamblePendingTargets.Contains(targetAddress))
+            {
+                _orphanPreamblePendingTargets.Add(targetAddress);
+            }
+        }
+    }
+
+    private static void RecordGameSubmittedRange(ulong commandAddress, uint dwordCount)
+    {
+        if (!_forceSubmitOrphanPreamblesEnabled || commandAddress == 0 || dwordCount == 0)
+        {
+            return;
+        }
+
+        var end = commandAddress + (ulong)dwordCount * 4;
+        lock (_orphanPreambleGate)
+        {
+            // Replace, never merge — a shorter re-submission (lap restart)
+            // must not keep shielding bytes past its real end.
+            _gameSubmittedRanges[commandAddress] = (end, ++_orphanTrackSequence);
+        }
+    }
+
+    // Called only where no DCB parse is on the stack. Loops because
+    // submitting one orphan buffer can suspend on the next stage's target.
+    private static void DrainPendingOrphanPreambles(CpuContext ctx, SubmittedGpuState gpuState)
+    {
+        if (!_forceSubmitOrphanPreamblesEnabled)
+        {
+            return;
+        }
+
+        while (true)
+        {
+            (ulong Header, ulong Base, ulong Start, ulong End) slice;
+            lock (_orphanPreambleGate)
+            {
+                if (_orphanPreambleClosedSlices.Count == 0)
+                {
+                    break;
+                }
+
+                slice = _orphanPreambleClosedSlices[0];
+                _orphanPreambleClosedSlices.RemoveAt(0);
+            }
+
+            long lapSequence;
+            lock (_orphanPreambleGate)
+            {
+                _arenaLapStartSequences.TryGetValue((slice.Header, slice.Base), out lapSequence);
+            }
+
+            SubmitOrphanSliceClipped(
+                ctx,
+                gpuState,
+                slice.Header,
+                slice.Start,
+                slice.End,
+                targetAddress: 0,
+                minimumRangeSequence: lapSequence);
+        }
+
+        while (true)
+        {
+            ulong targetAddress;
+            ulong[] pendingHeaders;
+            lock (_orphanPreambleGate)
+            {
+                if (_orphanPreamblePendingTargets.Count == 0)
+                {
+                    return;
+                }
+
+                targetAddress = _orphanPreamblePendingTargets[0];
+                _orphanPreamblePendingTargets.RemoveAt(0);
+
+                // Offer every builder of this target, not just one — counter
+                // fences only pass once all producers' release_mem lands.
+                pendingHeaders = _cbReleaseMemTargets.TryGetValue(targetAddress, out var headers)
+                    ? OrderHeadersByConstructionTimeLocked(headers)
+                    : Array.Empty<ulong>();
+            }
+
+            foreach (var headerAddress in pendingHeaders)
+            {
+                ForceSubmitOrphanPreambleHeader(ctx, gpuState, headerAddress, targetAddress);
+            }
+        }
+    }
+
+    // FIFO-preserving flush of one header's staged closed-arena slices. See
+    // the call site in ForceSubmitOrphanPreambleHeader: a header's current
+    // arena must never be enqueued ahead of its own abandoned predecessor.
+    private static void FlushClosedSlicesForHeader(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong headerAddress)
+    {
+        while (true)
+        {
+            (ulong Header, ulong Base, ulong Start, ulong End) slice = default;
+            long lapSequence = 0;
+            lock (_orphanPreambleGate)
+            {
+                var found = false;
+                for (var index = 0; index < _orphanPreambleClosedSlices.Count; index++)
+                {
+                    if (_orphanPreambleClosedSlices[index].Header == headerAddress)
+                    {
+                        slice = _orphanPreambleClosedSlices[index];
+                        _orphanPreambleClosedSlices.RemoveAt(index);
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    return;
+                }
+
+                _arenaLapStartSequences.TryGetValue((slice.Header, slice.Base), out lapSequence);
+            }
+
+            SubmitOrphanSliceClipped(
+                ctx,
+                gpuState,
+                slice.Header,
+                slice.Start,
+                slice.End,
+                targetAddress: 0,
+                minimumRangeSequence: lapSequence);
+        }
+    }
+
+    private static void ForceSubmitOrphanPreambleHeader(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong headerAddress,
+        ulong targetAddress)
+    {
+        if (!TryReadUInt64(ctx, headerAddress, out var commandAddress) ||
+            !TryReadUInt64(ctx, headerAddress + 8, out var limitAddress) ||
+            !TryReadUInt64(ctx, headerAddress + 0x10, out var cursor) ||
+            !TryReadUInt64(ctx, headerAddress + 0x20, out var vtable) ||
+            commandAddress == 0)
+        {
+            // Transient, not a permanent skip — a builder can read as garbage
+            // before it's fully constructed and become valid later.
+            lock (_orphanPreambleGate)
+            {
+                if (!_orphanPreambleUnreadableLogged.Add(headerAddress))
+                {
+                    return;
+                }
+            }
+
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] agc.orphan_preamble_skip header=0x{headerAddress:X16} " +
+                $"target=0x{targetAddress:X16} (unreadable at trigger time; will retry)");
+            return;
+        }
+
+        if (!IsKnownBuilderVtable(vtable))
+        {
+            lock (_orphanPreambleGate)
+            {
+                if (_orphanPreambleSubmitted.TryGetValue(headerAddress, out var seen) &&
+                    seen.Base == 0)
+                {
+                    return;
+                }
+
+                _orphanPreambleSubmitted[headerAddress] = (0, 0, 0);
+            }
+
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] agc.orphan_preamble_skip header=0x{headerAddress:X16} " +
+                $"target=0x{targetAddress:X16} vtable=0x{vtable:X16} (not an orphan builder class)");
+            return;
+        }
+
+        // Covers a builder that moves to a new arena without ever building
+        // another release_mem, which would otherwise leave its abandoned tail lost.
+        lock (_orphanPreambleGate)
+        {
+            if (_builderArenaLastSeen.TryGetValue(headerAddress, out var lastSeen) &&
+                lastSeen.Base != 0 &&
+                lastSeen.Base != commandAddress &&
+                lastSeen.Cursor > lastSeen.Base)
+            {
+                _arenaLapStartSequences.TryGetValue(
+                    (headerAddress, lastSeen.Base),
+                    out var closingLap);
+                var closedStart =
+                    _orphanPreambleSubmitted.TryGetValue(headerAddress, out var submittedBefore) &&
+                    submittedBefore.Base == lastSeen.Base &&
+                    submittedBefore.Lap == closingLap
+                        ? submittedBefore.Cursor
+                        : lastSeen.Base;
+                var closedEnd = ExtendClosedSliceOverTrailingFenceWrites(ctx, lastSeen.Cursor);
+                if (closedStart < closedEnd)
+                {
+                    _orphanPreambleClosedSlices.Add(
+                        (headerAddress, lastSeen.Base, closedStart, closedEnd));
+                    Console.Error.WriteLine(
+                        $"[LOADER][WARN] agc.orphan_arena_closed header=0x{headerAddress:X16} " +
+                        $"base=0x{lastSeen.Base:X16} slice=0x{closedStart:X16}-0x{closedEnd:X16} " +
+                        "(sweep-detected switch)");
+                }
+
+                _arenaLapStartSequences[(headerAddress, commandAddress)] = ++_orphanTrackSequence;
+                _builderArenaLastSeen[headerAddress] =
+                    (commandAddress, cursor, lastSeen.ThreadHandle, lastSeen.Timestamp);
+            }
+        }
+
+        // Flush this header's staged closures first, or the current-arena
+        // submission below could overtake its own predecessor.
+        FlushClosedSlicesForHeader(ctx, gpuState, headerAddress);
+
+        if (cursor <= commandAddress)
+        {
+            return;
+        }
+
+        // Extends past the cursor for fence writes some titles make via raw
+        // guest code, invisible to any AGC builder API.
+        var extendedEnd = ExtendClosedSliceOverTrailingFenceWrites(ctx, cursor);
+
+        ulong sliceStart;
+        long lapSequence;
+        lock (_orphanPreambleGate)
+        {
+            _arenaLapStartSequences.TryGetValue((headerAddress, commandAddress), out lapSequence);
+            if (_orphanPreambleSubmitted.TryGetValue(headerAddress, out var last))
+            {
+                if (last.Base == 0)
+                {
+                    return; // permanently skipped
+                }
+
+                if (last.Base == commandAddress &&
+                    last.Lap == lapSequence &&
+                    cursor == last.Cursor)
+                {
+                    if (extendedEnd == cursor)
+                    {
+                        return; // no new content since the last slice
+                    }
+
+                    // Cursor unchanged; only the raw-written fence tail is new.
+                    sliceStart = cursor;
+                }
+                else
+                {
+                    // Same base+lap grown -> delta only. Otherwise restart
+                    // from the arena base; cross-lap cursors are meaningless.
+                    sliceStart = last.Base == commandAddress &&
+                        last.Lap == lapSequence &&
+                        cursor > last.Cursor
+                        ? last.Cursor
+                        : commandAddress;
+                }
+            }
+            else
+            {
+                sliceStart = commandAddress;
+            }
+
+            _orphanPreambleSubmitted[headerAddress] = (commandAddress, cursor, lapSequence);
+        }
+
+        SubmitOrphanSliceClipped(
+            ctx,
+            gpuState,
+            headerAddress,
+            sliceStart,
+            extendedEnd,
+            targetAddress,
+            minimumRangeSequence: lapSequence);
+    }
+
+    // Clips out sub-ranges the game already submitted, to avoid double-executing them.
+    private static void SubmitOrphanSliceClipped(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong headerAddress,
+        ulong sliceStart,
+        ulong sliceEnd,
+        ulong targetAddress,
+        long minimumRangeSequence = 0)
+    {
+        while (sliceStart < sliceEnd)
+        {
+            ulong segmentEnd;
+            lock (_orphanPreambleGate)
+            {
+                var advanced = true;
+                while (advanced)
+                {
+                    advanced = false;
+                    foreach (var (rangeStart, range) in _gameSubmittedRanges)
+                    {
+                        if (range.Seq >= minimumRangeSequence &&
+                            sliceStart >= rangeStart && sliceStart < range.End)
+                        {
+                            sliceStart = range.End;
+                            advanced = true;
+                        }
+                    }
+                }
+
+                if (sliceStart >= sliceEnd)
+                {
+                    return;
+                }
+
+                segmentEnd = sliceEnd;
+                foreach (var (rangeStart, range) in _gameSubmittedRanges)
+                {
+                    if (range.Seq >= minimumRangeSequence &&
+                        rangeStart > sliceStart && rangeStart < segmentEnd)
+                    {
+                        segmentEnd = rangeStart;
+                    }
+                }
+            }
+
+            SubmitOrphanSlice(ctx, gpuState, headerAddress, sliceStart, segmentEnd, targetAddress);
+            sliceStart = segmentEnd;
+        }
+    }
+
+    // Catches labels only ever polled via CPU-side usleep loops (no waiter registered).
+    private static void SweepBuilderArenas(CpuContext ctx, SubmittedGpuState gpuState)
+    {
+        ulong[] headers;
+        lock (_orphanPreambleGate)
+        {
+            if (_knownBuilderHeaders.Count == 0)
+            {
+                return;
+            }
+
+            headers = OrderHeadersByConstructionTimeLocked(_knownBuilderHeaders);
+        }
+
+        foreach (var headerAddress in headers)
+        {
+            ForceSubmitOrphanPreambleHeader(ctx, gpuState, headerAddress, targetAddress: 0);
+        }
+    }
+
+    // Sorts by wall-clock time of each header's latest checkpoint, oldest
+    // first. Must be called with _orphanPreambleGate already held.
+    private static ulong[] OrderHeadersByConstructionTimeLocked(IEnumerable<ulong> headers)
+    {
+        var ordered = headers.ToArray();
+        Array.Sort(ordered, (a, b) =>
+        {
+            var hasA = _builderArenaLastSeen.TryGetValue(a, out var seenA);
+            var hasB = _builderArenaLastSeen.TryGetValue(b, out var seenB);
+            var tsA = hasA ? seenA.Timestamp : 0;
+            var tsB = hasB ? seenB.Timestamp : 0;
+            return tsA.CompareTo(tsB);
+        });
+        return ordered;
+    }
+
+    private static void SubmitOrphanSlice(
+        CpuContext ctx,
+        SubmittedGpuState gpuState,
+        ulong headerAddress,
+        ulong sliceStart,
+        ulong sliceEnd,
+        ulong targetAddress)
+    {
+        var dwordCount = (uint)((sliceEnd - sliceStart) / 4);
+        if (dwordCount == 0)
+        {
+            return;
+        }
+
+        uint owner;
+        lock (_orphanPreambleGate)
+        {
+            owner = ++_orphanPreambleSyntheticOwner;
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][WARN] agc.orphan_preamble_force_submit header=0x{headerAddress:X16} " +
+            $"command=0x{sliceStart:X16} dwords={dwordCount} targetLabel=0x{targetAddress:X16} " +
+            $"owner={owner}");
+
+        lock (gpuState.Gate)
+        {
+            var queueState = new SubmittedDcbState
+            {
+                QueueName = $"acb.orphan_preamble[0x{headerAddress:X}]",
+                IsForceSubmittedRing = true,
+            };
+            gpuState.ComputeQueues.Add(owner, queueState);
+            EnqueueSubmittedDcb(
+                ctx,
+                gpuState,
+                queueState,
+                sliceStart,
+                dwordCount,
+                ++gpuState.SubmissionSequence,
+                tracePackets: true);
+            DrainResumableDcbs(ctx, gpuState, tracePackets: true);
+        }
+    }
+
+    // Parse window for a ring resuming at appended commands: covers a full
+    // chunk, safe since parsing re-suspends at the next unwritten word.
+    private const uint RingResumeWindowDwords = 0x8000;
     private const uint RIndexBase = 0x1B;
     private const uint RIndexCount = 0x1C;
     private const uint SpiShaderPgmLoPs = 0x8;
@@ -96,7 +1049,7 @@ public static partial class AgcExports
     private const uint SpiShaderPgmLoLs = 0x148;
     private const uint SpiShaderPgmHiLs = 0x149;
     // Not 0x8A/0x8B - those are SPI_SHADER_PGM_RSRC1/RSRC2_GS, and reading them
-    // as an address yields a 58-bit value (observed live: 0x30004622C008300).
+    // as an address yields a nonsensical 58-bit value.
     private const uint SpiShaderPgmLoGs = 0x88;
     private const uint SpiShaderPgmHiGs = 0x89;
     private const uint SpiShaderPgmRsrc1Gs = 0x8A;
@@ -247,6 +1200,9 @@ public static partial class AgcExports
     private static readonly HashSet<(ulong Address, uint Initiator, string Reason)>
         _rejectedDispatchArguments = new();
     private static readonly HashSet<uint> _tracedSubmittedDrawOpcodes = new();
+    // Every PM4 opcode with no handler, logged once with its first two
+    // payload dwords as a possible target address.
+    private static readonly HashSet<uint> _seenUnknownOpcodes = new();
     // Concurrent so the per-draw/per-dispatch hit path is lock-free (and no longer
     // shares _submitTraceGate with tracing).
     private static readonly ConcurrentDictionary<
@@ -357,6 +1313,18 @@ public static partial class AgcExports
     private static readonly object _registerDefaultsGate = new();
     private static readonly ConditionalWeakTable<object, RegisterDefaultsAllocation> _registerDefaultsAllocations = new();
     private static readonly ConditionalWeakTable<object, SubmittedGpuState> _submittedGpuStates = new();
+
+    // Unwraps decorator chains so all threads resolve to one shared root —
+    // ctx.Memory identity otherwise differs per native worker thread.
+    private static object CanonicalMemory(object memory)
+    {
+        while (memory is SharpEmu.HLE.ICpuMemoryWrapper wrapper)
+        {
+            memory = wrapper.Inner;
+        }
+
+        return memory;
+    }
 
     private static readonly RegisterDefaultGroup[] PrimaryRegisterDefaults =
         CreatePrimaryRegisterDefaults();
@@ -633,6 +1601,10 @@ public static partial class AgcExports
         // continue into the buffer it links to.
         public ulong PendingChainAddress { get; set; }
         public uint PendingChainDwords { get; set; }
+
+        // Base of the ring chunk currently being parsed; advances by RingChunkBytes.
+        public ulong RingChunkBase { get; set; }
+        public bool FollowedChunkAdvance { get; set; }
         public ulong CompletionEventNotifiedSubmissionId { get; set; }
         public Dictionary<(uint Op, uint Register), uint> FramePacketCounts { get; } = new();
         public uint FramePacketCount { get; set; }
@@ -644,6 +1616,18 @@ public static partial class AgcExports
         public bool PendingAcquireInvalidation { get; set; }
         public ulong PendingAcquireBase { get; set; }
         public ulong PendingAcquireSize { get; set; }
+
+        // Growing ring: never follows the chunk-advance sentinel (builders jump
+        // to non-contiguous chunks), parks on the first not-yet-written word instead.
+        public bool IsForceSubmittedRing { get; set; }
+
+        // Address of a synthetic ring-tail park (SuspendOnUnwrittenRingWord);
+        // abandoned if a new submission means the game moved to a fresh ring.
+        public ulong RingTailParkAddress { get; set; }
+
+        // One-past the last fully-processed packet, so the orphan sweep can
+        // reach packets a suspended queue never got back to.
+        public ulong LastParsedAddress { get; set; }
     }
 
     private sealed class SubmittedGpuState
@@ -666,6 +1650,11 @@ public static partial class AgcExports
         public bool WaitMonitorRunning { get; set; }
         public object WaitMonitorSignalGate { get; } = new();
         public long WaitMonitorSignalVersion { get; set; }
+
+        // Coalesced drain scheduling; fields (not properties) so Interlocked can target them.
+        public int DrainWorkerActive;
+        public int DrainPending;
+        public CpuContext? PendingDrainContext;
     }
 
     private readonly record struct RegisteredAgcResource(
@@ -1756,6 +2745,7 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.cb_set_sh_range buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} offset=0x{offset:X8} count={valueCount}");
+        RefreshBuilderArenaCursorPassive(ctx, commandBufferAddress);
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -1817,6 +2807,8 @@ public static partial class AgcExports
         TraceAgc(
             $"agc.cb_release_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
             $"action=0x{action:X2} gcr=0x{gcrControl:X4} dst=0x{destinationAddress:X16} data_sel={dataSelection} data=0x{data:X16}");
+        TrackCbReleaseMemTarget(ctx, commandBufferAddress, destinationAddress);
+        RecordRingChunkWriter(commandAddress);
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -2398,7 +3390,44 @@ public static partial class AgcExports
                 $"increment={increment} confirm={writeConfirm}");
         }
 
+        RefreshBuilderArenaCursorPassive(ctx, commandBufferAddress);
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    // Extends the cursor cache over trailer packets built after a lap's last
+    // release_mem, which would otherwise be dropped from the closed slice.
+    private static void RefreshBuilderArenaCursorPassive(CpuContext ctx, ulong commandBufferAddress)
+    {
+        if (!_forceSubmitOrphanPreamblesEnabled)
+        {
+            return;
+        }
+
+        lock (_orphanPreambleGate)
+        {
+            if (!_knownBuilderHeaders.Contains(commandBufferAddress))
+            {
+                return;
+            }
+        }
+
+        if (!TryReadUInt64(ctx, commandBufferAddress, out var arenaBase) ||
+            arenaBase == 0 ||
+            !TryReadUInt64(ctx, commandBufferAddress + 0x10, out var arenaCursor))
+        {
+            return;
+        }
+
+        lock (_orphanPreambleGate)
+        {
+            if (_builderArenaLastSeen.TryGetValue(commandBufferAddress, out var seen) &&
+                seen.Base == arenaBase &&
+                arenaCursor > seen.Cursor)
+            {
+                _builderArenaLastSeen[commandBufferAddress] =
+                    (arenaBase, arenaCursor, GuestThreadExecution.CurrentGuestThreadHandle, System.Diagnostics.Stopwatch.GetTimestamp());
+            }
+        }
     }
 
     [SysAbiExport(
@@ -2566,6 +3595,7 @@ public static partial class AgcExports
             $"agc.dcb_dma_data buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
             $"dst=0x{destinationAddress:X16} src=0x{sourceAddress:X16} bytes={byteCount} " +
             $"control0=0x{destination | (destinationCachePolicy << 8) | (source << 16) | (sourceCachePolicy << 24):X8}");
+        RefreshBuilderArenaCursorPassive(ctx, commandBufferAddress);
         return ReturnPointer(ctx, commandAddress);
     }
 
@@ -2770,14 +3800,8 @@ public static partial class AgcExports
             : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
-    // The SRC counterpart of sceAgcDmaDataPatchSetDstAddressOrOffset. Patches
-    // the source field (offset +24, matching the layout written by
-    // sceAgcDcbDmaData) of a NOP/RDmaData packet. Games patch this to point a
-    // GPU DMA at the data it should copy — commonly a completion/label write.
-    // When it is missing the source stays 0, ApplySubmittedDmaData skips the
-    // copy (copied=False), and whatever the guest waits on that label for never
-    // fires (observed: Void Terrarium's first draw batch presents a black frame
-    // then the render pipeline stalls with no further flips).
+    // SRC counterpart of sceAgcDmaDataPatchSetDstAddressOrOffset. Without this,
+    // the source stays 0 and the DMA copy — often a label write — never runs.
     [SysAbiExport(
         Nid = "cdDRpqcFGbU",
         ExportName = "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
@@ -3282,6 +4306,9 @@ public static partial class AgcExports
         LibraryName = "libSceAgcDriver")]
     public static int DriverSubmitDcb(CpuContext ctx)
     {
+        Interlocked.Increment(ref _dcbSubmitCount);
+        Volatile.Write(ref _lastDcbSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+
         var packetAddress = ctx[CpuRegister.Rdi];
         if (packetAddress == 0 ||
             !TryReadUInt64(ctx, packetAddress, out var commandAddress) ||
@@ -3298,6 +4325,11 @@ public static partial class AgcExports
             {
                 tracePackets = _tracedDcbSizes.Add(dwordCount);
             }
+
+            // Unconditional (unlike tracePackets above, not deduped by dwordCount):
+            // every DriverSubmitDcb call's target address and size, so submission
+            // history can be reconstructed even when most sizes repeat.
+            TraceAgc($"agc.driver_submit_dcb_call addr=0x{commandAddress:X16} dwords={dwordCount}");
         }
 
         TraceAgc(
@@ -3305,7 +4337,8 @@ public static partial class AgcExports
             $"dwords={dwordCount} end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
-        var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        RecordGameSubmittedRange(commandAddress, dwordCount);
+        var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
         {
             gpuState.Graphics.QueueName = "dcb.graphics";
@@ -3320,6 +4353,9 @@ public static partial class AgcExports
             DrainResumableDcbs(ctx, gpuState, tracePackets);
         }
 
+        // No orphan-preamble drain here — this runs on a native guest worker
+        // thread, where long managed work fail-fasts the runtime. The GPU
+        // wait monitor drains this instead.
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -3347,6 +4383,11 @@ public static partial class AgcExports
             {
                 tracePackets = _tracedDcbSizes.Add(dwordCount);
             }
+
+            // Unconditional (unlike tracePackets above, not deduped by dwordCount):
+            // every DriverSubmitAcb call's target address and size.
+            TraceAgc(
+                $"agc.driver_submit_acb_call owner={ownerHandle} addr=0x{commandAddress:X16} dwords={dwordCount}");
         }
 
         TraceAgc(
@@ -3355,7 +4396,8 @@ public static partial class AgcExports
             $"end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
         GuestGpu.Current.AttachGuestMemory(ctx.Memory);
-        var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        RecordGameSubmittedRange(commandAddress, dwordCount);
+        var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
         {
             if (!gpuState.ComputeQueues.TryGetValue(ownerHandle, out var queueState))
@@ -3377,6 +4419,8 @@ public static partial class AgcExports
             DrainResumableDcbs(ctx, gpuState, tracePackets);
         }
 
+        // See DriverSubmitDcb: orphan drains run only on the wait monitor
+        // thread, never in this guest-thread import window.
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -3526,7 +4570,24 @@ public static partial class AgcExports
     {
         if (state.IsSuspended)
         {
-            return;
+            // An explicit new submission supersedes a ring-tail park — the
+            // game moved to a fresh ring, so abandon the park.
+            if (state.RingTailParkAddress == 0 ||
+                state.PendingSubmissions.Count == 0 ||
+                !GpuWaitRegistry.TryRemoveByState(state, state.RingTailParkAddress))
+            {
+                return;
+            }
+
+            TraceAgc(
+                $"agc.dcb.ring_tail_superseded addr=0x{state.RingTailParkAddress:X16} " +
+                $"queue={state.QueueName} submission={state.ActiveSubmissionId}");
+            // Keeps its full recorded extent so the arena sweep doesn't
+            // double-run the tail once the game's own re-parse reaches it.
+            state.RingTailParkAddress = 0;
+            state.IsSuspended = false;
+            state.HasActiveSubmission = false;
+            NotifySubmittedDcbCompleted(gpuState, state, state.ActiveSubmissionId);
         }
 
         while (!state.HasActiveSubmission &&
@@ -3534,6 +4595,8 @@ public static partial class AgcExports
         {
             state.HasActiveSubmission = true;
             state.ActiveSubmissionId = submission.SubmissionId;
+            state.RingChunkBase = state.IsForceSubmittedRing ? 0 : submission.CommandAddress;
+            state.FollowedChunkAdvance = false;
             state.IsSuspended = ParseSubmittedDcb(
                 ctx,
                 gpuState,
@@ -3642,6 +4705,7 @@ public static partial class AgcExports
 
             state.PendingChainAddress = 0;
             state.PendingChainDwords = 0;
+            state.LastParsedAddress = commandAddress;
             var windowByteCount = checked((int)(dwordCount * sizeof(uint)));
             var rented = GuestDataPool.Shared.Rent(windowByteCount);
             bool suspended;
@@ -3667,6 +4731,17 @@ public static partial class AgcExports
                 _dcbWindowBuffer = null;
                 _dcbWindowByteLength = 0;
                 GuestDataPool.Shared.Return(rented);
+            }
+
+            // Record only what was actually parsed, not the full declared
+            // size — else the orphan sweep either starves a suspended
+            // queue's remaining packets or double-runs ones it already ran.
+            if (!state.IsForceSubmittedRing && state.LastParsedAddress > commandAddress)
+            {
+                var consumedDwords = (uint)Math.Min(
+                    (state.LastParsedAddress - commandAddress) / sizeof(uint),
+                    dwordCount);
+                RecordGameSubmittedRange(commandAddress, consumedDwords);
             }
 
             if (suspended)
@@ -3722,6 +4797,16 @@ public static partial class AgcExports
                 continue;
             }
 
+            if (header == 0 &&
+                (state.FollowedChunkAdvance || state.IsForceSubmittedRing) &&
+                _gpuWaitSuspendEnabled)
+            {
+                // Ring memory the game has not appended to yet — the bound the
+                // CP's write pointer would impose. Park until it is written.
+                return SuspendOnUnwrittenRingWord(
+                    ctx, state, commandAddress, currentAddress, offset, tracePackets);
+            }
+
             if (packetType != 3)
             {
                 TracePacketParseFailure(
@@ -3747,6 +4832,17 @@ public static partial class AgcExports
 
             var op = (header >> 8) & 0xFFu;
             var register = (header >> 2) & 0x3Fu;
+            if (!KnownPm4Opcodes.Contains(op) && _seenUnknownOpcodes.Add(op))
+            {
+                TryReadUInt32(ctx, currentAddress + 4, out var unknownPayload0);
+                TryReadUInt32(ctx, currentAddress + 8, out var unknownPayload1);
+                var possibleTarget = ((ulong)(unknownPayload1 & 0xFFFFu) << 32) | unknownPayload0;
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] agc.dcb.unknown_opcode op=0x{op:X2} reg=0x{register:X2} " +
+                    $"len={length} addr=0x{currentAddress:X16} queue={state.QueueName} " +
+                    $"payload0=0x{unknownPayload0:X8} payload1=0x{unknownPayload1:X8} " +
+                    $"possible_target=0x{possibleTarget:X16}");
+            }
             if (_traceFramePackets && ReferenceEquals(state, gpuState.Graphics))
             {
                 var packetKey = (op, op == ItNop ? register : uint.MaxValue);
@@ -3830,6 +4926,7 @@ public static partial class AgcExports
                 {
                     state.PendingChainAddress = chainAddress;
                     state.PendingChainDwords = chainLength;
+                    state.RingChunkBase = chainAddress;
                     TraceAgc(
                         $"agc.dcb_chain queue={state.QueueName} " +
                         $"submission={state.ActiveSubmissionId} " +
@@ -3838,6 +4935,22 @@ public static partial class AgcExports
 
                     // The link is a jump, not a call: whatever follows it in this
                     // buffer is unreachable padding.
+                    return false;
+                }
+
+                // target=1, size=0 is the ring-chunk-advance sentinel: continue
+                // at the next contiguous chunk. Distinct from padding (target=0).
+                if (chainAddress == 1 && state.RingChunkBase != 0)
+                {
+                    var nextChunk = state.RingChunkBase + RingChunkBytes;
+                    TraceAgc(
+                        $"agc.dcb.chunk_advance from=0x{currentAddress:X16} " +
+                        $"next=0x{nextChunk:X16}");
+
+                    state.PendingChainAddress = nextChunk;
+                    state.PendingChainDwords = RingChunkBytes / sizeof(uint);
+                    state.RingChunkBase = nextChunk;
+                    state.FollowedChunkAdvance = true;
                     return false;
                 }
             }
@@ -3884,23 +4997,13 @@ public static partial class AgcExports
                 length >= 2 &&
                 TryReadUInt32(ctx, currentAddress + sizeof(uint), out var eventTypeRaw))
             {
-                var eventType = eventTypeRaw & 0x3Fu;
-                SubmitOrderedGpuSideEffect(
-                    ctx,
-                    gpuState,
-                    state,
-                    () =>
-                    {
-                        var triggered = KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
-                            KernelEventQueueCompatExports.KernelEventFilterGraphics,
-                            eventType);
-                        if (tracePackets)
-                        {
-                            TraceAgc($"agc.dcb.event type=0x{eventType:X2} queues={triggered}");
-                        }
-                    },
-                    $"event_write type=0x{eventType:X2}",
-                    currentAddress);
+                // IT_EVENT_WRITE has no interrupt selector on hardware; EOP
+                // interrupts come from RELEASE_MEM only. Delivering kernel
+                // events here would over-count completions.
+                if (tracePackets)
+                {
+                    TraceAgc($"agc.dcb.event type=0x{eventTypeRaw & 0x3Fu:X2} queues=none");
+                }
             }
 
             if (op == ItNop && register == RReleaseMem && length >= 7)
@@ -4247,7 +5350,16 @@ public static partial class AgcExports
                         displayBuffer.Height);
                 }
 
-                _ = VideoOutExports.SubmitFlipFromAgc(ctx, handle, displayBufferIndex, unchecked((int)flipMode), flipArg);
+                // A SetFlip reached via the orphan force-submit path is the
+                // game's own packet, physically shared with a real queue's
+                // ring — force-submitting it can race ahead of that queue's
+                // natural parse and present it twice once the real queue
+                // catches up. Only a genuine game queue may flip.
+                if (!state.IsForceSubmittedRing)
+                {
+                    _ = VideoOutExports.SubmitFlipFromAgc(ctx, handle, displayBufferIndex, unchecked((int)flipMode), flipArg);
+                }
+
                 state.SawIndexedDraw = false;
                 state.GuestDrawKind = GuestDrawKind.None;
                 if (state.PendingTargetlessDraw is { } unusedPendingDraw)
@@ -4263,6 +5375,7 @@ public static partial class AgcExports
             }
 
             offset += length;
+            state.LastParsedAddress = commandAddress + (ulong)offset * sizeof(uint);
         }
 
         FlushPendingAcquireInvalidation(ctx, state, tracePackets);
@@ -4446,6 +5559,13 @@ public static partial class AgcExports
                 gpuState.WaitMonitorSignalVersion++;
                 Monitor.Pulse(gpuState.WaitMonitorSignalGate);
             }
+
+            // Resuming a DCB can enqueue and wait for another dispatch, never
+            // reentrantly on the Vulkan render thread. Drains are coalesced —
+            // hundreds of completions per frame each queueing an independent
+            // full drain turns the shared Gate into a thundering herd — via
+            // one request flag and a single re-looping worker.
+            RequestResumableDcbDrain(ctx, gpuState);
         }
 
         void ApplyAndQueueCompletion()
@@ -4487,6 +5607,48 @@ public static partial class AgcExports
         }
     }
 
+    private static void RequestResumableDcbDrain(CpuContext ctx, SubmittedGpuState gpuState)
+    {
+        Volatile.Write(ref gpuState.PendingDrainContext, ctx);
+        Interlocked.Exchange(ref gpuState.DrainPending, 1);
+        if (Interlocked.CompareExchange(ref gpuState.DrainWorkerActive, 1, 0) == 0)
+        {
+            ThreadPool.UnsafeQueueUserWorkItem(
+                static state => RunResumableDcbDrainWorker(state),
+                gpuState,
+                preferLocal: false);
+        }
+    }
+
+    private static void RunResumableDcbDrainWorker(SubmittedGpuState gpuState)
+    {
+        while (true)
+        {
+            Interlocked.Exchange(ref gpuState.DrainPending, 0);
+            if (Volatile.Read(ref gpuState.PendingDrainContext) is { } drainContext)
+            {
+                lock (gpuState.Gate)
+                {
+                    DrainResumableDcbs(drainContext, gpuState, tracePackets: _traceAgc);
+                }
+            }
+
+            if (Volatile.Read(ref gpuState.DrainPending) != 0)
+            {
+                continue;
+            }
+
+            Volatile.Write(ref gpuState.DrainWorkerActive, 0);
+            // A request may have slipped in between the pending check and the
+            // hand-back; re-claim the duty unless another worker already did.
+            if (Volatile.Read(ref gpuState.DrainPending) == 0 ||
+                Interlocked.CompareExchange(ref gpuState.DrainWorkerActive, 1, 0) != 0)
+            {
+                return;
+            }
+        }
+    }
+
     private static LabelProducerTrace? RegisterLabelProducer(
         object memory,
         SubmittedDcbState state,
@@ -4500,6 +5662,7 @@ public static partial class AgcExports
             return null;
         }
 
+        memory = CanonicalMemory(memory);
         var producer = new LabelProducerTrace
         {
             Sequence = Interlocked.Increment(ref _labelProducerSequence),
@@ -4614,6 +5777,7 @@ public static partial class AgcExports
         bool stale,
         ulong? currentValue = null)
     {
+        memory = CanonicalMemory(memory);
         LabelProducerTrace? producer = null;
         lock (_labelProducerGate)
         {
@@ -5011,19 +6175,9 @@ public static partial class AgcExports
     }
 
     /// <summary>
-    /// PS5 render targets alias guest memory, so a CP DMA fill or copy that
-    /// lands on an RT is visible to later GPU reads. Our render targets live
-    /// in Vulkan images, so mirror DMA writes into them: fills become
-    /// vkCmdClearColorImage, copies re-upload the guest bytes. Without this,
-    /// per-frame DMA clears never reach the image (the fog layer in Dreaming
-    /// Sarah accumulates until it saturates, washing the scene out).
-    /// </summary>
-    /// <summary>
-    /// PS5 render targets alias unified memory, so the game's CPU can rewrite a
-    /// surface (Chowdren memsets its fog-noise layer every frame) and the GPU
-    /// observes it. Our Vulkan guest images are separate storage, so re-upload
-    /// CPU-authored surfaces once per flip. Surfaces only the GPU writes keep
-    /// all-zero guest memory and are skipped, preserving their GPU content.
+    /// Mirrors guest-side DMA/CPU writes to a render target's surface into
+    /// our separate Vulkan image once per flip (Dreaming Sarah's fog layer,
+    /// Chowdren's fog-noise memset). Surfaces only the GPU writes are skipped.
     /// </summary>
     private static void SyncCpuWrittenGuestImages(
         CpuContext ctx,
@@ -5261,6 +6415,7 @@ public static partial class AgcExports
         var (destination, incrementAddress, writeConfirm, cachePolicy) = standardPacket
             ? DecodeStandardWriteDataControl(control)
             : DecodeAgcWriteDataControl(control);
+        RecordFenceWritePacketSite(packetAddress, destinationAddress);
         var dwordCount = packetLength - 4;
         var values = new uint[dwordCount];
         for (uint index = 0; index < dwordCount; index++)
@@ -5570,6 +6725,50 @@ public static partial class AgcExports
         return true;
     }
 
+    // Parks on ring memory not yet written by the game; resumes once it appends more.
+    private static bool SuspendOnUnwrittenRingWord(
+        CpuContext ctx,
+        SubmittedDcbState state,
+        ulong commandAddress,
+        ulong wordAddress,
+        uint offset,
+        bool tracePacket)
+    {
+        var waiter = new GpuWaitRegistry.WaitingDcb
+        {
+            CommandBufferAddress = commandAddress,
+            ResumeAddress = wordAddress,
+            TotalDwords = offset + RingResumeWindowDwords,
+            ResumeOffset = offset,
+            ReferenceValue = 0,
+            Mask = 0xFFFF_FFFFu,
+            CompareFunction = 4, // resume once the dword becomes nonzero
+            ControlValue = 0,
+            Is64Bit = false,
+            IsStandard = false,
+            WaitAddress = wordAddress,
+            Memory = ctx.Memory,
+            QueueName = state.QueueName,
+            SubmissionId = state.ActiveSubmissionId,
+            RegisteredTicks = System.Diagnostics.Stopwatch.GetTimestamp(),
+            State = state,
+        };
+        GpuWaitRegistry.Register(waiter.WaitAddress, waiter);
+        state.RingTailParkAddress = wordAddress;
+        var gpuState = _submittedGpuStates.GetValue(
+            CanonicalMemory(ctx.Memory),
+            static _ => new SubmittedGpuState());
+        EnsureGpuWaitMonitor(ctx, gpuState);
+        if (tracePacket)
+        {
+            TraceAgc(
+                $"agc.dcb.ring_tail_pending addr=0x{wordAddress:X16} " +
+                $"queue={state.QueueName}");
+        }
+
+        return true;
+    }
+
     // Returns true when the DCB should suspend parsing at this wait (its
     // continuation was registered into GpuWaitRegistry); false to keep parsing
     // (already satisfied, unreadable, or legacy force-satisfy mode).
@@ -5838,9 +7037,10 @@ public static partial class AgcExports
 
         GpuWaitRegistry.Register(waitAddress, waiter);
         var gpuState = _submittedGpuStates.GetValue(
-            ctx.Memory,
+            CanonicalMemory(ctx.Memory),
             static _ => new SubmittedGpuState());
         EnsureGpuWaitMonitor(ctx, gpuState);
+        TryForceSubmitOrphanPreamble(ctx, gpuState, waitAddress);
         TraceWaitProducerState(
             ctx.Memory,
             waiter,
@@ -5884,6 +7084,86 @@ public static partial class AgcExports
             preferLocal: false);
     }
 
+    // Lets a stall snapshot show whether MonitorGpuWaits' loop is still alive.
+    private static long _gpuWaitMonitorHeartbeatCount;
+    private static long _gpuWaitMonitorHeartbeatTimestamp;
+
+    public static (long Count, double SecondsSinceLastIteration) GpuWaitMonitorHeartbeat()
+    {
+        var count = Volatile.Read(ref _gpuWaitMonitorHeartbeatCount);
+        var lastTicks = Volatile.Read(ref _gpuWaitMonitorHeartbeatTimestamp);
+        var seconds = lastTicks == 0
+            ? -1
+            : (System.Diagnostics.Stopwatch.GetTimestamp() - lastTicks) / (double)System.Diagnostics.Stopwatch.Frequency;
+        return (count, seconds);
+    }
+
+    // Distinguishes a stopped render loop from an orphan-mechanism gap.
+    private static long _dcbSubmitCount;
+    private static long _lastDcbSubmitTimestamp;
+
+    public static (long Count, double SecondsSinceLastSubmit) DcbSubmitHeartbeat()
+    {
+        var count = Volatile.Read(ref _dcbSubmitCount);
+        var lastTicks = Volatile.Read(ref _lastDcbSubmitTimestamp);
+        var seconds = lastTicks == 0
+            ? -1
+            : (System.Diagnostics.Stopwatch.GetTimestamp() - lastTicks) / (double)System.Diagnostics.Stopwatch.Frequency;
+        return (count, seconds);
+    }
+
+    // Stall-diagnostic accessor for DirectExecutionBackend's producer scan.
+    public static List<(ulong Header, ulong Base, ulong Cursor)> SnapshotBuilderArenas()
+    {
+        var result = new List<(ulong, ulong, ulong)>();
+        lock (_orphanPreambleGate)
+        {
+            foreach (var (headerAddress, seen) in _builderArenaLastSeen)
+            {
+                result.Add((headerAddress, seen.Base, seen.Cursor));
+            }
+        }
+
+        return result;
+    }
+
+    // Shows whether a header is silently blacklisted vs. genuinely idle.
+    public static string DumpOrphanPreambleState()
+    {
+        var sb = new System.Text.StringBuilder();
+        var nowTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        var freq = (double)System.Diagnostics.Stopwatch.Frequency;
+        lock (_orphanPreambleGate)
+        {
+            sb.Append(
+                $"pending_targets={_orphanPreamblePendingTargets.Count} " +
+                $"closed_slices={_orphanPreambleClosedSlices.Count} " +
+                $"tracked_targets={_cbReleaseMemTargets.Count} " +
+                $"tracked_headers={_builderArenaLastSeen.Count}");
+
+            var allHeaders = new HashSet<ulong>(_builderArenaLastSeen.Keys);
+            allHeaders.UnionWith(_orphanPreambleSubmitted.Keys);
+            foreach (var header in allHeaders)
+            {
+                var hasSubmitted = _orphanPreambleSubmitted.TryGetValue(header, out var submitted);
+                var hasSeen = _builderArenaLastSeen.TryGetValue(header, out var seen);
+                var blacklisted = hasSubmitted && submitted.Base == 0;
+                var seenAgeText = hasSeen
+                    ? $"{(nowTicks - seen.Timestamp) / freq:F1}s"
+                    : "never";
+                sb.Append(
+                    $"\n  header=0x{header:X} blacklisted={blacklisted} " +
+                    $"submitted_base=0x{(hasSubmitted ? submitted.Base : 0):X} " +
+                    $"submitted_cursor=0x{(hasSubmitted ? submitted.Cursor : 0):X} " +
+                    $"last_seen_base=0x{(hasSeen ? seen.Base : 0):X} " +
+                    $"last_seen_cursor=0x{(hasSeen ? seen.Cursor : 0):X} " +
+                    $"last_seen_age={seenAgeText}");
+            }
+        }
+
+        return sb.ToString();
+    }
+
     private static void MonitorGpuWaits(
         CpuContext ctx,
         SubmittedGpuState gpuState)
@@ -5897,31 +7177,64 @@ public static partial class AgcExports
 
         while (true)
         {
-            int resumed;
-            int remaining;
+            Interlocked.Increment(ref _gpuWaitMonitorHeartbeatCount);
+            Volatile.Write(ref _gpuWaitMonitorHeartbeatTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+            try
+            {
+            var madeProgress = false;
             lock (gpuState.Gate)
             {
-                resumed = DrainResumableDcbs(ctx, gpuState, tracePackets: _traceAgc);
-                remaining = GpuWaitRegistry.CountForMemory(ctx.Memory);
-                if (_traceAgc && resumed != 0)
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER][TRACE] agc.wait_monitor_resumed count={resumed} " +
-                        $"remaining={remaining}");
-                }
-
-                SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot(
-                    ctx.Memory);
-                GpuWaitProfile.RecordMonitorPoll(resumed != 0);
-                GpuWaitProfile.ReportIfDue(remaining);
-                if (remaining == 0)
+                var before = GpuWaitRegistry.CountForMemory(ctx.Memory);
+                // Under orphan force-submit, the monitor must outlive the
+                // waits — the arena sweep below is the only thing that
+                // catches CPU-side usleep polling with no WAIT_REG_MEM.
+                if (before == 0 && !_forceSubmitOrphanPreamblesEnabled)
                 {
                     gpuState.WaitMonitorRunning = false;
                     return;
                 }
+
+                var remaining = before;
+                if (before != 0)
+                {
+                    var resumed = DrainResumableDcbs(ctx, gpuState, tracePackets: _traceAgc);
+                    remaining = GpuWaitRegistry.CountForMemory(ctx.Memory);
+                    madeProgress = resumed != 0;
+                    if (_traceAgc && resumed != 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][TRACE] agc.wait_monitor_resumed count={resumed} " +
+                            $"remaining={remaining}");
+                    }
+
+                    SharpEmu.Libs.Diagnostics.LoadProgressDiagnostics.TraceGpuWaitSnapshot(
+                        ctx.Memory);
+                    GpuWaitProfile.RecordMonitorPoll(resumed != 0);
+                    GpuWaitProfile.ReportIfDue(remaining);
+                    if (remaining == 0 && !_forceSubmitOrphanPreamblesEnabled)
+                    {
+                        gpuState.WaitMonitorRunning = false;
+                        return;
+                    }
+                }
             }
 
-            delayMilliseconds = resumed != 0
+            // Re-offering every live wait also covers producers the game
+            // builds after the wait registered.
+            if (_forceSubmitOrphanPreamblesEnabled)
+            {
+                foreach (var (address, _) in
+                         GpuWaitRegistry.SnapshotInRange(ctx.Memory, 0, ulong.MaxValue))
+                {
+                    TryForceSubmitOrphanPreamble(ctx, gpuState, address);
+                }
+
+                DrainPendingOrphanPreambles(ctx, gpuState);
+                SweepBuilderArenas(ctx, gpuState);
+                SalvageStuckFenceWrites(ctx, gpuState);
+            }
+
+            delayMilliseconds = madeProgress
                 ? 1
                 : Math.Min(delayMilliseconds * 2, 16);
             lock (gpuState.WaitMonitorSignalGate)
@@ -5932,6 +7245,16 @@ public static partial class AgcExports
                 }
 
                 observedSignal = gpuState.WaitMonitorSignalVersion;
+            }
+            }
+            catch (Exception ex)
+            {
+                // No other supervisor: an unlogged exception here would
+                // silently end AGC activity forever. Log and keep looping.
+                Console.Error.WriteLine(
+                    $"[LOADER][ERROR] agc.wait_monitor_iteration_exception " +
+                    $"{ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+                Thread.Sleep(16);
             }
         }
     }
@@ -6097,6 +7420,9 @@ public static partial class AgcExports
         bool tracePackets)
     {
         var state = waiter.State as SubmittedDcbState ?? gpuState.Graphics;
+        // Any resume ends a ring-tail park; SuspendOnUnwrittenRingWord re-arms
+        // it if the continued parse parks again.
+        state.RingTailParkAddress = 0;
         var remainingDwords = waiter.TotalDwords - waiter.ResumeOffset;
         var waitedMilliseconds = waiter.RegisteredTicks == 0
             ? 0.0
@@ -6195,6 +7521,7 @@ public static partial class AgcExports
         }
 
         var (destination, dataSelection) = DecodeStandardReleaseMemControl(control);
+        var interruptSelection = (control >> 24) & 0x7u;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
         var data = ((ulong)dataHi << 32) | dataLo;
         var writeLength = dataSelection switch
@@ -6246,12 +7573,23 @@ public static partial class AgcExports
                         "release_mem_standard", destinationAddress, data, dataSelection);
                 }
 
+                // Only deliver a kevent when int_sel requests one — the
+                // driver's completion refcount signals on an exact zero
+                // crossing, and an unrequested kevent drives it negative and
+                // permanently loses the frame-graph kick.
+                var wokenQueues = interruptSelection != 0
+                    ? KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
+                        KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                        data)
+                    : 0;
+
                 if (tracePacket)
                 {
                     TraceAgc(
                         $"agc.dcb.release_mem_standard dst_sel={destination} " +
                         $"dst=0x{destinationAddress:X16} data_sel={dataSelection} " +
-                        $"data=0x{data:X16} wrote={wroteData}");
+                        $"data=0x{data:X16} wrote={wroteData} " +
+                        $"int={interruptSelection} woken={wokenQueues}");
                 }
             },
             $"release_mem_standard dst=0x{destinationAddress:X16} data=0x{data:X16}",
@@ -6310,6 +7648,7 @@ public static partial class AgcExports
         }
 
         var dataSelection = (control >> 16) & 0xFFu;
+        var interrupt = (control >> 24) & 0xFFu;
         var destinationAddress = ((ulong)destinationHi << 32) | destinationLo;
         var data = ((ulong)dataHi << 32) | dataLo;
         var writeLength = dataSelection switch
@@ -6357,11 +7696,19 @@ public static partial class AgcExports
                     ReportLabelWriteFailure("release_mem", destinationAddress, data, dataSelection);
                 }
 
+                // Same interrupt gating as the standard form above.
+                var wokenQueues = interrupt != 0
+                    ? KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
+                        KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                        data)
+                    : 0;
+
                 if (tracePacket)
                 {
                     TraceAgc(
                         $"agc.dcb.release_mem dst=0x{destinationAddress:X16} " +
-                        $"data_sel={dataSelection} data=0x{data:X16} wrote={wroteData}");
+                        $"data_sel={dataSelection} data=0x{data:X16} wrote={wroteData} " +
+                        $"int={interrupt} woken={wokenQueues}");
                 }
             },
             $"release_mem dst=0x{destinationAddress:X16} data=0x{data:X16}",
@@ -11095,13 +12442,22 @@ public static partial class AgcExports
         var localSizeZ = GetComputeLocalSize(state.ShRegisters, ComputeNumThreadZ);
         if (_traceComputeShaderAddress == shaderAddress)
         {
+            var globalHeads = evaluation.GlobalMemoryBindings.Count == 0
+                ? string.Empty
+                : $" global_heads=[{string.Join(',', evaluation.GlobalMemoryBindings.Select(
+                    binding =>
+                        $"0x{binding.BaseAddress:X16}:{binding.DataLength}:" +
+                        Convert.ToHexString(binding.Data.AsSpan(
+                            0,
+                            Math.Min(binding.DataLength, 512)))))}]";
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] agc.compute_dispatch_trace seq={sequence} " +
                 $"cs=0x{shaderAddress:X16} " +
                 $"groups={dispatch.GroupCountX}x{dispatch.GroupCountY}x{dispatch.GroupCountZ} " +
                 $"base={dispatch.BaseGroupX}x{dispatch.BaseGroupY}x{dispatch.BaseGroupZ} " +
-                $"local={localSizeX}x{localSizeY}x{localSizeZ} " +
-                $"bindings=[{string.Join(',', descriptions)}]");
+                $"local={localSizeX}x{localSizeY}x{localSizeZ}" +
+                globalHeads +
+                $" bindings=[{string.Join(',', descriptions)}]");
         }
 
         var writesGlobalMemory = evaluation.GlobalMemoryBindings.Any(static binding =>
@@ -11169,6 +12525,33 @@ public static partial class AgcExports
             {
                 computeError =
                     $"semantic-global-write-sync-timeout sequence={semanticCopySequence}";
+            }
+        }
+        else if (!hasStorageBinding &&
+            writesGlobalMemory &&
+            TrySubmitConstantFillKernel(
+                ctx,
+                shaderState.Program,
+                evaluation,
+                dispatch,
+                localSizeX,
+                localSizeY,
+                localSizeZ,
+                out var semanticFillSequence,
+                out var fillDescription))
+        {
+            gpuDispatch = true;
+            evaluationHandledByCpu = true;
+            TraceAgcShader(
+                $"agc.compute_semantic_fast_path cs=0x{shaderAddress:X16} " +
+                $"queue={state.QueueName} submission={state.ActiveSubmissionId} " +
+                fillDescription);
+            // Same CPU-visibility ordering requirement as the masked-copy
+            // replacement above.
+            if (!VulkanVideoPresenter.WaitForGuestWork(semanticFillSequence))
+            {
+                computeError =
+                    $"semantic-global-write-sync-timeout sequence={semanticFillSequence}";
             }
         }
         else if ((hasStorageBinding || writesGlobalMemory) &&
@@ -11537,6 +12920,220 @@ public static partial class AgcExports
             IsBufferControl(load, vectorAddress: 1, vectorData: 1, scalarResource: 0) &&
             IsBufferControl(store, vectorAddress: 0, vectorData: 1, scalarResource: 4);
     }
+
+    /// <summary>
+    /// Semantic CPU replacement for Yotei's constant-fill kernel (v4 =
+    /// wgid*64 + tid; BufferStoreFormatXyzw writes s4..s7 at record v4). The
+    /// translated Vulkan form measured ~2.2s per dispatch against
+    /// microseconds for the CPU fill. Same discipline as the masked-dword-copy
+    /// replacement above: full instruction shape and descriptor must match.
+    /// </summary>
+    private static bool TrySubmitConstantFillKernel(
+        CpuContext ctx,
+        Gen5ShaderProgram program,
+        Gen5ShaderEvaluation evaluation,
+        ComputeDispatch dispatch,
+        uint localSizeX,
+        uint localSizeY,
+        uint localSizeZ,
+        out long workSequence,
+        out string description)
+    {
+        workSequence = 0;
+        description = string.Empty;
+        var instructions = program.Instructions;
+        string[] expectedOpcodes =
+        [
+            "VLshlAddU32",
+            "VMovB32",
+            "VMovB32",
+            "VMovB32",
+            "VMovB32",
+            "BufferStoreFormatXyzw",
+            "SEndpgm",
+        ];
+        if (instructions.Count != expectedOpcodes.Length ||
+            !instructions.Select(static instruction => instruction.Opcode)
+                .SequenceEqual(expectedOpcodes) ||
+            !IsExactConstantFillInstructionShape(instructions) ||
+            dispatch.BaseGroupX != 0 ||
+            dispatch.BaseGroupY != 0 ||
+            dispatch.BaseGroupZ != 0 ||
+            dispatch.GroupCountY != 1 ||
+            dispatch.GroupCountZ != 1 ||
+            localSizeX != 64 ||
+            localSizeY != 1 ||
+            localSizeZ != 1 ||
+            evaluation.ComputeSystemRegisters?.WorkGroupXRegister != 8)
+        {
+            return false;
+        }
+
+        var destination = evaluation.GlobalMemoryBindings.SingleOrDefault(
+            static binding => binding.ScalarAddress == 0 &&
+                              binding.Writable &&
+                              binding.WriteBackToGuest);
+        var scalars = evaluation.InitialScalarRegisters;
+        if (destination is null ||
+            destination.BaseAddress == 0 ||
+            destination.DataLength < FillRecordBytes ||
+            scalars.Count < 8 ||
+            !IsExactConstantFillDescriptor(scalars, destination.BaseAddress))
+        {
+            return false;
+        }
+
+        var numRecords = scalars[2];
+        var dispatchedThreads = dispatch.ThreadCountX != uint.MaxValue
+            ? dispatch.ThreadCountX
+            : Math.Min(
+                (ulong)uint.MaxValue,
+                (ulong)dispatch.GroupCountX * localSizeX);
+        var writableRecords = (uint)(destination.DataLength / FillRecordBytes);
+        var outputRecords = (uint)Math.Min(
+            Math.Min((ulong)numRecords, dispatchedThreads),
+            writableRecords);
+        if (outputRecords == 0)
+        {
+            return false;
+        }
+
+        var pattern = new byte[FillRecordBytes];
+        BinaryPrimitives.WriteUInt32LittleEndian(pattern.AsSpan(0), scalars[4]);
+        BinaryPrimitives.WriteUInt32LittleEndian(pattern.AsSpan(4), scalars[5]);
+        BinaryPrimitives.WriteUInt32LittleEndian(pattern.AsSpan(8), scalars[6]);
+        BinaryPrimitives.WriteUInt32LittleEndian(pattern.AsSpan(12), scalars[7]);
+        var output = new byte[checked((int)outputRecords * FillRecordBytes)];
+        var outputWindow = output.AsSpan();
+        for (var offset = 0; offset < outputWindow.Length; offset += FillRecordBytes)
+        {
+            pattern.CopyTo(outputWindow[offset..]);
+        }
+
+        var destinationAddress = destination.BaseAddress;
+        workSequence = VulkanVideoPresenter.SubmitOrderedGuestAction(
+            () =>
+            {
+                if (!ctx.Memory.TryWrite(destinationAddress, output))
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][ERROR] AGC constant-fill fast path failed " +
+                        $"dst=0x{destinationAddress:X16} bytes={output.Length}");
+                    return;
+                }
+
+                GuestImageWriteTracker.Track(
+                    destinationAddress,
+                    (ulong)output.Length,
+                    VulkanVideoPresenter.CurrentGuestWorkSequenceForDiagnostics,
+                    "agc.constant-fill");
+            },
+            $"constant_fill dst=0x{destinationAddress:X16} bytes={output.Length}");
+        description =
+            $"dst=0x{destinationAddress:X16} bytes={output.Length} " +
+            $"records={outputRecords} pattern=0x{scalars[7]:X8}{scalars[6]:X8}{scalars[5]:X8}{scalars[4]:X8} " +
+            $"dispatch={dispatch.GroupCountX}x{localSizeX}";
+        return workSequence > 0;
+    }
+
+    private const int FillRecordBytes = 4 * sizeof(uint);
+
+    private static bool IsExactConstantFillInstructionShape(
+        IReadOnlyList<Gen5ShaderInstruction> instructions)
+    {
+        static bool IsOperand(
+            Gen5Operand operand,
+            Gen5OperandKind kind,
+            uint value) =>
+            operand.Kind == kind && operand.Value == value;
+
+        var globalId = instructions[0];
+        var store = instructions[5];
+        if (globalId.Destinations.Count != 1 ||
+            !IsOperand(globalId.Destinations[0], Gen5OperandKind.VectorRegister, 4) ||
+            globalId.Sources.Count != 3 ||
+            !IsOperand(globalId.Sources[0], Gen5OperandKind.ScalarRegister, 8) ||
+            !IsOperand(globalId.Sources[1], Gen5OperandKind.EncodedConstant, 134) ||
+            !IsOperand(globalId.Sources[2], Gen5OperandKind.VectorRegister, 0))
+        {
+            return false;
+        }
+
+        for (var index = 0; index < 4; index++)
+        {
+            var move = instructions[1 + index];
+            if (move.Destinations.Count != 1 ||
+                !IsOperand(
+                    move.Destinations[0],
+                    Gen5OperandKind.VectorRegister,
+                    (uint)index) ||
+                move.Sources.Count != 1 ||
+                !IsOperand(
+                    move.Sources[0],
+                    Gen5OperandKind.ScalarRegister,
+                    (uint)(4 + index)))
+            {
+                return false;
+            }
+        }
+
+        return store.Control is Gen5BufferMemoryControl
+        {
+            DwordCount: 4,
+            OffsetBytes: 0,
+            IndexEnabled: true,
+            OffsetEnabled: false,
+            Glc: false,
+            Slc: false,
+        } control &&
+            control.VectorAddress == 4 &&
+            control.VectorData == 0 &&
+            control.ScalarResource == 0;
+    }
+
+    private static bool IsExactConstantFillDescriptor(
+        IReadOnlyList<uint> scalarRegisters,
+        ulong expectedBaseAddress)
+    {
+        var word0 = scalarRegisters[0];
+        var word1 = scalarRegisters[1];
+        var word3 = scalarRegisters[3];
+        var baseAddress = word0 | ((ulong)(word1 & 0xFFFFu) << 32);
+        var stride = (word1 >> 16) & 0x3FFFu;
+        var cacheSwizzle = (word1 & (1u << 30)) != 0;
+        var swizzleEnabled = (word1 & (1u << 31)) != 0;
+        var unifiedFormat = (word3 >> 12) & 0x7Fu;
+        var addTidEnabled = (word3 & (1u << 23)) != 0;
+        var outOfBoundsSelect = (word3 >> 28) & 0x3u;
+        var type = word3 >> 30;
+        var dstSelectX = word3 & 0x7u;
+
+        var matches = baseAddress == expectedBaseAddress &&
+            stride == FillRecordBytes &&
+            !cacheSwizzle &&
+            !swizzleEnabled &&
+            unifiedFormat == BufFmt32323232Uint &&
+            !addTidEnabled &&
+            outOfBoundsSelect == 0 &&
+            type == 0 &&
+            dstSelectX == 4;
+        if (!matches && baseAddress == expectedBaseAddress && _traceAgcShader)
+        {
+            // Shape matched but the descriptor didn't: dump the raw V# so the
+            // constants above can be corrected from evidence, not guessed.
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] agc.constant_fill_descriptor_mismatch " +
+                $"word1=0x{word1:X8} word3=0x{word3:X8} stride={stride} " +
+                $"format={unifiedFormat} oob={outOfBoundsSelect} type={type} " +
+                $"dst_sel_x={dstSelectX}");
+        }
+
+        return matches;
+    }
+
+    // RDNA2 table 37: BUF_FMT_32_32_32_32_FLOAT. Bit-preserving, so the raw
+    // dword copy has identical semantics to the UINT variant.
+    private const uint BufFmt32323232Uint = 75;
 
     private static bool IsExactMaskedDwordCopyDescriptor(
         IReadOnlyList<uint> scalarRegisters,
@@ -13012,6 +14609,25 @@ public static partial class AgcExports
         var remainingDwords = GetRemainingCommandDwords(cursorUp, cursorDown, reservedDwords);
         if (sizeDwords > remainingDwords)
         {
+            // The one place that knows an arena's true final cursor before a
+            // switch happens, regardless of which builder export wrote its
+            // last bytes — fires only on genuine exhaustion, not per packet.
+            if (_forceSubmitOrphanPreamblesEnabled &&
+                TryReadUInt64(ctx, commandBufferAddress, out var exhaustedBase) &&
+                exhaustedBase != 0)
+            {
+                lock (_orphanPreambleGate)
+                {
+                    if ((!_builderArenaLastSeen.TryGetValue(commandBufferAddress, out var seen) ||
+                        seen.Base != exhaustedBase ||
+                        cursorUp > seen.Cursor))
+                    {
+                        _builderArenaLastSeen[commandBufferAddress] =
+                            (exhaustedBase, cursorUp, GuestThreadExecution.CurrentGuestThreadHandle, System.Diagnostics.Stopwatch.GetTimestamp());
+                    }
+                }
+            }
+
             TraceAgc($"agc.cmd_alloc_full buf=0x{commandBufferAddress:X16} need={sizeDwords} remaining={remainingDwords} callback=0x{callback:X16}");
             var scheduler = GuestThreadExecution.Scheduler;
             ulong callbackResult = 0;
@@ -13649,12 +15265,21 @@ public static partial class AgcExports
         public string ToStringAndClear() => _enabled ? _inner.ToStringAndClear() : string.Empty;
     }
 
+    // Monotonic seconds since process start, prefixed on every AGC trace
+    // line — the frame pipeline's dependency chains span tens of seconds.
+    private static readonly long _traceStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+
+    private static string TraceSeconds() =>
+        ((System.Diagnostics.Stopwatch.GetTimestamp() - _traceStartTicks) /
+         (double)System.Diagnostics.Stopwatch.Frequency).ToString(
+            "F3", System.Globalization.CultureInfo.InvariantCulture);
+
     private static void TraceAgc(
         [System.Runtime.CompilerServices.InterpolatedStringHandlerArgument] ref AgcTraceHandler message)
     {
         if (_traceAgc)
         {
-            Console.Error.WriteLine($"[LOADER][TRACE] {message.ToStringAndClear()}");
+            Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message.ToStringAndClear()}");
         }
     }
 
@@ -13665,7 +15290,7 @@ public static partial class AgcExports
             return;
         }
 
-        Console.Error.WriteLine($"[LOADER][TRACE] {message}");
+        Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message}");
     }
 
     private static void TraceAgcShader(
@@ -13673,7 +15298,7 @@ public static partial class AgcExports
     {
         if (_traceAgcShader)
         {
-            Console.Error.WriteLine($"[LOADER][TRACE] {message.ToStringAndClear()}");
+            Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message.ToStringAndClear()}");
         }
     }
 
@@ -13684,7 +15309,7 @@ public static partial class AgcExports
             return;
         }
 
-        Console.Error.WriteLine($"[LOADER][TRACE] {message}");
+        Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message}");
     }
 
     private static string FormatShaderDwords(IReadOnlyList<uint> values) =>
@@ -13946,6 +15571,37 @@ public static partial class AgcExports
         return (int)ctx[CpuRegister.Rax];
     }
 
+    // COND_EXEC gates the following execCount dwords on a 32-bit predicate in
+    // memory. Our submitted-packet walker skips unknown PM4 ops, so the recorded
+    // packet degrades to "predicate always true" — the gated commands always run.
+    [SysAbiExport(
+        Nid = "BIPexNBSGog",
+        ExportName = "sceAgcDcbCondExec",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbCondExec(CpuContext ctx)
+    {
+        var dcb = ctx[CpuRegister.Rdi];
+        var predicateAddress = ctx[CpuRegister.Rsi];
+        var execCountDwords = (uint)ctx[CpuRegister.Rdx];
+        if (dcb == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (!TryAllocateCommandDwords(ctx, dcb, 5, out var cmd) ||
+            !ctx.TryWriteUInt32(cmd, Pm4(5, ItCondExec, RZero)) ||
+            !ctx.TryWriteUInt32(cmd + 4, (uint)(predicateAddress & 0xFFFF_FFFFUL)) ||
+            !ctx.TryWriteUInt32(cmd + 8, (uint)(predicateAddress >> 32)) ||
+            !ctx.TryWriteUInt32(cmd + 12, 0) ||
+            !ctx.TryWriteUInt32(cmd + 16, execCountDwords & 0x3FFF))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        return ReturnPointer(ctx, cmd);
+    }
+
     // How a title continues a frame whose command arena filled: it branches from
     // the tail of the exhausted buffer into a fresh one and submits only the first
     // buffer, leaving the driver to follow the link. Dropping this packet strands
@@ -14121,6 +15777,9 @@ public static partial class AgcExports
         LibraryName = "libSceAgcDriver")]
     public static int DriverSubmitMultiDcbs(CpuContext ctx)
     {
+        Interlocked.Increment(ref _dcbSubmitCount);
+        Volatile.Write(ref _lastDcbSubmitTimestamp, System.Diagnostics.Stopwatch.GetTimestamp());
+
         var addressArray = ctx[CpuRegister.Rdi];
         var sizeArray = ctx[CpuRegister.Rsi];
         var bufferCount = (uint)ctx[CpuRegister.Rdx];
@@ -14132,7 +15791,7 @@ public static partial class AgcExports
         var tracePackets = string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"), "1", StringComparison.Ordinal);
 
-        var gpuState = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.Gate)
         {
             Gen5ShaderScalarEvaluator.BeginGlobalMemoryReadScope();
@@ -14223,7 +15882,7 @@ public static partial class AgcExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var state = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (state.Gate)
         {
             state.ResourceRegistrationInitialized = true;
@@ -14251,7 +15910,7 @@ public static partial class AgcExports
     public static int DriverRegisterDefaultOwner(CpuContext ctx)
     {
         var owner = (uint)ctx[CpuRegister.Rdi];
-        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var state = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (state.Gate)
         {
             state.DefaultOwner = owner;
@@ -14280,7 +15939,7 @@ public static partial class AgcExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var state = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         uint owner;
         lock (state.Gate)
         {
@@ -14392,7 +16051,7 @@ public static partial class AgcExports
     public static int DriverUnregisterResource(CpuContext ctx)
     {
         var resourceHandle = (uint)ctx[CpuRegister.Rdi];
-        var state = _submittedGpuStates.GetValue(ctx.Memory, static _ => new SubmittedGpuState());
+        var state = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (state.Gate)
         {
             if (!state.RegisteredResources.Remove(resourceHandle))
