@@ -60,6 +60,22 @@ public sealed class ImportTrampolineAbiTests
         }
     }
 
+    [Fact]
+    public unsafe void ExceptionHandlerTrampoline_UsesR9ForBothManagedEntryLocks()
+    {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        var code = CreateExceptionHandlerTrampolineBytes();
+        var expected = new byte[] { 0xF0, 0x4D, 0x0F, 0xB1, 0x11 };
+        var incorrect = new byte[] { 0xF0, 0x4C, 0x0F, 0xB1, 0x11 };
+
+        Assert.Equal(2, CountOccurrences(code, expected));
+        Assert.Equal(0, CountOccurrences(code, incorrect));
+    }
+
     private static unsafe byte[] CreateTrampolineBytes()
     {
         var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(
@@ -85,6 +101,41 @@ public sealed class ImportTrampolineAbiTests
         {
             Assert.True(HostMemory.Free((void*)trampoline, 0, HostMemory.MEM_RELEASE));
         }
+    }
+
+    private static unsafe byte[] CreateExceptionHandlerTrampolineBytes()
+    {
+        var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(
+            typeof(DirectExecutionBackend));
+        var createTrampoline = typeof(DirectExecutionBackend).GetMethod(
+            "CreateExceptionHandlerTrampoline",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(createTrampoline);
+        var trampoline = (nint)createTrampoline.Invoke(backend, [nint.Zero])!;
+        Assert.NotEqual(0, trampoline);
+
+        try
+        {
+            return new ReadOnlySpan<byte>((void*)trampoline, 2048).ToArray();
+        }
+        finally
+        {
+            Assert.True(HostMemory.Free((void*)trampoline, 0, HostMemory.MEM_RELEASE));
+        }
+    }
+
+    private static int CountOccurrences(ReadOnlySpan<byte> code, ReadOnlySpan<byte> pattern)
+    {
+        var count = 0;
+        for (var offset = 0; offset <= code.Length - pattern.Length; offset++)
+        {
+            if (code.Slice(offset, pattern.Length).SequenceEqual(pattern))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private static void AssertContains(ReadOnlySpan<byte> code, ReadOnlySpan<byte> expected)
