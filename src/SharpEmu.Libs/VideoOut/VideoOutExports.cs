@@ -729,6 +729,14 @@ public static class VideoOutExports
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x10, 0);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x18, 0);
         KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x20, currentBuffer);
+        // Ghost of Yotei polls a flag past the classic 0x28-byte struct and
+        // spins on sceKernelUsleep(1) while it's nonzero; the caller never
+        // pre-zeroes that stack buffer, so an untouched field reads back as
+        // garbage. Flips complete synchronously in this emulator (see
+        // SubmitFlip/sceVideoOutIsFlipPending, always not-pending), so the
+        // extended region must read zero here too.
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x28, 0);
+        KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, statusAddress + 0x30, 0);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1114,7 +1122,14 @@ public static class VideoOutExports
 
         if (category > 1 || option != 0)
         {
-            return OrbisVideoOutErrorInvalidValue;
+            // Ghost of Yotei registers its display buffers with a nonzero
+            // category/option pair; rejecting the registration guarantees the
+            // title can never flip. Treat unknown categories as the standard
+            // uncompressed layout instead of failing the whole registration.
+            TraceVideoOut(
+                $"register_buffers2 nonstandard category=0x{categoryRaw:X} " +
+                $"option=0x{option:X} handle={handle} set={setIndex} " +
+                $"start={bufferIndexStart} count={bufferNum}");
         }
 
         if (!TryReadBufferAttribute(ctx, attributeAddress, true, out var attribute))
