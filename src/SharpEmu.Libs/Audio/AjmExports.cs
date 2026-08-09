@@ -21,7 +21,18 @@ public static class AjmExports
     private const int OrbisAjmErrorJobCreation = unchecked((int)0x80930012);
     private const ulong MaxSilentPcmBytes = 1 << 20;
     private const uint Atrac9CodecType = 1;
-    private const uint MaxCodecType = 25;
+    // instanceId packs codecType into the high bits and the instance slot
+    // into the low InstanceIdSlotBits bits (see AjmInstanceCreate's
+    // `(codecType << InstanceIdSlotBits) | instanceSlot` and the
+    // `& InstanceIdSlotMask` unpacks in AjmInstanceDestroy/GetError).
+    private const int InstanceIdSlotBits = 14;
+    private const uint InstanceIdSlotMask = (1u << InstanceIdSlotBits) - 1;
+    // Registration is pure bookkeeping (a HashSet.Add), so the only real
+    // constraint is that codecType must not overflow the 32-bit instanceId
+    // once shifted left by InstanceIdSlotBits -- not any hardcoded list of
+    // known Sony codec ids, which a retail title's Gen5 codec type (e.g. 24)
+    // can legitimately fall outside of.
+    private const uint MaxCodecType = 1u << (32 - InstanceIdSlotBits);
     private const int MaxInstanceIndex = 0x2FFF;
     private const int MaxDecodeBufferBytes = 64 * 1024 * 1024;
 
@@ -119,9 +130,12 @@ public static class AjmExports
         LibraryName = "libSceAjm")]
     public static int AjmFinalize(CpuContext ctx)
     {
-        Contexts.TryRemove(unchecked((uint)ctx[CpuRegister.Rdi]), out _);
-        ctx[CpuRegister.Rax] = 0;
-        return 0;
+        if (!Contexts.TryRemove(unchecked((uint)ctx[CpuRegister.Rdi]), out _))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -273,7 +287,7 @@ public static class AjmExports
             }
             while (state.InstancesBySlot.ContainsKey(instanceSlot));
 
-            instanceId = (codecType << 14) | instanceSlot;
+            instanceId = (codecType << InstanceIdSlotBits) | instanceSlot;
             Span<byte> value = stackalloc byte[sizeof(uint)];
             BinaryPrimitives.WriteUInt32LittleEndian(value, instanceId);
             if (!ctx.Memory.TryWrite(outputAddress, value))
@@ -314,7 +328,7 @@ public static class AjmExports
             return ctx.SetReturn(OrbisAjmErrorInvalidContext);
         }
 
-        var instanceSlot = instanceId & 0x3FFF;
+        var instanceSlot = instanceId & InstanceIdSlotMask;
         lock (state.Gate)
         {
             if (instanceSlot == 0 || !state.InstancesBySlot.Remove(instanceSlot))
@@ -334,8 +348,21 @@ public static class AjmExports
         LibraryName = "libSceAjm")]
     public static int AjmModuleUnregister(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
-        return 0;
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var codecType = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (!Contexts.TryGetValue(contextId, out var state))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        bool removed;
+        lock (state.Gate)
+        {
+            removed = state.RegisteredCodecs.Remove(codecType);
+        }
+
+        Trace($"module_unregister context={contextId} codec={codecType} was_registered={removed}");
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -667,8 +694,8 @@ public static class AjmExports
     private static bool TryGetInstance(uint instanceId, out AjmInstanceState instance)
     {
         instance = null!;
-        var codec = instanceId >> 14;
-        var slot = instanceId & 0x3FFF;
+        var codec = instanceId >> InstanceIdSlotBits;
+        var slot = instanceId & InstanceIdSlotMask;
         if (slot == 0)
         {
             return false;

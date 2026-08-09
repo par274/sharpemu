@@ -84,6 +84,30 @@ public sealed class AjmExportsTests : IDisposable
     }
 
     [Fact]
+    public void ModuleUnregister_RemovesRegisteredCodecAndRejectsUnknownContext()
+    {
+        var contextId = Initialize();
+
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+        Assert.Equal(0, UnregisterCodec(contextId, 1));
+        // The codec is actually gone, not just a no-op stub: it's unusable
+        // for a new instance, and re-registering no longer hits
+        // CodecAlreadyRegistered.
+        Assert.Equal(CodecNotRegistered, CreateInstance(contextId, 1, 0x401, InstanceAddress));
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+
+        Assert.Equal(InvalidContext, UnregisterCodec(contextId + 1, 1));
+    }
+
+    [Fact]
+    public void ModuleUnregister_UnknownCodecIsToleratedAsANoOp()
+    {
+        var contextId = Initialize();
+
+        Assert.Equal(0, UnregisterCodec(contextId, 1));
+    }
+
+    [Fact]
     public void MemoryRegistration_TracksValidContextAndToleratesRepeatedUnregister()
     {
         var contextId = Initialize();
@@ -351,6 +375,13 @@ public sealed class AjmExportsTests : IDisposable
         _ctx[CpuRegister.Rsi] = codecType;
         _ctx[CpuRegister.Rdx] = 0;
         return AjmExports.AjmModuleRegister(_ctx);
+    }
+
+    private int UnregisterCodec(uint contextId, uint codecType)
+    {
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = codecType;
+        return AjmExports.AjmModuleUnregister(_ctx);
     }
 
     private int RegisterMemory(uint contextId, ulong address, ulong pages)
