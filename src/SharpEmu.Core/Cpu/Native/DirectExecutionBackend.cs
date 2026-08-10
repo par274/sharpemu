@@ -2310,7 +2310,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe void CreateTlsHandler()
 	{
-		_tlsHandlerAddress = (nint)TryAllocateNearEntry(TlsHandlerRegionSize);
+		// Anchor the handler allocation just BELOW the guest image window, not
+		// at _entryPoint: during module init _entryPoint is a host address, so
+		// the handler used to land in host memory, out of E8 rel32 (±2 GiB)
+		// reach of the guest code being patched (#789). A handler 16 MiB below
+		// the window base (0x800000000) covers the entire window
+		// [0x800000000, 0x900000000) via rel32.
+		_tlsHandlerAddress = (nint)TryAllocateNear(GuestImageBase - 0x1000000uL, TlsHandlerRegionSize);
 		if (_tlsHandlerAddress == 0)
 		{
 			_tlsHandlerAddress = (nint)VirtualAlloc(null, TlsHandlerRegionSize, 12288u, 64u);
@@ -3092,10 +3098,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return (nint)ptr;
 	}
 
-	private unsafe void* TryAllocateNearEntry(nuint size)
+	private unsafe void* TryAllocateNear(ulong anchor, nuint size)
 	{
-		ulong entryPoint = _entryPoint;
-		ulong baseAddress = entryPoint & 0xFFFFFFFFFFFF0000uL;
+		ulong baseAddress = anchor & 0xFFFFFFFFFFFF0000uL;
 		for (long num = 0L; num <= 1879048192; num += 16777216)
 		{
 			if (TryAllocAt(baseAddress, num, size, out var memory))
@@ -3142,11 +3147,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe void PatchTlsPatterns()
 	{
-        // Large Gen5 executables can keep valid code well past the first 32 MiB.
-        // Astro Bot, for example, has an FS:[0] TLS load near +0x70A0000.
-        const ulong MaxScanBytes = 134217728uL;
-		ulong num = _entryPoint;
-		ulong num2 = num + MaxScanBytes;
+		// Scan the guest image window, not [_entryPoint, _entryPoint + 128 MiB):
+		// during module init _entryPoint is a host address, so the old anchor
+		// scanned the emulator's own runtime and never reached the guest image
+		// (every log shows "Patched 0 TLS loads", #789). The guest window covers
+		// all loaded modules; the VirtualQuery walk below only byte-scans
+		// committed executable regions, so cost tracks the amount of code, not
+		// the window size. Astro Bot, for example, has an FS:[0] TLS load near
+		// +0x70A0000, well inside the window.
+		ulong num = GuestImageBase;
+		ulong num2 = GuestImageLimit;
 		int num3 = 0;
 		int num4 = 0;
 		int num9 = 0;
@@ -3382,7 +3392,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		try
 		{
-			*(sbyte*)address = -24;
+			// Resolve and validate the rel32 displacement BEFORE writing the E8
+			// opcode: the old order clobbered the first byte of the guest
+			// instruction on the out-of-range path, leaving a half-corrupted
+			// instruction in the guest image (#789).
 			long num = _tlsHandlerAddress;
 			long num2 = address + 5;
 			long num3 = num - num2;
@@ -3392,6 +3405,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return false;
 			}
 
+			*(sbyte*)address = -24;
 			*(int*)(address + 1) = (int)num3;
 			var offset = 5;
 			if (destinationRegister != 0)
@@ -3441,13 +3455,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		byte* ptr = (byte*)num;
 		int num2 = 0;
 		ptr[num2++] = 80;
-		ptr[num2++] = 232;
-		long num3 = _tlsHandlerAddress - (num + num2 + 4);
+		// Resolve the rel32 before emitting the E8 so an out-of-range helper
+		// leaves the stub region clean instead of half-written (#789).
+		long num3 = _tlsHandlerAddress - (num + num2 + 5);
 		if (num3 < int.MinValue || num3 > int.MaxValue)
 		{
 			Console.Error.WriteLine($"[LOADER][WARNING] TLS store helper out of rel32 range at 0x{num:X16}");
 			return 0;
 		}
+		ptr[num2++] = 232;
 		*(int*)(ptr + num2) = (int)num3;
 		num2 += 4;
 		ptr[num2++] = 199;
