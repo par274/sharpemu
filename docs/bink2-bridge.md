@@ -47,24 +47,28 @@ built against `ffmpeg-core` specifically.
 
 ## Supplying the FFmpeg libraries
 
-`dotnet publish` fetches a prebuilt release of `github.com/sharpemu/ffmpeg-core`
-(the tag is pinned in `SharpEmu.CLI.csproj`'s `FfmpegRuntimeTag`, matched to
-the `FFmpeg.AutoGen` package version in `Directory.Packages.props` -- both
-need to agree on the same FFmpeg ABI) and copies its dynamically linked
-libraries into a `plugins` folder next to the published executable. No C
-toolchain is required to build SharpEmu; publishing just downloads a zip.
-`plugins` is a loose, unpacked folder rather than something embedded in the
-single-file bundle, so the OS loader can resolve the libraries' own
-inter-dependencies (`avcodec` depends on `avutil`, etc.) itself.
+Both `dotnet build` and `dotnet publish` fetch a prebuilt release of
+`github.com/sharpemu/ffmpeg-core` (the tag is pinned in
+`SharpEmu.CLI.csproj`'s `FfmpegRuntimeTag`, matched to the `FFmpeg.AutoGen`
+package version in `Directory.Packages.props` -- both need to agree on the
+same FFmpeg ABI) and copy its dynamically linked libraries into a `plugins`
+folder next to the resulting executable (`artifacts/bin/...` for build,
+`artifacts/publish/...` for publish). No C toolchain is required to build
+SharpEmu; both just download a zip once (cached under
+`$(BaseIntermediateOutputPath)ffmpeg-runtime/`, so later builds/publishes
+reuse it instead of re-fetching). `plugins` is a loose, unpacked folder
+rather than something embedded in the single-file bundle, so the OS loader
+can resolve the libraries' own inter-dependencies (`avcodec` depends on
+`avutil`, etc.) itself.
 
-A plain `dotnet publish` with no `-r` still works: it defaults to the host
-machine's own RID (see `Directory.Build.props`), so it fetches the matching
-`ffmpeg-core` archive and populates `plugins` without any extra flags.
-Passing an explicit `-r <rid>` (e.g. to cross-publish `linux-x64` from
+A plain `dotnet build`/`dotnet publish` with no `-r` still works: it defaults
+to the host machine's own RID (see `Directory.Build.props`), so it fetches
+the matching `ffmpeg-core` archive and populates `plugins` without any extra
+flags. Passing an explicit `-r <rid>` (e.g. to cross-publish `linux-x64` from
 Windows) still overrides that default normally.
 
-To use a different set of FFmpeg libraries, drop them into the published
-`plugins` folder yourself (matching FFmpeg's own file-naming and versioning
+To use a different set of FFmpeg libraries, drop them into the build or
+published `plugins` folder yourself (matching FFmpeg's own file-naming and versioning
 conventions, e.g. `avformat-61.dll` / `libavformat.so.61` / matching
 `.dylib`) -- `FfmpegNativeBinkFrameSource` points `ffmpeg.RootPath` at that
 folder and does not otherwise care where the files came from.

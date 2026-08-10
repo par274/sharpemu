@@ -60,9 +60,7 @@ internal static class GpuWaitRegistry
     // address) so distinct guest processes never alias.
     private static readonly Dictionary<(object, ulong), ulong> _lastProduced = new();
 
-    // Unwraps to the shared root: per-thread TrackedCpuMemory decorators
-    // over ONE virtual memory are not reference-equal, so a raw-reference
-    // filter would make waits invisible across threads.
+  
     private static object? Canonicalize(object? memory)
     {
         while (memory is SharpEmu.HLE.ICpuMemoryWrapper wrapper)
@@ -120,6 +118,7 @@ internal static class GpuWaitRegistry
     /// </summary>
     public static OutstandingSnapshot SnapshotOutstanding(object? memory = null)
     {
+        memory = Canonicalize(memory);
         lock (_gate)
         {
             var outstanding = 0;
@@ -346,6 +345,7 @@ internal static class GpuWaitRegistry
     /// </summary>
     public static bool LatchSatisfiedByValue(object memory, ulong address, ulong value)
     {
+        memory = Canonicalize(memory)!;
         var latchedAny = false;
         lock (_gate)
         {
@@ -431,6 +431,7 @@ internal static class GpuWaitRegistry
     /// </summary>
     public static List<WaitingDcb>? CollectExpiredRetries(object memory, long nowTicks)
     {
+        memory = Canonicalize(memory)!;
         List<WaitingDcb>? expired = null;
         lock (_gate)
         {
@@ -473,6 +474,7 @@ internal static class GpuWaitRegistry
 
     public static List<WaitingDcb>? CollectAllForMemory(object memory)
     {
+        memory = Canonicalize(memory)!;
         List<WaitingDcb>? collected = null;
         lock (_gate)
         {
@@ -558,6 +560,7 @@ internal static class GpuWaitRegistry
     /// breaker. Also latches any already-waiting waiter it satisfies.</summary>
     public static bool RecordProduced(object memory, ulong address, ulong value)
     {
+        memory = Canonicalize(memory)!;
         lock (_gate)
         {
             if (_lastProduced.Count >= 8192)
@@ -591,6 +594,7 @@ internal static class GpuWaitRegistry
         long nowTicks,
         long minAgeTicks)
     {
+        memory = Canonicalize(memory)!;
         List<WaitingDcb>? broken = null;
         lock (_gate)
         {
