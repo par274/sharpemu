@@ -86,6 +86,7 @@ public static class SharpEmuLog
     /// </summary>
     public static void Shutdown()
     {
+        SharpEmuDiagnostics.Shutdown();
         lock (ConfigurationSync)
         {
             if (_sink is IDisposable disposable)

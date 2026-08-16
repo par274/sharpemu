@@ -765,6 +765,47 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                                VerticalAlignment="Center" />
                         </local:SettingRow>
 
+                        <local:SettingRow x:Name="GameDiagnosticsProfileRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.Diagnostics.Profile.Label],
+                                                          Source={x:Static local:Localization.Instance},
+                                                          x:CompileBindings=False}"
+                                          Description="{Binding [Options.Diagnostics.Profile.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ComboBox x:Name="GameDiagnosticsProfileBox"
+                                    Classes="optionValue"
+                                    ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                    HorizontalContentAlignment="Left"
+                                    VerticalAlignment="Center" />
+                        </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameDiagnosticCategoriesRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.Diagnostics.Categories.Label],
+                                                          Source={x:Static local:Localization.Instance},
+                                                          x:CompileBindings=False}"
+                                          Description="{Binding [Options.Diagnostics.Categories.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <StackPanel Classes="optionValue" Spacing="4">
+                            <ToggleSwitch x:Name="GameDiagImportsToggle"
+                                          Content="{Binding [Options.Diagnostics.Category.Imports], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                            <ToggleSwitch x:Name="GameDiagAgcUnsupportedToggle"
+                                          Content="{Binding [Options.Diagnostics.Category.AgcUnsupported], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                            <ToggleSwitch x:Name="GameDiagAgcShadersToggle"
+                                          Content="{Binding [Options.Diagnostics.Category.AgcShaders], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                            <ToggleSwitch x:Name="GameDiagAgcPacketsToggle"
+                                          Content="{Binding [Options.Diagnostics.Category.AgcPackets], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                            <ToggleSwitch x:Name="GameDiagAgcDrawsToggle"
+                                          Content="{Binding [Options.Diagnostics.Category.AgcDraws], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                            <ToggleSwitch x:Name="GameDiagMemoryToggle"
+                                          Content="{Binding [Options.Diagnostics.Category.Memory], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                            <ToggleSwitch x:Name="GameDiagVideoToggle"
+                                          Content="{Binding [Options.Diagnostics.Category.Video], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                          </StackPanel>
+                        </local:SettingRow>
+
                         <local:SettingRow x:Name="GameLogToFileRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.LogToFile.Label],
@@ -1131,6 +1172,39 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                              Minimum="0"
                                                              Maximum="4096" Increment="16" Value="0" FormatString="0"
                                                              VerticalAlignment="Center" />
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="DiagnosticsProfileRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Diagnostics.Profile.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Diagnostics.Profile.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="DiagnosticsProfileBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="DiagnosticCategoriesRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Diagnostics.Categories.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Diagnostics.Categories.Desc], Source={x:Static local:Localization.Instance}}">
+                        <StackPanel Classes="optionValue" Spacing="4">
+                          <ToggleSwitch x:Name="DiagImportsToggle"
+                                        Content="{Binding [Options.Diagnostics.Category.Imports], Source={x:Static local:Localization.Instance}}" />
+                          <ToggleSwitch x:Name="DiagAgcUnsupportedToggle"
+                                        Content="{Binding [Options.Diagnostics.Category.AgcUnsupported], Source={x:Static local:Localization.Instance}}" />
+                          <ToggleSwitch x:Name="DiagAgcShadersToggle"
+                                        Content="{Binding [Options.Diagnostics.Category.AgcShaders], Source={x:Static local:Localization.Instance}}" />
+                          <ToggleSwitch x:Name="DiagAgcPacketsToggle"
+                                        Content="{Binding [Options.Diagnostics.Category.AgcPackets], Source={x:Static local:Localization.Instance}}" />
+                          <ToggleSwitch x:Name="DiagAgcDrawsToggle"
+                                        Content="{Binding [Options.Diagnostics.Category.AgcDraws], Source={x:Static local:Localization.Instance}}" />
+                          <ToggleSwitch x:Name="DiagMemoryToggle"
+                                        Content="{Binding [Options.Diagnostics.Category.Memory], Source={x:Static local:Localization.Instance}}" />
+                          <ToggleSwitch x:Name="DiagVideoToggle"
+                                        Content="{Binding [Options.Diagnostics.Category.Video], Source={x:Static local:Localization.Instance}}" />
+                        </StackPanel>
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="LogToFileRow"

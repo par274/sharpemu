@@ -30,6 +30,8 @@ public sealed class GuiSettingsTests
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
         Assert.Empty(settings.EnvironmentToggles);
+        Assert.Equal("Off", settings.DiagnosticsProfile);
+        Assert.Empty(settings.DiagnosticCategories);
         Assert.Equal("Windowed", settings.WindowMode);
         Assert.Equal("1920x1080", settings.Resolution);
         Assert.Equal("Fit", settings.ScalingMode);
@@ -93,6 +95,8 @@ public sealed class GuiSettingsTests
               "GameFolders": ["C:\\Games"],
               "ExcludedGames": ["C:\\Games\\skip.bin"],
               "EnvironmentToggles": ["SHARPEMU_TRACE"],
+              "DiagnosticsProfile": "Custom",
+              "DiagnosticCategories": ["Video", "AgcUnsupported", "invalid"],
               "Language": "pt-BR",
               "DiscordClientId": "999"
             }
@@ -106,6 +110,8 @@ public sealed class GuiSettingsTests
         Assert.Equal(["C:\\Games"], settings.GameFolders);
         Assert.Equal(["C:\\Games\\skip.bin"], settings.ExcludedGames);
         Assert.Equal(["SHARPEMU_TRACE"], settings.EnvironmentToggles);
+        Assert.Equal("Custom", settings.DiagnosticsProfile);
+        Assert.Equal(["AgcUnsupported", "Video"], settings.DiagnosticCategories);
     }
 
     [Fact]
@@ -209,6 +215,24 @@ public sealed class GuiSettingsTests
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
         Assert.Empty(settings.EnvironmentToggles);
+        Assert.Equal("Off", settings.DiagnosticsProfile);
+        Assert.Empty(settings.DiagnosticCategories);
+    }
+
+    [Theory]
+    [InlineData(null, "Off")]
+    [InlineData("invalid", "Off")]
+    [InlineData("compatibility", "Compatibility")]
+    [InlineData("FULL", "Full")]
+    public void NormalizeFromJson_DiagnosticsProfile_IsSafeAndCanonical(
+        string? value,
+        string expected)
+    {
+        var json = $$"""{ "DiagnosticsProfile": {{System.Text.Json.JsonSerializer.Serialize(value)}} }""";
+
+        var settings = GuiSettings.NormalizeFromJson(json);
+
+        Assert.Equal(expected, settings.DiagnosticsProfile);
     }
 
     [Fact]

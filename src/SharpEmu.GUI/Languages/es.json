@@ -53,6 +53,22 @@
   "Options.TraceImports.Label": "Límite de trazado de importaciones",
   "Options.TraceImports.Desc": "Trazar las primeras N importaciones por módulo (0 = off).",
 
+  "Options.Diagnostics.Profile.Label": "Perfil de diagnósticos",
+  "Options.Diagnostics.Profile.Desc": "Apagado tiene un coste despreciable. Compatibilidad registra sólo fallos únicos; Completo es para pruebas cortas.",
+  "Options.Diagnostics.Profile.Off": "Apagado (máximos FPS)",
+  "Options.Diagnostics.Profile.Compatibility": "Compatibilidad",
+  "Options.Diagnostics.Profile.Full": "Completo (lento)",
+  "Options.Diagnostics.Profile.Custom": "Personalizado",
+  "Options.Diagnostics.Categories.Label": "Categorías de diagnóstico",
+  "Options.Diagnostics.Categories.Desc": "Las categorías individuales se pueden editar en el perfil Personalizado.",
+  "Options.Diagnostics.Category.Imports": "Imports faltantes",
+  "Options.Diagnostics.Category.AgcUnsupported": "AGC/opcodes no soportados",
+  "Options.Diagnostics.Category.AgcShaders": "Shaders AGC",
+  "Options.Diagnostics.Category.AgcPackets": "Paquetes AGC",
+  "Options.Diagnostics.Category.AgcDraws": "Draws y dispatches AGC",
+  "Options.Diagnostics.Category.Memory": "Memoria directa",
+  "Options.Diagnostics.Category.Video": "Video y presentación",
+
   "Options.LogToFile.Label": "Registrar log en archivo",
   "Options.LogToFile.Desc": "Duplicar la salida del emulador en un archivo de logs.",
 

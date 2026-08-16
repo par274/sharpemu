@@ -1303,7 +1303,9 @@ internal static partial class Program
         {
             CpuEngine = cpuEngine,
             StrictDynlibResolution = strictDynlibResolution,
-            ImportTraceLimit = importTraceLimit,
+            ImportTraceLimit = SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.Imports)
+                ? Math.Max(DefaultImportTraceLimit, importTraceLimit)
+                : importTraceLimit,
         };
         var configuredVideoOptions = LoadConfiguredVideoOptions(ebootPath);
         videoOptions = (configuredVideoOptions with

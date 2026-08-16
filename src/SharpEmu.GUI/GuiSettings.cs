@@ -21,6 +21,11 @@ public sealed class GuiSettings
 
     public int ImportTraceLimit { get; set; }
 
+    /// <summary>Off, Compatibility, Full or Custom. Off is deliberately the default.</summary>
+    public string DiagnosticsProfile { get; set; } = "Off";
+
+    public List<string> DiagnosticCategories { get; set; } = new();
+
     public bool StrictDynlibResolution { get; set; }
 
     /// <summary>
@@ -115,6 +120,11 @@ public sealed class GuiSettings
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
         settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles);
+        settings.DiagnosticsProfile = SharpEmu.Logging.SharpEmuDiagnostics
+            .ParseProfile(settings.DiagnosticsProfile)
+            .ToString();
+        settings.DiagnosticCategories = SharpEmu.Logging.SharpEmuDiagnostics.CategoryNames(
+            SharpEmu.Logging.SharpEmuDiagnostics.ParseCategories(settings.DiagnosticCategories));
         settings.LogLevel ??= "Info";
         settings.Language ??= "en";
         var legacyProfile = settings.EnvironmentToggles

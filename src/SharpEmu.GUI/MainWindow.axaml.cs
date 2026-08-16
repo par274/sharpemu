@@ -228,6 +228,7 @@ public partial class MainWindow : Window
         ConsoleToggle.IsCheckedChanged += (_, _) => ConsolePanel.IsVisible = ConsoleToggle.IsChecked == true && _consoleWindow is null;
         WireOptionsNavigation();
         WireGameOptions();
+        WireGlobalDiagnostics();
 
         // The settings page edits _settings live, so a launch started while
         // it is open already uses the new values.
@@ -1151,6 +1152,7 @@ public partial class MainWindow : Window
     {
         CpuEngineBox.ItemsSource = _cpuEngineChoices;
         LogLevelBox.ItemsSource = _logLevelChoices;
+        DiagnosticsProfileBox.ItemsSource = _diagnosticProfileChoices;
         RenderResolutionBox.ItemsSource = _renderResolutionChoices;
         WindowModeBox.ItemsSource = _windowModeChoices;
         ScalingModeBox.ItemsSource = _scalingModeChoices;
@@ -1161,6 +1163,7 @@ public partial class MainWindow : Window
     {
         RefreshChoices(_cpuEngineChoices);
         RefreshChoices(_logLevelChoices);
+        RefreshChoices(_diagnosticProfileChoices);
         RefreshChoices(_renderResolutionChoices);
         RefreshChoices(_windowModeChoices);
         RefreshChoices(_scalingModeChoices);
@@ -1189,6 +1192,7 @@ public partial class MainWindow : Window
             _ => 2,
         };
         TraceImportsBox.Value = Math.Clamp(_settings.ImportTraceLimit, 0, 4096);
+        ApplyGlobalDiagnosticSettings();
         RenderResolutionBox.SelectedIndex = _settings.RenderResolutionScale switch
         {
             >= 0.875 => 0,
@@ -2375,6 +2379,21 @@ public partial class MainWindow : Window
             _appliedEnvironmentVariables.Add(name);
         }
 
+        var diagnosticCategories = CategoriesForProfile(
+            effective.DiagnosticsProfile,
+            effective.DiagnosticCategories);
+        SharpEmuDiagnostics.Configure(
+            SharpEmuDiagnostics.ParseProfile(effective.DiagnosticsProfile),
+            diagnosticCategories);
+        Environment.SetEnvironmentVariable(
+            SharpEmuDiagnostics.ProfileEnvironmentName,
+            effective.DiagnosticsProfile);
+        Environment.SetEnvironmentVariable(
+            SharpEmuDiagnostics.CategoriesEnvironmentName,
+            string.Join(',', SharpEmuDiagnostics.CategoryNames(diagnosticCategories)));
+        _appliedEnvironmentVariables.Add(SharpEmuDiagnostics.ProfileEnvironmentName);
+        _appliedEnvironmentVariables.Add(SharpEmuDiagnostics.CategoriesEnvironmentName);
+
         Environment.SetEnvironmentVariable(
             DefaultProfileEnvironmentName,
             GuiSettings.NormalizeDefaultProfile(_settings.DefaultProfile));
@@ -2395,7 +2414,9 @@ public partial class MainWindow : Window
         {
             CpuEngine = CpuExecutionEngine.NativeOnly,
             StrictDynlibResolution = effective.StrictDynlibResolution,
-            ImportTraceLimit = Math.Max(0, effective.ImportTraceLimit),
+            ImportTraceLimit = SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.Imports)
+                ? Math.Max(32, effective.ImportTraceLimit)
+                : Math.Max(0, effective.ImportTraceLimit),
         };
 
         _isRunning = true;
