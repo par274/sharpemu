@@ -48,6 +48,7 @@
   "Options.Env.Group.General": "General",
   "Options.Env.RenderDoc.Desc": "Load the RenderDoc in-application API so frames can be captured from inside the emulator.\nPress F10 while the game runs to capture one frame; captures land in user/logs/capture_logs/<TITLE_ID>.\nRequires RenderDoc to be installed. Slows the GPU down and hangs some titles, so leave it off unless you are debugging.",
   "Options.Env.GuestImageCpuSync.Desc": "Re-upload guest surfaces the game's own CPU code rewrites.\nLeave off normally. Turn on for titles whose CPU-drawn surfaces never reach the screen.\nCosts performance and regresses some titles, such as GTA V.",
+  "Options.Env.ForceSubmitOrphanPreambles.Desc": "Deliver GPU command-buffer preambles even when their target queue never picks them up.\nLeave off normally. Turn on for titles that hang waiting on a GPU fence that never signals.",
   "Options.DefaultProfile.Label": "Default profile name",
   "Options.DefaultProfile.Desc": "Name used when a game asks for text input. Defaults to Sharp.",
   "Options.Section.Emulation": "EMULATION",

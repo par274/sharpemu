@@ -290,6 +290,10 @@ public partial class MainWindow : Window
             SetEnvironmentToggle(
                 "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
                 EnvGuestImageCpuSyncToggle.IsChecked == true);
+        EnvForceSubmitOrphanPreamblesToggle.IsCheckedChanged += (_, _) =>
+            SetEnvironmentToggle(
+                "SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES",
+                EnvForceSubmitOrphanPreamblesToggle.IsChecked == true);
         DefaultProfileBox.TextChanged += (_, _) =>
             _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
         LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
@@ -1213,6 +1217,8 @@ public partial class MainWindow : Window
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
         EnvGuestImageCpuSyncToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_GUEST_IMAGE_CPU_SYNC");
+        EnvForceSubmitOrphanPreamblesToggle.IsChecked =
+            _settings.EnvironmentToggles.Contains("SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES");
         EnvRenderDocToggle.IsChecked =
             _settings.EnvironmentToggles.Contains("SHARPEMU_RENDERDOC");
         DefaultProfileBox.Text = _settings.DefaultProfile;

@@ -977,6 +977,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <ToggleSwitch x:Name="GameEnvGuestImageCpuSyncToggle"
                                         Classes="optionToggle" />
                         </local:SettingRow>
+                        <local:SettingRow Classes="optionRow"
+                                          Label="SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES"
+                                          Description="{Binding [Options.Env.ForceSubmitOrphanPreambles.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ToggleSwitch x:Name="GameEnvForceSubmitOrphanPreamblesToggle"
+                                        Classes="optionToggle" />
+                        </local:SettingRow>
                       </StackPanel>
                     </Border>
                   </StackPanel>
@@ -1492,6 +1500,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <local:SettingRow x:Name="EnvGuestImageCpuSyncRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_GUEST_IMAGE_CPU_SYNC"
                                         Description="{Binding [Options.Env.GuestImageCpuSync.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvGuestImageCpuSyncToggle" Classes="optionToggle" />
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="EnvForceSubmitOrphanPreamblesRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES"
+                                        Description="{Binding [Options.Env.ForceSubmitOrphanPreambles.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="EnvForceSubmitOrphanPreamblesToggle" Classes="optionToggle" />
                       </local:SettingRow>
                     </StackPanel>
                   </Border>
