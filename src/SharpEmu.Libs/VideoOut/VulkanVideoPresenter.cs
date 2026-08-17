@@ -526,6 +526,9 @@ internal static unsafe class VulkanVideoPresenter
     // render thread reaches the previous image, which otherwise starves
     // presentation indefinitely.
     private static readonly Queue<Presentation> _pendingGuestImagePresentations = new();
+    // Same fix as _pendingGuestImagePresentations above, for Submit()'s decoded video
+    // frames: a single "latest wins" slot dropped frames the render loop didn't poll in time.
+    private static readonly Queue<Presentation> _pendingVideoPresentations = new();
     private static readonly Dictionary<ulong, long> _guestImageWorkSequences = new();
     private static readonly Dictionary<ulong, uint> _availableGuestImages = new();
     // Write-tracker generation last uploaded for a CPU-backed guest image.
@@ -805,6 +808,7 @@ internal static unsafe class VulkanVideoPresenter
         _pendingSyncGuestWorkCount = 0;
         _pendingGuestWorkBytes = 0;
         _pendingGuestImagePresentations.Clear();
+        _pendingVideoPresentations.Clear();
         _guestImageWorkSequences.Clear();
         _availableGuestImages.Clear();
         _cpuBackedUploadGenerations.Clear();
@@ -860,7 +864,7 @@ internal static unsafe class VulkanVideoPresenter
             }
 
             var sequence = (_latestPresentation?.Sequence ?? 0) + 1;
-            _latestPresentation = new Presentation(
+            var presentation = new Presentation(
                 bgraFrame,
                 width,
                 height,
@@ -869,6 +873,15 @@ internal static unsafe class VulkanVideoPresenter
                 TranslatedDraw: null,
                 RequiredGuestWorkSequence: 0,
                 IsSplash: false);
+
+            // Also dual-written to _latestPresentation as a fallback once the queue drains.
+            _pendingVideoPresentations.Enqueue(presentation);
+            while (_pendingVideoPresentations.Count > MaxPendingGuestFlipVersions)
+            {
+                _pendingVideoPresentations.Dequeue();
+            }
+
+            _latestPresentation = presentation;
             if (_thread is not null)
             {
                 return;
@@ -2433,6 +2446,19 @@ internal static unsafe class VulkanVideoPresenter
 
                 presentation = default;
                 return false;
+            }
+
+            // Video's RequiredGuestWorkSequence is always 0, so this never blocks like the guest-image queue can.
+            while (_pendingVideoPresentations.Count > 0 &&
+                   _pendingVideoPresentations.Peek().Sequence <= presentedSequence)
+            {
+                _pendingVideoPresentations.Dequeue();
+            }
+
+            if (_pendingVideoPresentations.Count > 0)
+            {
+                presentation = _pendingVideoPresentations.Dequeue();
+                return true;
             }
 
             if (_latestPresentation is not { } latest ||

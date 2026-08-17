@@ -3145,8 +3145,33 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
         // Large Gen5 executables can keep valid code well past the first 32 MiB.
         // Astro Bot, for example, has an FS:[0] TLS load near +0x70A0000.
         const ulong MaxScanBytes = 134217728uL;
-		ulong num = _entryPoint;
-		ulong num2 = num + MaxScanBytes;
+
+		// _entryPoint can be a separate bootstrap allocation, not the main module —
+		// always also scan the standard PS5/PS4 image base.
+		const ulong Ps5MainImageBase = 0x0000000800000000UL;
+		const ulong Ps4MainImageBase = 0x0000000000400000UL;
+		ulong scanStart = _entryPoint;
+		if (VirtualQuery((void*)_entryPoint, out var entryRegion, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0 &&
+			entryRegion.AllocationBase != 0 &&
+			entryRegion.AllocationBase <= _entryPoint)
+		{
+			scanStart = entryRegion.AllocationBase;
+		}
+
+		PatchTlsPatternsInRange(scanStart, scanStart + MaxScanBytes, announce: true);
+
+		// Scan both windows unconditionally; overlap is safe, patched bytes just stop matching.
+		var mainImageBase = _entryPoint >= Ps5MainImageBase ? Ps5MainImageBase : Ps4MainImageBase;
+		if (mainImageBase < scanStart)
+		{
+			PatchTlsPatternsInRange(mainImageBase, mainImageBase + MaxScanBytes, announce: false);
+		}
+	}
+
+	private unsafe void PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd, bool announce)
+	{
+		ulong num = rangeStart;
+		ulong num2 = rangeEnd;
 		int num3 = 0;
 		int num4 = 0;
 		int num9 = 0;
@@ -3195,7 +3220,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			num = num6 > num ? num6 : num + 4096uL;
 		}
-		Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends");
+		if (announce || num3 + num4 + num9 + sse4aPatchCount > 0)
+		{
+			Console.Error.WriteLine($"[LOADER][INFO] Patched {num3} TLS loads, {num9} TLS stores, {num4} stack-canary accesses, {sse4aPatchCount} SSE4a EXTRQ blends" +
+				(announce ? string.Empty : $" (lazy-commit rescan 0x{rangeStart:X16}-0x{rangeEnd:X16})"));
+		}
 	}
 
 	private unsafe bool TryPatchSse4aExtrqBlend(nint address, byte* source)
