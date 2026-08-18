@@ -13828,16 +13828,10 @@ internal static unsafe class VulkanVideoPresenter
                     existing.LogicalDepth == depth &&
                     existing.Type == type &&
                     existing.MipLevels == mipLevels &&
+                    (!requiresStorage || existing.SupportsStorageUsage) &&
                     (exactFormatMatch ||
-                     (IsAliasableGuestImageFormat(existing.Format, format) &&
-                      (!requiresStorage || existing.SupportsStorageUsage))))
+                    IsAliasableGuestImageFormat(existing.Format, format)))
                 {
-                    if (requiresStorage && !existing.SupportsStorageUsage)
-                    {
-                        throw new InvalidOperationException(
-                            $"Guest image 0x{target.Address:X16} was created without storage usage.");
-                    }
-
                     existing.IsCpuBacked = false;
                     existing.CpuContentFingerprint = 0;
                     if (existing.RenderPass.Handle == 0 &&
@@ -13870,14 +13864,9 @@ internal static unsafe class VulkanVideoPresenter
                 if (existing.Width == target.Width &&
                     existing.Height == target.Height &&
                     existing.MipLevels == mipLevels &&
+                    (!requiresStorage || existing.SupportsStorageUsage) &&
                     IsCompatibleViewFormat(existing.Format, format))
                 {
-                    if (requiresStorage && !existing.SupportsStorageUsage)
-                    {
-                        throw new InvalidOperationException(
-                            $"Guest image 0x{target.Address:X16} was created without storage usage.");
-                    }
-
                     if (_traceGuestImageEvents)
                     {
                         Console.Error.WriteLine(
@@ -13952,50 +13941,52 @@ internal static unsafe class VulkanVideoPresenter
             {
                 if (requiresStorage && !retained.SupportsStorageUsage)
                 {
-                    throw new InvalidOperationException(
-                        $"Retained guest image 0x{target.Address:X16} was created without storage usage.");
+                    // Do not reuse retained image if it lacks required storage usage
+                    DestroyGuestImage(retained);
                 }
-
-                retained.IsCpuBacked = false;
-                retained.CpuContentFingerprint = 0;
-                _guestImages.Add(target.Address, retained);
-                var retainedByteCount = GetTextureByteCount(
-                    target.Format,
-                    target.Width,
-                    target.Height,
-                    depth);
-                lock (_gate)
+                else
                 {
-                    _cpuBackedUploadGenerations.Remove(target.Address);
-                    _guestImageExtents[target.Address] = (
+                    retained.IsCpuBacked = false;
+                    retained.CpuContentFingerprint = 0;
+                    _guestImages.Add(target.Address, retained);
+                    var retainedByteCount = GetTextureByteCount(
+                        target.Format,
                         target.Width,
                         target.Height,
-                        retainedByteCount);
-                }
+                        depth);
+                    lock (_gate)
+                    {
+                        _cpuBackedUploadGenerations.Remove(target.Address);
+                        _guestImageExtents[target.Address] = (
+                            target.Width,
+                            target.Height,
+                            retainedByteCount);
+                    }
 
-                // Arm the exact extent the flip/acquire sync path would read
-                // back, budgeted by bytes rather than by resolution: the old
-                // 1920x1080 cap left every 4K surface permanently
-                // un-invalidated, so a guest CPU rewrite of one was never
-                // reflected and the sample served stale bytes.
-                if (ShouldTrackGuestImageWrites(retainedByteCount))
-                {
-                    SharpEmu.HLE.GuestImageWriteTracker.Track(
-                        target.Address,
-                        retainedByteCount,
-                        CurrentGuestWorkSequenceForDiagnostics,
-                        "vulkan.render-target");
-                }
+                    // Arm the exact extent the flip/acquire sync path would read
+                    // back, budgeted by bytes rather than by resolution: the old
+                    // 1920x1080 cap left every 4K surface permanently
+                    // un-invalidated, so a guest CPU rewrite of one was never
+                    // reflected and the sample served stale bytes.
+                    if (ShouldTrackGuestImageWrites(retainedByteCount))
+                    {
+                        SharpEmu.HLE.GuestImageWriteTracker.Track(
+                            target.Address,
+                            retainedByteCount,
+                            CurrentGuestWorkSequenceForDiagnostics,
+                            "vulkan.render-target");
+                    }
 
-                if (_traceGuestImageEvents)
-                {
-                    Console.Error.WriteLine(
-                        $"[GIMG] retained addr=0x{target.Address:X} " +
-                        $"{target.Width}x{target.Height} fmt={format} " +
-                        $"initialized={retained.Initialized}");
-                }
+                    if (_traceGuestImageEvents)
+                    {
+                        Console.Error.WriteLine(
+                            $"[GIMG] retained addr=0x{target.Address:X} " +
+                            $"{target.Width}x{target.Height} fmt={format} " +
+                            $"initialized={retained.Initialized}");
+                    }
 
-                return retained;
+                    return retained;
+                }
             }
 
             var imageInfo = new ImageCreateInfo
