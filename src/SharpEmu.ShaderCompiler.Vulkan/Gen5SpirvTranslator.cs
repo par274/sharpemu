@@ -2366,17 +2366,16 @@ public static partial class Gen5SpirvTranslator
                         return;
                     }
 
+                    // GLOBAL_STORE/LOAD_DWORD(x2/x3/x4) are dword-aligned by the GCN ISA, so read/write dwords directly instead of the per-byte loop.
                     for (uint index = 0; index < control.DwordCount; index++)
                     {
-                        var address = index == 0
-                            ? byteAddress
-                            : IAdd(byteAddress, UInt(index * sizeof(uint)));
-                        StoreBufferBytes(
+                        var indexedDwordAddress = index == 0
+                            ? dwordAddress
+                            : IAdd(dwordAddress, UInt(index));
+                        StoreBufferWord(
                             bindingIndex,
-                            address,
-                            LoadV(control.VectorData + index),
-                            sizeof(uint),
-                            0);
+                            indexedDwordAddress,
+                            LoadV(control.VectorData + index));
                     }
                 });
                 return true;
@@ -2404,12 +2403,12 @@ public static partial class Gen5SpirvTranslator
 
             for (uint index = 0; index < control.DwordCount; index++)
             {
-                var address = index == 0
-                    ? byteAddress
-                    : IAdd(byteAddress, UInt(index * sizeof(uint)));
+                var indexedDwordAddress = index == 0
+                    ? dwordAddress
+                    : IAdd(dwordAddress, UInt(index));
                 StoreV(
                     control.VectorData + index,
-                    LoadUnalignedBufferWord(bindingIndex, address));
+                    LoadBufferWord(bindingIndex, indexedDwordAddress));
             }
 
             return true;
@@ -2510,17 +2509,16 @@ public static partial class Gen5SpirvTranslator
                         return;
                     }
 
+                    // BUFFER_STORE/LOAD_DWORD(x2/x3/x4) are dword-aligned by the GCN ISA, same as the GLOBAL case above — no per-byte reassembly needed.
                     for (uint index = 0; index < control.DwordCount; index++)
                     {
-                        var address = index == 0
-                            ? byteAddress
-                            : IAdd(byteAddress, UInt(index * sizeof(uint)));
-                        StoreBufferBytes(
+                        var indexedDwordAddress = index == 0
+                            ? dwordAddress
+                            : IAdd(dwordAddress, UInt(index));
+                        StoreBufferWord(
                             bindingIndex,
-                            address,
-                            LoadV(control.VectorData + index),
-                            sizeof(uint),
-                            0);
+                            indexedDwordAddress,
+                            LoadV(control.VectorData + index));
                     }
                 });
 
@@ -2576,12 +2574,12 @@ public static partial class Gen5SpirvTranslator
 
             for (uint index = 0; index < control.DwordCount; index++)
             {
-                var address = index == 0
-                    ? byteAddress
-                    : IAdd(byteAddress, UInt(index * sizeof(uint)));
+                var indexedDwordAddress = index == 0
+                    ? dwordAddress
+                    : IAdd(dwordAddress, UInt(index));
                 StoreV(
                     control.VectorData + index,
-                    LoadUnalignedBufferWord(bindingIndex, address));
+                    LoadBufferWord(bindingIndex, indexedDwordAddress));
             }
 
             return true;
