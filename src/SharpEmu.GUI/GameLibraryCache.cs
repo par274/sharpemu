@@ -25,9 +25,10 @@ internal static class GameLibraryCache
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    internal static string CachePath =>
-        Path.Combine(AppContext.BaseDirectory, "user", "library_cache.json");
-
+    internal static string CachePath => OperatingSystem.IsLinux()
+        ? Path.Combine(XdgPaths.CacheHome, "sharpemu", "library_cache.json")
+        : Path.Combine(AppContext.BaseDirectory, "user", "library_cache.json");
+    
     internal sealed class CachedGame
     {
         public string Name { get; set; } = string.Empty;
