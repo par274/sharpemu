@@ -52,9 +52,10 @@ public sealed class PerGameSettings
         HdrMode is null &&
         EnvironmentToggles is null;
 
-    public static string DirectoryPath =>
-        Path.Combine(AppContext.BaseDirectory, "user", "custom_configs");
-
+    public static string DirectoryPath => OperatingSystem.IsLinux()
+        ? Path.Combine(XdgPaths.ConfigHome, "sharpemu", "custom_configs")
+        : Path.Combine(AppContext.BaseDirectory, "user", "custom_configs");
+    
     public static string PathFor(string titleId) =>
         Path.Combine(DirectoryPath, SanitizeTitleId(titleId) + ".json");
 
