@@ -21,12 +21,21 @@ public static class SaveDataStorage
     public static string Root(string? overrideDir = null)
     {
         var configured = overrideDir ?? Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR");
-        var root = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(AppContext.BaseDirectory, "user", "savedata")
-            : configured;
+        var root = !string.IsNullOrWhiteSpace(configured)
+            ? configured
+            : OperatingSystem.IsLinux()
+                ? Path.Combine(LinuxDataHome, "sharpemu", "savedata")
+                : Path.Combine(AppContext.BaseDirectory, "user", "savedata");
         return Path.GetFullPath(root);
     }
 
+    // Mirrors SharpEmu.GUI.XdgPaths.DataHome. Duplicated (rather than
+    // referenced) because SharpEmu.Libs doesn't depend on SharpEmu.GUI.
+    private static string LinuxDataHome =>
+        Environment.GetEnvironmentVariable("XDG_DATA_HOME") is { Length: > 0 } xdg
+            ? xdg
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
+    
     /// <summary>
     /// Imports saves written by the short-lived profile layout and by the old
     /// numeric-user layout. Newer destination files are never overwritten.
