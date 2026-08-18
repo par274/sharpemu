@@ -12174,15 +12174,18 @@ public static partial class AgcExports
 
         if (dispatchEndX == 0 || dispatchEndY == 0 || dispatchEndZ == 0)
         {
-            // Indirect dispatches read their dimensions from a guest buffer a
-            // prior GPU dispatch fills. Zero here means that producer has not run
-            // yet — signal the caller to suspend on the dims buffer and retry,
-            // rather than dropping the work (which black-screens GPU-driven games
-            // like Astro Bot). Direct dispatches carry dims inline, so a zero is
-            // genuinely malformed and still rejected.
-            if (opcode == ItDispatchIndirect)
+            // For indirect dispatches (both absolute and base), zero dimensions are a valid outcome
+            // of GPU culling passes (0 workgroups). VulkanVideoPresenter handles groupCount = 0 as a clean no-op.
+            if (opcode == ItDispatchIndirect || dispatchSource is "absolute-indirect" or "base-indirect")
             {
-                indirectDimsRetryAddress = dimensionsAddress;
+                var waveCount = (initiator & (1u << 15)) != 0 ? 32u : 64u;
+                dispatch = new ComputeDispatch(
+                    0, 0, 0,
+                    0, 0, 0,
+                    waveCount,
+                    IsIndirect: true,
+                    0, 0, 0);
+                return true;
             }
 
             return RejectComputeDispatch(
