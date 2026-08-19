@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Text.Json;
+using SharpEmu.Libs;
 
 namespace SharpEmu.GUI;
 
