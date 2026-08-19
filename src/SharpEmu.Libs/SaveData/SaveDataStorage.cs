@@ -24,17 +24,10 @@ public static class SaveDataStorage
         var root = !string.IsNullOrWhiteSpace(configured)
             ? configured
             : OperatingSystem.IsLinux()
-                ? Path.Combine(LinuxDataHome, "sharpemu", "savedata")
+                ? Path.Combine(XdgPaths.DataHome, "sharpemu", "savedata")
                 : Path.Combine(AppContext.BaseDirectory, "user", "savedata");
         return Path.GetFullPath(root);
     }
-
-    // Mirrors SharpEmu.GUI.XdgPaths.DataHome. Duplicated (rather than
-    // referenced) because SharpEmu.Libs doesn't depend on SharpEmu.GUI.
-    private static string LinuxDataHome =>
-        Environment.GetEnvironmentVariable("XDG_DATA_HOME") is { Length: > 0 } xdg
-            ? xdg
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
     
     /// <summary>
     /// Imports saves written by the short-lived profile layout and by the old
