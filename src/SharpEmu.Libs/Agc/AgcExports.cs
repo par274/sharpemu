@@ -6478,6 +6478,25 @@ public static partial class AgcExports
                     var targetAddress = destinationAddress +
                         (incrementAddress ? (ulong)index * sizeof(uint) : 0);
                     wroteData = TryWriteUInt32(ctx, targetAddress, values[index]);
+                    if (wroteData)
+                    {
+                        GpuWaitRegistry.RecordProduced(
+                            ctx.Memory, targetAddress, values[index]);
+                    }
+                }
+
+                // Like ReleaseMem dataSel=2: a 64-bit WAIT_REG_MEM watches an
+                // 8-byte label written as two 32-bit dwords. Record the combined
+                // 64-bit value so a 64-bit EQ can latch even though the writes
+                // landed as two 32-bit stores.
+                if (wroteData && dwordCount >= 2 && incrementAddress)
+                {
+                    var combined = ((ulong)values[1] << 32) | values[0];
+                    GpuWaitRegistry.RecordProduced(
+                        ctx.Memory, destinationAddress, combined);
+                    // Also latch the high half's address for symmetry: a stray
+                    // 32-bit wait on the high dword should not be confused, but
+                    // recording it does not hurt and mirrors the per-dword stores.
                 }
 
                 if (tracePacket)
