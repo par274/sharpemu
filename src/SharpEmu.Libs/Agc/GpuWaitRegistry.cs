@@ -59,6 +59,10 @@ internal static class GpuWaitRegistry
     // cycle forever even though a real producer did signal it. Keyed by (memory,
     // address) so distinct guest processes never alias.
     private static readonly Dictionary<(object, ulong), ulong> _lastProduced = new();
+    // Frame-staleness guard: tracks the frame ID of each label write so that
+    // WAIT_REG_MEM in frame N+1 is not satisfied by a stale write from frame N.
+    private static readonly Dictionary<(object, ulong), long> _labelFrameIds = new();
+    private static long _currentFrameId;
 
   
     private static object? Canonicalize(object? memory)
@@ -69,6 +73,34 @@ internal static class GpuWaitRegistry
         }
 
         return memory;
+    }
+
+    /// <summary>
+    /// Advances the frame counter. Called at each frame boundary (flip) so that
+    /// stale label writes from previous frames cannot satisfy WAIT_REG_MEM.
+    /// </summary>
+    public static void AdvanceFrame()
+    {
+        System.Threading.Interlocked.Increment(ref _currentFrameId);
+    }
+
+    /// <summary>
+    /// Returns true if the label at (memory, address) was written in the
+    /// current frame, or has never been written (uninitialized).
+    /// Only labels written in a PREVIOUS frame are considered stale.
+    /// </summary>
+    public static bool IsLabelFresh(object memory, ulong address)
+    {
+        memory = Canonicalize(memory)!;
+        lock (_gate)
+        {
+            if (!_labelFrameIds.TryGetValue((memory, address), out var frameId))
+            {
+                return true; // never written — treat as fresh (not stale)
+            }
+
+            return frameId >= System.Threading.Volatile.Read(ref _currentFrameId);
+        }
     }
 
     public static int Count
@@ -576,6 +608,7 @@ internal static class GpuWaitRegistry
             }
 
             _lastProduced[(memory, address)] = value;
+            _labelFrameIds[(memory, address)] = System.Threading.Volatile.Read(ref _currentFrameId);
         }
 
         return LatchSatisfiedByValue(memory, address, value);

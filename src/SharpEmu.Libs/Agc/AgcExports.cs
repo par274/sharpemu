@@ -5244,6 +5244,7 @@ public static partial class AgcExports
             {
                 TraceFramePacketSummary(state);
                 SyncCpuWrittenGuestImages(ctx);
+                GpuWaitRegistry.AdvanceFrame();
                 if (!TryReadUInt32(ctx, currentAddress + 4, out var videoOutHandle) ||
                     !TryReadUInt32(ctx, currentAddress + 8, out var displayBufferIndexRaw) ||
                     !TryReadUInt32(ctx, currentAddress + 12, out var flipMode) ||
@@ -7073,7 +7074,13 @@ public static partial class AgcExports
 
         if (hasCurrent && GpuWaitRegistry.Compare(waiter, currentValue))
         {
-            return false; // already satisfied — keep parsing
+            // Value satisfies the condition, but only bypass if the label was
+            // written in the current frame. A stale label from a previous frame
+            // means the producer hasn't written yet this frame — must wait.
+            if (GpuWaitRegistry.IsLabelFresh(ctx.Memory, waitAddress))
+            {
+                return false; // satisfied by current-frame write — keep parsing
+            }
         }
 
         if (!_gpuWaitSuspendEnabled)
