@@ -16038,12 +16038,13 @@ internal static unsafe class VulkanVideoPresenter
             _currentFrameSlot = (frameSlot + 1) % MaxFramesInFlight;
 
             // CMASK "all clear" simulation: on real PS5, CMASK is reset to
-            // "all clear" at each frame boundary, so render targets are
-            // effectively cleared. Reset Initialized for all offscreen
-            // targets to simulate this behavior and prevent trails.
+            // "all clear" at each frame boundary for color render targets.
+            // Reset Initialized only for images that have a RenderPass
+            // (i.e., are actual render targets, not textures/storage images).
             foreach (var (_, guestImage) in _guestImages)
             {
-                if (guestImage.Width > 0 && guestImage.Height > 0)
+                if (guestImage.RenderPass.Handle != 0 &&
+                    guestImage.Initialized)
                 {
                     guestImage.Initialized = false;
                 }
