@@ -1,4 +1,4 @@
-// Copyright (C) 2026 SharpEmu Emulator Project
+﻿// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System;
@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Cpu.Debugging;
+using SharpEmu.Core.Cpu.Emulation;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
@@ -3350,50 +3351,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return false;
 		}
 
-		var offset = 0;
-		while (offset < availableLength && source[offset] == 0x66)
-		{
-			offset++;
-		}
-
-		if (offset >= availableLength || source[offset] != 0x64)
+		if (!TlsThreadPointerLoad.TryDecode(
+				new ReadOnlySpan<byte>(source, availableLength),
+				out var destinationRegister,
+				out var instructionLength))
 		{
 			return false;
 		}
 
-		offset++;
-		if (offset >= availableLength)
-		{
-			return false;
-		}
-
-		var rex = (byte)0;
-		if (source[offset] >= 0x40 && source[offset] <= 0x4F)
-		{
-			rex = source[offset];
-			offset++;
-		}
-
-		if (offset + 7 > availableLength || source[offset] != 0x8B)
-		{
-			return false;
-		}
-
-		var modRm = source[offset + 1];
-		var sib = source[offset + 2];
-		if ((modRm >> 6) != 0 || (modRm & 7) != 4 || sib != 0x25)
-		{
-			return false;
-		}
-
-		var displacement = *(int*)(source + offset + 3);
-		if (displacement != 0)
-		{
-			return false;
-		}
-
-		var destinationRegister = ((modRm >> 3) & 7) | (((rex & 4) != 0) ? 8 : 0);
-		var instructionLength = offset + 7;
+		// A rewrite needs room for the call plus the register move; the decoder itself has no
+		// such constraint, so the length floor stays here with the patcher that requires it.
 		if (instructionLength < MinTlsPatchInstructionBytes)
 		{
 			return false;

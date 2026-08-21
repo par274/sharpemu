@@ -1,4 +1,4 @@
-// Copyright (C) 2026 SharpEmu Emulator Project
+﻿// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System;
@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.Core.Cpu.Disasm;
+using SharpEmu.Core.Cpu.Emulation;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Cpu.Native;
@@ -18,6 +19,11 @@ public sealed partial class DirectExecutionBackend
 	private const ulong LazyCommitWindowBytes = 0x0200_0000UL;
 	private static int _lazyCommitTraceCount;
 	private static int _guestAllocatorHoleRecoveries;
+	private static int _unpatchedTlsLoadRecoveries;
+	private static readonly bool _disableTlsLoadFaultRecovery = string.Equals(
+		Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_TLS_LOAD_FAULT_RECOVERY"),
+		"1",
+		StringComparison.Ordinal);
 	private static int _auxiliaryThreadExecuteFaultRecoveries;
 	private static int _auxiliaryThreadExecuteFaultSkips;
 	private nint _workerAbortStack;
@@ -145,6 +151,11 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (exceptionCode == 3221225477u &&
 				TryRecoverGuestAllocatorHole(exceptionRecord, contextRecord, rip))
+			{
+				return -1;
+			}
+			if (exceptionCode == 3221225477u &&
+				TryRecoverUnpatchedTlsLoad(exceptionRecord, contextRecord, rip))
 			{
 				return -1;
 			}
@@ -663,6 +674,123 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine(
 				$"[LOADER][WARN] Guest allocator empty-node adapter recovery #{recovery}: " +
 				$"rip=0x{rip:X16} -> 0x{rip + emptyPoolFallbackDelta:X16}");
+			Console.Error.Flush();
+		}
+
+		return true;
+	}
+
+	/// <summary>
+	/// Finishes a guest <c>mov reg, fs:[0]</c> that reached the CPU without being rewritten.
+	///
+	/// The ahead-of-time pass rewrites these into a call to the TLS handler, but anything it does
+	/// not reach - code outside the scanned range, or mapped after the scan ran - executes as
+	/// written. The host FS base is zero, so the instruction reads linear address 0 and dies, and
+	/// with no fallback the title is over: this is the terminal fault in the God of War Ragnarok,
+	/// Minecraft and EA UFC 5 logs, all three on a byte-identical instruction.
+	///
+	/// Recovery is the same result the rewrite produces - the destination register receives the
+	/// calling thread's guest TLS base - so a recovered load is indistinguishable from a patched
+	/// one, only slower. Deliberately a backstop, not a replacement for patching.
+	/// </summary>
+	/// <summary>
+	/// Decides whether an access violation is a recoverable unpatched thread-pointer load, and if
+	/// so where in the CONTEXT to write the thread pointer and where to resume.
+	///
+	/// Separated from the CONTEXT plumbing so the decision can be driven directly in tests: every
+	/// guard here is a reason the emulator would rather report an honest crash than resume the
+	/// guest on a guess.
+	/// </summary>
+	/// <param name="accessType">
+	/// EXCEPTION_RECORD parameter 0: 0 read, 1 write, 8 execute.
+	/// </param>
+	/// <param name="faultAddress">EXCEPTION_RECORD parameter 1.</param>
+	/// <param name="guestTlsBase">The calling thread's guest TLS base, 0 if it has none.</param>
+	/// <param name="contextOffset">Byte offset of the destination register in the CONTEXT.</param>
+	internal static bool TryPlanUnpatchedTlsLoadRecovery(
+		ReadOnlySpan<byte> code,
+		ulong rip,
+		ulong accessType,
+		ulong faultAddress,
+		ulong guestTlsBase,
+		out int contextOffset,
+		out ulong resumeRip,
+		out int destinationRegister)
+	{
+		contextOffset = 0;
+		resumeRip = 0;
+		destinationRegister = 0;
+
+		// The host FS base is zero, so an unrewritten fs:[0] reads linear address 0. Anything
+		// else is a different fault. An ordinary null dereference lands here too - only the
+		// instruction bytes tell the two apart.
+		if (accessType != 0 || faultAddress != 0)
+		{
+			return false;
+		}
+
+		if (!TlsThreadPointerLoad.TryDecode(code, out destinationRegister, out var length))
+		{
+			return false;
+		}
+
+		if (guestTlsBase == 0)
+		{
+			// This thread has no guest TLS block. Resuming would hand the guest a null thread
+			// pointer and move the crash somewhere that says far less about the cause.
+			return false;
+		}
+
+		// The Win64 CONTEXT lays its integer registers out in x86 encoding order from Rax, so the
+		// register number indexes straight off CTX_RAX; ContextOffsetsAreLaidOutInEncodingOrderFromRax
+		// pins that down.
+		contextOffset = CTX_RAX + (8 * destinationRegister);
+		resumeRip = rip + (ulong)length;
+		return true;
+	}
+
+	private unsafe bool TryRecoverUnpatchedTlsLoad(
+		EXCEPTION_RECORD* exceptionRecord,
+		void* contextRecord,
+		ulong rip)
+	{
+		if (_disableTlsLoadFaultRecovery ||
+			exceptionRecord->NumberParameters < 2 ||
+			_guestTlsBaseTlsIndex == uint.MaxValue)
+		{
+			return false;
+		}
+
+		Span<byte> code = stackalloc byte[TlsThreadPointerLoad.MaxLength];
+		if (!TryReadHostBytes(rip, code))
+		{
+			return false;
+		}
+
+		var tlsBase = (ulong)TlsGetValue(_guestTlsBaseTlsIndex);
+		if (!TryPlanUnpatchedTlsLoadRecovery(
+				code,
+				rip,
+				*exceptionRecord->ExceptionInformation,
+				exceptionRecord->ExceptionInformation[1],
+				tlsBase,
+				out var contextOffset,
+				out var resumeRip,
+				out var destinationRegister))
+		{
+			return false;
+		}
+
+		WriteCtxU64(contextRecord, contextOffset, tlsBase);
+		WriteCtxU64(contextRecord, CTX_RIP, resumeRip);
+
+		var recovery = Interlocked.Increment(ref _unpatchedTlsLoadRecoveries);
+		if (recovery <= 16 || (recovery & (recovery - 1)) == 0)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Unpatched TLS thread-pointer load recovery #{recovery}: " +
+				$"rip=0x{rip:X16} reg={destinationRegister} tls=0x{tlsBase:X16} " +
+				$"resume=0x{resumeRip:X16} (the load-time patcher did not cover this address)");
 			Console.Error.Flush();
 		}
 
@@ -1255,7 +1383,10 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer)
+	private unsafe static bool TryReadHostBytes(ulong address, byte[] buffer) =>
+		TryReadHostBytes(address, buffer.AsSpan());
+
+	private unsafe static bool TryReadHostBytes(ulong address, Span<byte> buffer)
 	{
 		if (address < 65536)
 		{
@@ -1279,7 +1410,7 @@ public sealed partial class DirectExecutionBackend
 
 		try
 		{
-			Marshal.Copy((nint)address, buffer, 0, buffer.Length);
+			new ReadOnlySpan<byte>((void*)address, buffer.Length).CopyTo(buffer);
 			return true;
 		}
 		catch
