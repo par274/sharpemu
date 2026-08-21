@@ -16036,6 +16036,18 @@ internal static unsafe class VulkanVideoPresenter
             CollectCompletedGuestSubmissions(waitForOldest: false);
             _imageInitialized[imageIndex] = true;
             _currentFrameSlot = (frameSlot + 1) % MaxFramesInFlight;
+
+            // CMASK "all clear" simulation: on real PS5, CMASK is reset to
+            // "all clear" at each frame boundary, so render targets are
+            // effectively cleared. Reset Initialized for all offscreen
+            // targets to simulate this behavior and prevent trails.
+            foreach (var (_, guestImage) in _guestImages)
+            {
+                if (guestImage.Width > 0 && guestImage.Height > 0)
+                {
+                    guestImage.Initialized = false;
+                }
+            }
             _presentedSequence = presentation.Sequence;
             if (presentation.IsSplash && !_splashPresented)
             {
