@@ -1104,6 +1104,7 @@ public static partial class AgcExports
     // FAST_CLEAR and COMPRESSION bits stay clear because DCC, not CMASK,
     // carries the compression.
     private const uint CbColorInfoDccEnableMask = 1u << 28;
+    private const uint CbColorInfoFastClearEnableMask = 1u << 12;
     private const uint CbBlend0Control = 0x1E0;
     private const uint PaScModeCntl0 = 0x292;
     // GFX10 DB context registers (register byte address minus 0x28000, / 4).
@@ -8297,6 +8298,34 @@ public static partial class AgcExports
                 return;
             }
 
+            // DbRenderControl CLEARON (bit0): when set, the CB clears color
+            // targets on first draw. Handle color targets (depth is already
+            // handled by DecodeDepthState).
+            if (state.CxRegisters.TryGetValue(DbRenderControl, out var rc) && (rc & 0x1u) != 0)
+            {
+                foreach (var rt in translatedDraw.RenderTargets)
+                {
+                    if (rt.Address != 0)
+                    {
+                        VulkanVideoPresenter.RequestGuestColorClear(rt.Address);
+                    }
+                }
+            }
+
+            // CMASK fast clear: CB_COLORn_INFO.FAST_CLEAR (bit12) set on
+            // one or more targets. The CB clears via CMASK before the draw
+            // writes; mark targets for clear-on-first-use.
+            if (IsCmaskFastClearDraw(state.CxRegisters, translatedDraw.RenderTargets))
+            {
+                foreach (var rt in translatedDraw.RenderTargets)
+                {
+                    if (rt.Address != 0)
+                    {
+                        VulkanVideoPresenter.RequestGuestColorClear(rt.Address);
+                    }
+                }
+            }
+
             var firstTarget = translatedDraw.RenderTargets.FirstOrDefault();
             if (firstTarget.Address != 0)
             {
@@ -9587,6 +9616,30 @@ public static partial class AgcExports
             clearWord0 == 0 &&
             clearWord1 == 0 &&
             CoversClipSpace(vertexInputs, vertexCount);
+    }
+
+    /// <summary>
+    /// GFX10 CMASK fast clear: CB_COLORn_INFO.FAST_CLEAR (bit 12) set on
+    /// one or more targets. The CB clears via CMASK before the draw writes;
+    /// mark targets for clear-on-first-use. Unlike DCC, the draw content
+    /// IS written (not dropped). Dead Cells uses DbRenderControl CLEARON
+    /// instead (bit0), not this mechanism.
+    /// </summary>
+    private static bool IsCmaskFastClearDraw(
+        IReadOnlyDictionary<uint, uint> registers,
+        IReadOnlyList<RenderTargetDescriptor> renderTargets)
+    {
+        foreach (var rt in renderTargets)
+        {
+            var stride = rt.Slot * CbColorRegisterStride;
+            if (registers.TryGetValue(CbColor0Info + stride, out var info) &&
+                (info & CbColorInfoFastClearEnableMask) != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
