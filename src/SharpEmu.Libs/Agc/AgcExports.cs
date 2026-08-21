@@ -118,6 +118,9 @@ public static partial class AgcExports
     // Multiple producers can share one target label; last-writer-wins would
     // starve waits on the others.
     private static readonly Dictionary<ulong, List<ulong>> _cbReleaseMemTargets = new();
+    // CMASK state tracking: tracks which CMASK addresses are "all clear".
+    // Keyed by CMASK address, value is true if marked as cleared.
+    private static readonly Dictionary<ulong, bool> _cmaskClearedState = new();
     // header -> {ring base, write cursor} of the last submitted slice.
     // Submissions stay cursor-bounded since rings aren't zeroed. Lap
     // distinguishes a stale cursor from a previous pass over the same base.
@@ -1095,6 +1098,7 @@ public static partial class AgcExports
     private const uint CbColor0Base = 0x318;
     private const uint CbColorRegisterStride = 15;
     private const uint CbColor0Info = 0x31C;
+    private const uint CbColor0Cmask = 0x320;
     private const uint CbColor0ClearWord0 = 0x323;
     private const uint CbColor0ClearWord1 = 0x324;
     private const uint CbColor0BaseExt = 0x390;
@@ -8072,6 +8076,7 @@ public static partial class AgcExports
         var hasPsInputAddr = state.CxRegisters.TryGetValue(SpiPsInputAddr, out var psInputAddr);
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
         var renderTargets = GetRenderTargets(state.CxRegisters);
+        TrackCmaskAddresses(state.CxRegisters, renderTargets);
         var drawSequence = ++gpuState.WorkSequence;
         if (state.PendingTargetlessDraw is { } stalePendingDraw)
         {
@@ -8091,6 +8096,35 @@ public static partial class AgcExports
         if (TryGetCbColorControlMode(state.CxRegisters, out var cbMode) &&
             IsCbMetadataColorMode(cbMode))
         {
+            // EliminateFastClear: the game explicitly asks the CB to clear
+            // the fast-clear metadata and the colour buffer. Only clear
+            // if CMASK is "all clear" (matching shadPS4's behavior).
+            if (cbMode == (uint)CbColorMode.EliminateFastClear &&
+                renderTargets.Count > 0 &&
+                renderTargets[0].Address != 0)
+            {
+                // Check if CMASK is "all clear" for this target
+                var cmaskCleared = false;
+                foreach (var (cmaskAddr, cleared) in _cmaskClearedState)
+                {
+                    if (cleared && cmaskAddr != 0)
+                    {
+                        cmaskCleared = true;
+                        break;
+                    }
+                }
+
+                if (cmaskCleared)
+                {
+                    VulkanVideoPresenter.RequestGuestColorClear(renderTargets[0].Address);
+                    // Mark CMASK as "dirty" after clear
+                    foreach (var cmaskAddr in _cmaskClearedState.Keys.ToList())
+                    {
+                        _cmaskClearedState[cmaskAddr] = false;
+                    }
+                }
+            }
+
             if (_traceAgcShader || ShouldTraceHotPath(ref _cbMetadataSkipTraceCount))
             {
                 TraceAgcShader(
@@ -9647,6 +9681,57 @@ public static partial class AgcExports
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Reads CMASK addresses from CB_COLORn_CMASK registers and marks them
+    /// as "all clear" in _cmaskClearedState. Called when color buffers are
+    /// configured.
+    /// </summary>
+    private static void TrackCmaskAddresses(
+        IReadOnlyDictionary<uint, uint> registers,
+        IReadOnlyList<RenderTargetDescriptor> renderTargets)
+    {
+        foreach (var rt in renderTargets)
+        {
+            var stride = rt.Slot * CbColorRegisterStride;
+            if (registers.TryGetValue(CbColor0Cmask + stride, out var cmaskLow))
+            {
+                // CMASK address is 37-bit: low 32 bits from register, high 5 bits from base
+                var cmaskAddress = (ulong)(cmaskLow & 0x1FFFFFFFu) << 8;
+                if (cmaskAddress != 0)
+                {
+                    // Mark as "all clear" when color buffer is configured
+                    _cmaskClearedState[cmaskAddress] = true;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks if a compute shader writes to a CMASK address. If so, marks
+    /// the CMASK as "all clear" (following shadPS4's IsComputeMetaClear logic).
+    /// </summary>
+    private static void CheckCmaskWrite(
+        ulong writeAddress,
+        SubmittedGpuState gpuState)
+    {
+        if (writeAddress == 0)
+        {
+            return;
+        }
+
+        // Check if this address matches any known CMASK address
+        foreach (var (cmaskAddress, _) in _cmaskClearedState)
+        {
+            if (writeAddress == cmaskAddress ||
+                (writeAddress >= cmaskAddress && writeAddress < cmaskAddress + 1024))
+            {
+                // Compute shader writes to CMASK address → mark as "all clear"
+                _cmaskClearedState[cmaskAddress] = true;
+                return;
+            }
+        }
     }
 
     /// <summary>
@@ -12546,6 +12631,10 @@ public static partial class AgcExports
                     sequence,
                     shaderAddress,
                     binding.Opcode);
+
+                // Check if this compute shader writes to a CMASK address
+                // (shadPS4's IsComputeMetaClear logic)
+                CheckCmaskWrite(texture.Address, gpuState);
 
                 TraceAgcShader(
                     $"agc.compute_writer addr=0x{texture.Address:X16} " +
