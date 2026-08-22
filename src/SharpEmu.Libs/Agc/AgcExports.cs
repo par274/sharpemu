@@ -132,6 +132,15 @@ public static partial class AgcExports
     // CheckCmaskWrite (which only sees the write target address) can
     // find the owning surface.
     private static readonly Dictionary<ulong, ulong> _cmaskToColorBuffer = new();
+    // Guards _metaSurfaces and _cmaskToColorBuffer.  Two threads touch them:
+    // the parse thread (registration in TrackCmaskAddresses, CheckCmaskWrite
+    // from DMA/compute writes, EFC consumption) and the render thread
+    // (MarkAllSurfacesCleared at guest flip, IsMetaClearedForSurface /
+    // ConsumeMetaClear / GetMetaClearValue at pass-record time).  Plain
+    // Dictionaries corrupt under concurrent write, so every access below
+    // holds this gate.  Keep the critical sections tiny and never block on
+    // anything external while holding it.
+    private static readonly object _metaSurfaceGate = new();
     // header -> {ring base, write cursor} of the last submitted slice.
     // Submissions stay cursor-bounded since rings aren't zeroed. Lap
     // distinguishes a stale cursor from a previous pass over the same base.
@@ -1142,8 +1151,8 @@ public static partial class AgcExports
     private const uint EsUserDataRegister = 0xCC;
     private const uint ComputeUserDataRegister = 0x240;
     private const uint NggUserDataScalarRegisterBase = 8;
-    private const uint Gen5TextureFormatR8G8B8A8Unorm = 10;
-    private const uint Gen5TextureFormatR16G16B16A16Float = 12;
+    internal const uint Gen5TextureFormatR8G8B8A8Unorm = 10;
+    internal const uint Gen5TextureFormatR16G16B16A16Float = 12;
     private const uint Gen5TextureType1D = 8;
     private const uint Gen5TextureType2D = 9;
     private const uint Gen5TextureType3D = 10;
@@ -8128,11 +8137,21 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 renderTargets[0].Address != 0)
             {
                 var targetAddr = renderTargets[0].Address;
-                if (_metaSurfaces.TryGetValue(targetAddr, out var meta) &&
-                    meta.IsCleared)
+                bool requestClear;
+                lock (_metaSurfaceGate)
+                {
+                    requestClear =
+                        _metaSurfaces.TryGetValue(targetAddr, out var meta) &&
+                        meta.IsCleared;
+                    if (requestClear)
+                    {
+                        _metaSurfaces[targetAddr] = meta with { IsCleared = false };
+                    }
+                }
+
+                if (requestClear)
                 {
                     VulkanVideoPresenter.RequestGuestColorClear(targetAddr);
-                    _metaSurfaces[targetAddr] = meta with { IsCleared = false };
                 }
             }
 
@@ -9731,13 +9750,21 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             registers.TryGetValue(cw0Addr, out var cw0);
             registers.TryGetValue(cw1Addr, out var cw1);
 
-            _metaSurfaces[rt.Address] = new MetaSurfaceInfo(
-                metaAddress, cw0, cw1,
-                IsCleared: _metaSurfaces.TryGetValue(rt.Address, out var prev) &&
-                           prev.IsCleared);
-            if (metaAddress != 0)
+            lock (_metaSurfaceGate)
             {
-                _cmaskToColorBuffer[metaAddress] = rt.Address;
+                _metaSurfaces[rt.Address] = new MetaSurfaceInfo(
+                    metaAddress, cw0, cw1,
+                    // Re-registration runs on every draw; keep the cleared state
+                    // so a mark-clear event survives until the pass consumes it.
+                    // If the metadata binding changed, the old state refers to
+                    // the old metadata and must be reset.
+                    IsCleared: _metaSurfaces.TryGetValue(rt.Address, out var prev) &&
+                               prev.IsCleared &&
+                               prev.CmaskAddress == metaAddress);
+                if (metaAddress != 0)
+                {
+                    _cmaskToColorBuffer[metaAddress] = rt.Address;
+                }
             }
         }
     }
@@ -9755,29 +9782,32 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return;
         }
 
-        // Exact match: write directly to a registered CMASK address.
-        if (_cmaskToColorBuffer.TryGetValue(writeAddress, out var cbAddr))
+        lock (_metaSurfaceGate)
         {
-            if (_metaSurfaces.TryGetValue(cbAddr, out var meta))
+            // Exact match: write directly to a registered CMASK address.
+            if (_cmaskToColorBuffer.TryGetValue(writeAddress, out var cbAddr))
             {
-                _metaSurfaces[cbAddr] = meta with { IsCleared = true };
-            }
-
-            return;
-        }
-
-        // CMASK surfaces are small (typically ≤ 4 KiB).  Check the ±1024
-        // window around each registered address to catch partial writes.
-        foreach (var (cmaskAddr, colorBufAddr) in _cmaskToColorBuffer)
-        {
-            if (writeAddress >= cmaskAddr && writeAddress < cmaskAddr + 1024)
-            {
-                if (_metaSurfaces.TryGetValue(colorBufAddr, out var meta))
+                if (_metaSurfaces.TryGetValue(cbAddr, out var meta))
                 {
-                    _metaSurfaces[colorBufAddr] = meta with { IsCleared = true };
+                    _metaSurfaces[cbAddr] = meta with { IsCleared = true };
                 }
 
                 return;
+            }
+
+            // CMASK surfaces are small (typically ≤ 4 KiB).  Check the ±1024
+            // window around each registered address to catch partial writes.
+            foreach (var (cmaskAddr, colorBufAddr) in _cmaskToColorBuffer)
+            {
+                if (writeAddress >= cmaskAddr && writeAddress < cmaskAddr + 1024)
+                {
+                    if (_metaSurfaces.TryGetValue(colorBufAddr, out var meta))
+                    {
+                        _metaSurfaces[colorBufAddr] = meta with { IsCleared = true };
+                    }
+
+                    return;
+                }
             }
         }
     }
@@ -9789,8 +9819,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
     /// </summary>
     internal static bool IsMetaClearedForSurface(ulong colorBufferAddress)
     {
-        return _metaSurfaces.TryGetValue(colorBufferAddress, out var meta) &&
-               meta.IsCleared;
+        lock (_metaSurfaceGate)
+        {
+            return _metaSurfaces.TryGetValue(colorBufferAddress, out var meta) &&
+                   meta.IsCleared;
+        }
     }
 
     /// <summary>
@@ -9799,9 +9832,12 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
     /// </summary>
     internal static void ConsumeMetaClear(ulong colorBufferAddress)
     {
-        if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+        lock (_metaSurfaceGate)
         {
-            _metaSurfaces[colorBufferAddress] = meta with { IsCleared = false };
+            if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+            {
+                _metaSurfaces[colorBufferAddress] = meta with { IsCleared = false };
+            }
         }
     }
 
@@ -9810,9 +9846,12 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
     /// </summary>
     internal static (uint Cw0, uint Cw1) GetMetaClearValue(ulong colorBufferAddress)
     {
-        if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+        lock (_metaSurfaceGate)
         {
-            return (meta.ClearWord0, meta.ClearWord1);
+            if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+            {
+                return (meta.ClearWord0, meta.ClearWord1);
+            }
         }
 
         return (0, 0);
@@ -9820,15 +9859,20 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
 
     /// <summary>
     /// Marks all registered surfaces as "all clear".  Called at guest flip
-    /// (frame boundary) to simulate the hardware behaviour where unwritten
-    /// surfaces read back as the clear value.  Replaces the flip-arm
-    /// heuristic with a per-surface state-machine entry.
+    /// (frame boundary).  Real hardware applies a fast clear / load-clear to
+    /// its per-frame surfaces every frame; the emulator restores that
+    /// per-frame clear here, per surface, at flip time.  This is the
+    /// per-surface successor of the removed flip-arm heuristic (which reset
+    /// only the first multi-attachment group).
     /// </summary>
     internal static void MarkAllSurfacesCleared()
     {
-        foreach (var (addr, meta) in _metaSurfaces)
+        lock (_metaSurfaceGate)
         {
-            _metaSurfaces[addr] = meta with { IsCleared = true };
+            foreach (var (addr, meta) in _metaSurfaces)
+            {
+                _metaSurfaces[addr] = meta with { IsCleared = true };
+            }
         }
     }
 
