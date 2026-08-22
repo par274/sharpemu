@@ -8086,19 +8086,9 @@ public static partial class AgcExports
         var hasPsInputEna = state.CxRegisters.TryGetValue(SpiPsInputEna, out var psInputEna);
         var hasPsInputAddr = state.CxRegisters.TryGetValue(SpiPsInputAddr, out var psInputAddr);
         state.UcRegisters.TryGetValue(VgtPrimitiveType, out var primitiveType);
-        var renderTargets = GetRenderTargets(state.CxRegisters);
+var renderTargets = GetRenderTargets(state.CxRegisters);
         TrackCmaskAddresses(state.CxRegisters, renderTargets);
         var drawSequence = ++gpuState.WorkSequence;
-        var lifecycleProbe = Interlocked.Increment(ref _lifecycleProbeCount);
-        if (lifecycleProbe <= 100)
-        {
-            Console.Error.WriteLine(
-                $"[PROBE] agc.rt_lifecycle seq={drawSequence} " +
-                $"count={renderTargets.Count} targets=[" +
-                string.Join(",", renderTargets.Select(static target =>
-                    $"s{target.Slot}:0x{target.Address:X}:" +
-                    $"{target.Width}x{target.Height}:f{target.Format}")) + "]");
-        }
         if (state.PendingTargetlessDraw is { } stalePendingDraw)
         {
             ReturnPooledDrawArrays(
@@ -10166,8 +10156,7 @@ public static partial class AgcExports
     private static readonly HashSet<ulong> _sampledRenderTargets = new();
     private static readonly object _renderTargetProbeGate = new();
     private static long _renderTargetSampleTraceCount;
-    private static long _indirectDrawProbeCount;
-    private static long _lifecycleProbeCount;
+private static long _indirectDrawProbeCount;
     private static long _indirectDrawEmitCount;
     private static long _indirectDrawEmitRejectCount;
     private static long _indirectMultiProbeCount;
