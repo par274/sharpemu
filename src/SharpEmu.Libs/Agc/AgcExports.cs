@@ -1098,10 +1098,11 @@ public static partial class AgcExports
     private const uint CbColor0Base = 0x318;
     private const uint CbColorRegisterStride = 15;
     private const uint CbColor0Info = 0x31C;
-    private const uint CbColor0Cmask = 0x320;
+    private const uint CbColor0Cmask = 0x31F;
     private const uint CbColor0ClearWord0 = 0x323;
     private const uint CbColor0ClearWord1 = 0x324;
     private const uint CbColor0BaseExt = 0x390;
+    private const uint CbColor0CmaskBaseExt = 0x398;
     private const uint CbColor0Attrib2 = 0x3B0;
     private const uint CbColor0Attrib3 = 0x3B8;
     // CB_COLORn_INFO.DCC_ENABLE (gc_10_1_0_sh_mask.h). On GFX10 the legacy
@@ -9707,13 +9708,14 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         {
             var stride = rt.Slot * CbColorRegisterStride;
             var regAddr = CbColor0Cmask + stride;
-            if (registers.TryGetValue(regAddr, out var cmaskLow))
+            registers.TryGetValue(regAddr, out var cmaskLow);
+            var extAddr = CbColor0CmaskBaseExt + rt.Slot;
+            registers.TryGetValue(extAddr, out var cmaskExt);
+            var cmaskAddress = ((ulong)(cmaskExt & 0xFFu) << 40) |
+                               ((ulong)(cmaskLow & 0x1FFFFFFFu) << 8);
+            if (cmaskAddress != 0)
             {
-                var cmaskAddress = (ulong)(cmaskLow & 0x1FFFFFFFu) << 8;
-                if (cmaskAddress != 0)
-                {
-                    _cmaskClearedState[cmaskAddress] = true;
-                }
+                _cmaskClearedState[cmaskAddress] = true;
             }
         }
     }
