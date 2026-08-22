@@ -3448,6 +3448,24 @@ internal static unsafe class VulkanVideoPresenter
         private int _directPresentationCount;
         private readonly Dictionary<ulong, long> _presentedGuestImageTraceCounts = new();
         private readonly Dictionary<ulong, GuestImageResource> _guestImages = new();
+        // Guest-frame render-target initialization.
+        //
+        // On hardware a colour surface whose fast-clear metadata is in reset
+        // state reads back as the CB clear value instead of stale memory, so
+        // games can leave per-frame MRT groups (GBuffer-style targets)
+        // uncleaned and rely on that implicit initialization. We have no
+        // metadata layer: such a target keeps whatever touched it last, and
+        // when the group shares addresses with the compositor's output that
+        // means the entire finished previous frame bleeds through every
+        // region the new frame does not repaint (Dead Cells dungeon trails).
+        //
+        // The guest's own flip command is the authoritative frame boundary in
+        // the submission stream. Arm there; the first multi-attachment colour
+        // group bound afterwards consumes it and starts from LoadOp.Clear.
+        // One arm per flip yields exactly one reset per guest frame regardless
+        // of CPU/GPU pipelining. Mirrors shadPS4's meta-state-driven
+        // attachment.is_clear at render-pass begin (vk_rasterizer.cpp).
+        private bool _frameColorResetArmed;
         private readonly record struct GuestImageVariantKey(
             ulong Address,
             uint Width,
@@ -5884,6 +5902,7 @@ internal static unsafe class VulkanVideoPresenter
 
         private void ExecuteOrderedGuestFlip(VulkanOrderedGuestFlip work)
         {
+            _frameColorResetArmed = true;
             FlushBatchedGuestCommands();
             _guestImages.TryGetValue(work.Address, out var source);
             if (_deviceLost ||
@@ -12780,6 +12799,25 @@ internal static unsafe class VulkanVideoPresenter
                             targets[index].Height))
                 {
                     UploadGuestImageInitialData(targets[index], initialData);
+                }
+            }
+
+            // Consume the flip-armed reset with the first multi-attachment
+            // colour group of the fresh guest frame: its slots start from
+            // LoadOp.Clear instead of whatever the previous frame left in the
+            // shared surfaces. Later groups of the same frame keep normal
+            // load semantics, so intra-frame pass chaining is untouched.
+            if (_frameColorResetArmed &&
+                work.Targets.Count >= 3 &&
+                work.Targets.All(target => target.Address != 0))
+            {
+                _frameColorResetArmed = false;
+                foreach (var target in targets)
+                {
+                    if (!target.IsCpuBacked)
+                    {
+                        target.Initialized = false;
+                    }
                 }
             }
 
