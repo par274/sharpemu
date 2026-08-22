@@ -8114,10 +8114,6 @@ public static partial class AgcExports
                 renderTargets.Count > 0 &&
                 renderTargets[0].Address != 0)
             {
-                TraceAgcShader(
-                    $"agc.eliminate_fast_clear seq={drawSequence} " +
-                    $"target=0x{renderTargets[0].Address:X16} " +
-                    $"cmask_state={_cmaskClearedState.Count}");
                 // Check if CMASK is "all clear" for this target
                 var cmaskCleared = false;
                 foreach (var (cmaskAddr, cleared) in _cmaskClearedState)
@@ -9707,24 +9703,6 @@ public static partial class AgcExports
         IReadOnlyDictionary<uint, uint> registers,
         IReadOnlyList<RenderTargetDescriptor> renderTargets)
     {
-        // Log all CB_COLOR registers to see what's available
-        if (renderTargets.Count > 0 && registers.Count > 0)
-        {
-            var cbRegs = new List<string>();
-            for (uint r = 0x318; r <= 0x340; r++)
-            {
-                if (registers.TryGetValue(r, out var val) && val != 0)
-                {
-                    cbRegs.Add($"0x{r:X}=0x{val:X}");
-                }
-            }
-            if (cbRegs.Count > 0)
-            {
-                TraceAgcShader(
-                    $"agc.cb_regs=[{string.Join(",", cbRegs)}]");
-            }
-        }
-
         foreach (var rt in renderTargets)
         {
             var stride = rt.Slot * CbColorRegisterStride;
@@ -9734,9 +9712,6 @@ public static partial class AgcExports
                 var cmaskAddress = (ulong)(cmaskLow & 0x1FFFFFFFu) << 8;
                 if (cmaskAddress != 0)
                 {
-                    TraceAgcShader(
-                        $"agc.cmask_track slot={rt.Slot} reg=0x{regAddr:X} " +
-                        $"val=0x{cmaskLow:X} addr=0x{cmaskAddress:X16}");
                     _cmaskClearedState[cmaskAddress] = true;
                 }
             }
@@ -9762,9 +9737,6 @@ public static partial class AgcExports
             if (writeAddress == cmaskAddress ||
                 (writeAddress >= cmaskAddress && writeAddress < cmaskAddress + 1024))
             {
-                TraceAgcShader(
-                    $"agc.cmask_write addr=0x{writeAddress:X16} " +
-                    $"cmask=0x{cmaskAddress:X16} was_cleared={cleared}");
                 // DMA fill or compute shader writes to CMASK address → mark as "all clear"
                 _cmaskClearedState[cmaskAddress] = true;
                 return;
