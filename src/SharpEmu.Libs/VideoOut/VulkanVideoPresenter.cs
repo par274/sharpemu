@@ -3466,6 +3466,10 @@ internal static unsafe class VulkanVideoPresenter
         // of CPU/GPU pipelining. Mirrors shadPS4's meta-state-driven
         // attachment.is_clear at render-pass begin (vk_rasterizer.cpp).
         private bool _frameColorResetArmed;
+        // When true, the flip-arm is disabled and only the CMASK meta-state
+        // ledger drives clears.  Set to true after verifying the ledger is
+        // correct for the current game.
+        private bool _metaStateOverridesFlipArm = true;
         private readonly record struct GuestImageVariantKey(
             ulong Address,
             uint Width,
@@ -12789,6 +12793,15 @@ internal static unsafe class VulkanVideoPresenter
                     targets[index].Initialized = false;
                 }
 
+                // CMASK meta-state: if the surface's metadata says "all clear",
+                // start this pass from LoadOp.Clear and consume the state.
+                if (work.Targets[index].Address != 0 &&
+                    Agc.AgcExports.IsMetaClearedForSurface(work.Targets[index].Address))
+                {
+                    targets[index].Initialized = false;
+                    Agc.AgcExports.ConsumeMetaClear(work.Targets[index].Address);
+                }
+
                 if (work.Targets[index].Address != 0 &&
                     TakeGuestImageInitialData(work.Targets[index].Address) is { } initialData &&
                     !targets[index].Initialized &&
@@ -12807,7 +12820,13 @@ internal static unsafe class VulkanVideoPresenter
             // LoadOp.Clear instead of whatever the previous frame left in the
             // shared surfaces. Later groups of the same frame keep normal
             // load semantics, so intra-frame pass chaining is untouched.
-            if (_frameColorResetArmed &&
+            //
+            // When _metaStateOverridesFlipArm is true, the flip-arm is
+            // disabled and only the CMASK meta-state ledger drives clears.
+            // Set to true after verifying the ledger is correct for the
+            // current game (divergence logging confirms no missed surfaces).
+            if (!_metaStateOverridesFlipArm &&
+                _frameColorResetArmed &&
                 work.Targets.Count >= 3 &&
                 work.Targets.All(target => target.Address != 0))
             {
@@ -13069,13 +13088,33 @@ internal static unsafe class VulkanVideoPresenter
                         &toDepthAttachment);
                 }
 
+                ClearColorValue[]? metaClearValues = null;
+                for (var ci = 0; ci < targets.Length; ci++)
+                {
+                    if (!targets[ci].Initialized &&
+                        work.Targets[ci].Address != 0)
+                    {
+                        var (cw0, cw1) = Agc.AgcExports.GetMetaClearValue(
+                            work.Targets[ci].Address);
+                        if (cw0 != 0 || cw1 != 0)
+                        {
+                            metaClearValues ??= new ClearColorValue[targets.Length];
+                            unsafe
+                            {
+                                metaClearValues[ci] = new ClearColorValue(cw0);
+                            }
+                        }
+                    }
+                }
+
                 BeginTranslatedRenderPass(
                     renderPass,
                     framebuffer,
                     extent,
                     colorAttachmentCount: targets.Length,
                     hasDepthAttachment: depth is not null && !clearDepthSeparately,
-                    clearDepth: depth?.ClearDepth ?? 1f);
+                    clearDepth: depth?.ClearDepth ?? 1f,
+                    colorClearValues: metaClearValues);
                 RecordTranslatedDrawInPass(resources, extent);
                 _vk.CmdEndRenderPass(_commandBuffer);
 
@@ -17732,14 +17771,18 @@ internal static unsafe class VulkanVideoPresenter
             Extent2D extent,
             int colorAttachmentCount = 1,
             bool hasDepthAttachment = false,
-            float clearDepth = 1f)
+            float clearDepth = 1f,
+            ClearColorValue[]? colorClearValues = null)
         {
             colorAttachmentCount = Math.Max(colorAttachmentCount, 1);
             var clearValueCount = colorAttachmentCount + (hasDepthAttachment ? 1 : 0);
             var clearValues = stackalloc ClearValue[clearValueCount];
             for (var index = 0; index < colorAttachmentCount; index++)
             {
-                clearValues[index] = default;
+                clearValues[index] = colorClearValues is not null &&
+                    index < colorClearValues.Length
+                        ? new ClearValue { Color = colorClearValues[index] }
+                        : default;
             }
             // Reverse-Z is not assumed; clear depth to 1.0 (far) so a standard
             // LessOrEqual/Less test keeps the nearest fragment.

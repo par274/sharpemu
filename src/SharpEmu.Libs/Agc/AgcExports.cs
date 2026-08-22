@@ -118,9 +118,20 @@ public static partial class AgcExports
     // Multiple producers can share one target label; last-writer-wins would
     // starve waits on the others.
     private static readonly Dictionary<ulong, List<ulong>> _cbReleaseMemTargets = new();
-    // CMASK state tracking: tracks which CMASK addresses are "all clear".
-    // Keyed by CMASK address, value is true if marked as cleared.
-    private static readonly Dictionary<ulong, bool> _cmaskClearedState = new();
+    // CMASK meta-state tracking: maps colour-buffer addresses to their
+    // compression metadata.  Keyed by colour-buffer base address so the
+    // consumption path (which only knows the surface address) can query
+    // directly without a reverse lookup.
+    private record struct MetaSurfaceInfo(
+        ulong CmaskAddress,
+        uint ClearWord0,
+        uint ClearWord1,
+        bool IsCleared);
+    private static readonly Dictionary<ulong, MetaSurfaceInfo> _metaSurfaces = new();
+    // Reverse map: CMASK address → colour-buffer address.  Needed so
+    // CheckCmaskWrite (which only sees the write target address) can
+    // find the owning surface.
+    private static readonly Dictionary<ulong, ulong> _cmaskToColorBuffer = new();
     // header -> {ring base, write cursor} of the last submitted slice.
     // Submissions stay cursor-bounded since rings aren't zeroed. Lap
     // distinguishes a stale cursor from a previous pass over the same base.
@@ -1101,8 +1112,10 @@ public static partial class AgcExports
     private const uint CbColor0Cmask = 0x31F;
     private const uint CbColor0ClearWord0 = 0x323;
     private const uint CbColor0ClearWord1 = 0x324;
+    private const uint CbColor0DccBase = 0x325;
     private const uint CbColor0BaseExt = 0x390;
     private const uint CbColor0CmaskBaseExt = 0x398;
+    private const uint CbColor0DccBaseExt = 0x3A8;
     private const uint CbColor0Attrib2 = 0x3B0;
     private const uint CbColor0Attrib3 = 0x3B8;
     // CB_COLORn_INFO.DCC_ENABLE (gc_10_1_0_sh_mask.h). On GFX10 the legacy
@@ -8109,31 +8122,17 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             IsCbMetadataColorMode(cbMode))
         {
             // EliminateFastClear: the game explicitly asks the CB to clear
-            // the fast-clear metadata and the colour buffer. Only clear
-            // if CMASK is "all clear" (matching shadPS4's behavior).
+            // the fast-clear metadata and the colour buffer.
             if (cbMode == (uint)CbColorMode.EliminateFastClear &&
                 renderTargets.Count > 0 &&
                 renderTargets[0].Address != 0)
             {
-                // Check if CMASK is "all clear" for this target
-                var cmaskCleared = false;
-                foreach (var (cmaskAddr, cleared) in _cmaskClearedState)
+                var targetAddr = renderTargets[0].Address;
+                if (_metaSurfaces.TryGetValue(targetAddr, out var meta) &&
+                    meta.IsCleared)
                 {
-                    if (cleared && cmaskAddr != 0)
-                    {
-                        cmaskCleared = true;
-                        break;
-                    }
-                }
-
-                if (cmaskCleared)
-                {
-                    VulkanVideoPresenter.RequestGuestColorClear(renderTargets[0].Address);
-                    // Mark CMASK as "dirty" after clear
-                    foreach (var cmaskAddr in _cmaskClearedState.Keys.ToList())
-                    {
-                        _cmaskClearedState[cmaskAddr] = false;
-                    }
+                    VulkanVideoPresenter.RequestGuestColorClear(targetAddr);
+                    _metaSurfaces[targetAddr] = meta with { IsCleared = false };
                 }
             }
 
@@ -9696,9 +9695,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
     }
 
     /// <summary>
-    /// Reads CMASK addresses from CB_COLORn_CMASK registers and marks them
-    /// as "all clear" in _cmaskClearedState. Called when color buffers are
-    /// configured.
+    /// Registers the CMASK metadata mapping for each colour buffer.
+    /// Does NOT mark as cleared — clearing only happens on actual clear
+    /// events (DMA fill, compute write, EFC draw).
     /// </summary>
     private static void TrackCmaskAddresses(
         IReadOnlyDictionary<uint, uint> registers,
@@ -9707,22 +9706,44 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         foreach (var rt in renderTargets)
         {
             var stride = rt.Slot * CbColorRegisterStride;
-            var regAddr = CbColor0Cmask + stride;
-            registers.TryGetValue(regAddr, out var cmaskLow);
-            var extAddr = CbColor0CmaskBaseExt + rt.Slot;
-            registers.TryGetValue(extAddr, out var cmaskExt);
+
+            // CMASK metadata address (legacy GCN path).
+            var cmaskRegAddr = CbColor0Cmask + stride;
+            registers.TryGetValue(cmaskRegAddr, out var cmaskLow);
+            var cmaskExtAddr = CbColor0CmaskBaseExt + rt.Slot;
+            registers.TryGetValue(cmaskExtAddr, out var cmaskExt);
             var cmaskAddress = ((ulong)(cmaskExt & 0xFFu) << 40) |
                                ((ulong)(cmaskLow & 0x1FFFFFFFu) << 8);
-            if (cmaskAddress != 0)
+
+            // DCC metadata address (GFX10+ primary path).
+            var dccRegAddr = CbColor0DccBase + stride;
+            registers.TryGetValue(dccRegAddr, out var dccLow);
+            var dccExtAddr = CbColor0DccBaseExt + rt.Slot;
+            registers.TryGetValue(dccExtAddr, out var dccExt);
+            var dccAddress = ((ulong)(dccExt & 0xFFu) << 40) |
+                             ((ulong)(dccLow & 0x1FFFFFFFu) << 8);
+
+            // Prefer CMASK if present; fall back to DCC.
+            var metaAddress = cmaskAddress != 0 ? cmaskAddress : dccAddress;
+            if (metaAddress == 0)
             {
-                _cmaskClearedState[cmaskAddress] = true;
+                continue;
             }
+
+            var cw0Addr = CbColor0ClearWord0 + stride;
+            var cw1Addr = CbColor0ClearWord1 + stride;
+            registers.TryGetValue(cw0Addr, out var cw0);
+            registers.TryGetValue(cw1Addr, out var cw1);
+
+            _metaSurfaces[rt.Address] = new MetaSurfaceInfo(
+                metaAddress, cw0, cw1, IsCleared: false);
+            _cmaskToColorBuffer[metaAddress] = rt.Address;
         }
     }
 
     /// <summary>
-    /// Checks if a compute shader writes to a CMASK address. If so, marks
-    /// the CMASK as "all clear" (following shadPS4's IsComputeMetaClear logic).
+    /// Checks if a write targets a registered CMASK address. If so,
+    /// marks the owning colour buffer's metadata as "all clear".
     /// </summary>
     private static void CheckCmaskWrite(
         ulong writeAddress,
@@ -9733,17 +9754,67 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return;
         }
 
-        // Check if this address matches any known CMASK address
-        foreach (var (cmaskAddress, cleared) in _cmaskClearedState)
+        // Exact match: write directly to a registered CMASK address.
+        if (_cmaskToColorBuffer.TryGetValue(writeAddress, out var cbAddr))
         {
-            if (writeAddress == cmaskAddress ||
-                (writeAddress >= cmaskAddress && writeAddress < cmaskAddress + 1024))
+            if (_metaSurfaces.TryGetValue(cbAddr, out var meta))
             {
-                // DMA fill or compute shader writes to CMASK address → mark as "all clear"
-                _cmaskClearedState[cmaskAddress] = true;
+                _metaSurfaces[cbAddr] = meta with { IsCleared = true };
+            }
+
+            return;
+        }
+
+        // CMASK surfaces are small (typically ≤ 4 KiB).  Check the ±1024
+        // window around each registered address to catch partial writes.
+        foreach (var (cmaskAddr, colorBufAddr) in _cmaskToColorBuffer)
+        {
+            if (writeAddress >= cmaskAddr && writeAddress < cmaskAddr + 1024)
+            {
+                if (_metaSurfaces.TryGetValue(colorBufAddr, out var meta))
+                {
+                    _metaSurfaces[colorBufAddr] = meta with { IsCleared = true };
+                }
+
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Returns true if the colour buffer at <paramref name="colorBufferAddress"/>
+    /// has pending CMASK "all clear" metadata — i.e. the surface was fast-cleared
+    /// but not yet rendered into.
+    /// </summary>
+    internal static bool IsMetaClearedForSurface(ulong colorBufferAddress)
+    {
+        return _metaSurfaces.TryGetValue(colorBufferAddress, out var meta) &&
+               meta.IsCleared;
+    }
+
+    /// <summary>
+    /// Consumes the "all clear" state for the given surface, marking it dirty.
+    /// Called after the first render pass uses LoadOp.Clear.
+    /// </summary>
+    internal static void ConsumeMetaClear(ulong colorBufferAddress)
+    {
+        if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+        {
+            _metaSurfaces[colorBufferAddress] = meta with { IsCleared = false };
+        }
+    }
+
+    /// <summary>
+    /// Returns the CB clear word values for the given colour buffer.
+    /// </summary>
+    internal static (uint Cw0, uint Cw1) GetMetaClearValue(ulong colorBufferAddress)
+    {
+        if (_metaSurfaces.TryGetValue(colorBufferAddress, out var meta))
+        {
+            return (meta.ClearWord0, meta.ClearWord1);
+        }
+
+        return (0, 0);
     }
 
     /// <summary>
