@@ -5907,6 +5907,7 @@ internal static unsafe class VulkanVideoPresenter
         private void ExecuteOrderedGuestFlip(VulkanOrderedGuestFlip work)
         {
             _frameColorResetArmed = true;
+            Agc.AgcExports.MarkAllSurfacesCleared();
             FlushBatchedGuestCommands();
             _guestImages.TryGetValue(work.Address, out var source);
             if (_deviceLost ||

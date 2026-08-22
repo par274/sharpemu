@@ -9725,10 +9725,6 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
 
             // Prefer CMASK if present; fall back to DCC.
             var metaAddress = cmaskAddress != 0 ? cmaskAddress : dccAddress;
-            if (metaAddress == 0)
-            {
-                continue;
-            }
 
             var cw0Addr = CbColor0ClearWord0 + stride;
             var cw1Addr = CbColor0ClearWord1 + stride;
@@ -9736,8 +9732,13 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             registers.TryGetValue(cw1Addr, out var cw1);
 
             _metaSurfaces[rt.Address] = new MetaSurfaceInfo(
-                metaAddress, cw0, cw1, IsCleared: false);
-            _cmaskToColorBuffer[metaAddress] = rt.Address;
+                metaAddress, cw0, cw1,
+                IsCleared: _metaSurfaces.TryGetValue(rt.Address, out var prev) &&
+                           prev.IsCleared);
+            if (metaAddress != 0)
+            {
+                _cmaskToColorBuffer[metaAddress] = rt.Address;
+            }
         }
     }
 
@@ -9815,6 +9816,20 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         }
 
         return (0, 0);
+    }
+
+    /// <summary>
+    /// Marks all registered surfaces as "all clear".  Called at guest flip
+    /// (frame boundary) to simulate the hardware behaviour where unwritten
+    /// surfaces read back as the clear value.  Replaces the flip-arm
+    /// heuristic with a per-surface state-machine entry.
+    /// </summary>
+    internal static void MarkAllSurfacesCleared()
+    {
+        foreach (var (addr, meta) in _metaSurfaces)
+        {
+            _metaSurfaces[addr] = meta with { IsCleared = true };
+        }
     }
 
     /// <summary>
