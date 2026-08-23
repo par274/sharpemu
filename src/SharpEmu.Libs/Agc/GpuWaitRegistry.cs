@@ -53,12 +53,19 @@ internal static class GpuWaitRegistry
 
     private static readonly object _gate = new();
     private static readonly Dictionary<ulong, List<WaitingDcb>> _waiters = new();
+    // Soft bound on suspended waiters. Producerless waits never expire through
+    // CollectExpiredRetries / CollectDeadlockBroken, so Demon's Souls-style
+    // boot storms can grow this table without bound (#639). Over the cap we
+    // drop the oldest waiters that never saw a producer — they were already
+    // stuck — without force-resuming (which would corrupt ordering).
+    private const int MaxRegisteredWaiters = 4096;
     // The last value each label producer wrote. Used only by the deadlock
     // breaker: our serial submission parser cannot model two GPU queues running
     // concurrently, so a label written -> reset -> re-waited across queues can
     // cycle forever even though a real producer did signal it. Keyed by (memory,
     // address) so distinct guest processes never alias.
     private static readonly Dictionary<(object, ulong), ulong> _lastProduced = new();
+    private static int _waiterCount;
 
   
     private static object? Canonicalize(object? memory)
@@ -77,13 +84,7 @@ internal static class GpuWaitRegistry
         {
             lock (_gate)
             {
-                var total = 0;
-                foreach (var (_, list) in _waiters)
-                {
-                    total += list.Count;
-                }
-
-                return total;
+                return _waiterCount;
             }
         }
     }
@@ -171,6 +172,11 @@ internal static class GpuWaitRegistry
         waiter.Memory = Canonicalize(waiter.Memory);
         lock (_gate)
         {
+            if (_waiterCount >= MaxRegisteredWaiters)
+            {
+                PruneOrphanedWaitersLocked(keepAtMost: MaxRegisteredWaiters / 2);
+            }
+
             if (!_waiters.TryGetValue(address, out var list))
             {
                 list = new List<WaitingDcb>();
@@ -178,6 +184,7 @@ internal static class GpuWaitRegistry
             }
 
             list.Add(waiter);
+            _waiterCount++;
         }
     }
 
@@ -219,7 +226,7 @@ internal static class GpuWaitRegistry
 
                     woken ??= new List<WaitingDcb>();
                     woken.Add(list[i]);
-                    list.RemoveAt(i);
+                    RemoveWaiterAtLocked(list, i);
                 }
 
                 if (list.Count == 0)
@@ -450,7 +457,7 @@ internal static class GpuWaitRegistry
 
                     expired ??= new List<WaitingDcb>();
                     expired.Add(waiter);
-                    list.RemoveAt(i);
+                    RemoveWaiterAtLocked(list, i);
                 }
 
                 if (list.Count == 0)
@@ -490,7 +497,7 @@ internal static class GpuWaitRegistry
 
                     collected ??= new List<WaitingDcb>();
                     collected.Add(list[index]);
-                    list.RemoveAt(index);
+                    RemoveWaiterAtLocked(list, index);
                 }
 
                 if (list.Count == 0)
@@ -556,6 +563,110 @@ internal static class GpuWaitRegistry
         }
     }
 
+    /// <summary>
+    /// Drops the oldest producerless waiters until at most
+    /// <paramref name="keepAtMost"/> remain. Prefer waiters that never had a
+    /// recorded producer — they cannot be released by CollectDeadlockBroken.
+    /// Must be called under <see cref="_gate"/>.
+    /// </summary>
+    private static void PruneOrphanedWaitersLocked(int keepAtMost)
+    {
+        if (_waiterCount <= keepAtMost)
+        {
+            return;
+        }
+
+        DropOldestWaitersLocked(
+            keepAtMost,
+            orphansOnly: true);
+
+        if (_waiterCount > keepAtMost)
+        {
+            // Still over the cap: every remaining waiter has a producer record
+            // or retry deadline. Prefer a bounded registry over an OOM.
+            DropOldestWaitersLocked(keepAtMost, orphansOnly: false);
+        }
+    }
+
+    private static void DropOldestWaitersLocked(int keepAtMost, bool orphansOnly)
+    {
+        if (_waiterCount <= keepAtMost)
+        {
+            return;
+        }
+
+        var candidates = new List<(ulong Address, int Index, long RegisteredTicks)>(_waiterCount);
+        foreach (var (address, list) in _waiters)
+        {
+            for (var i = 0; i < list.Count; i++)
+            {
+                var waiter = list[i];
+                if (orphansOnly &&
+                    (waiter.Latched ||
+                     waiter.RetryDeadlineTicks != 0 ||
+                     (waiter.Memory is not null &&
+                      _lastProduced.ContainsKey((waiter.Memory, address)))))
+                {
+                    continue;
+                }
+
+                candidates.Add((address, i, waiter.RegisteredTicks));
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        candidates.Sort(static (left, right) => left.RegisteredTicks.CompareTo(right.RegisteredTicks));
+        var toDrop = Math.Min(candidates.Count, _waiterCount - keepAtMost);
+        var dropSet = candidates.GetRange(0, toDrop);
+        // Highest index first per address so earlier removals do not shift later ones.
+        dropSet.Sort(static (left, right) =>
+        {
+            var addressCompare = left.Address.CompareTo(right.Address);
+            return addressCompare != 0
+                ? addressCompare
+                : right.Index.CompareTo(left.Index);
+        });
+
+        List<ulong>? emptied = null;
+        foreach (var (address, index, _) in dropSet)
+        {
+            if (!_waiters.TryGetValue(address, out var list) ||
+                index < 0 ||
+                index >= list.Count)
+            {
+                continue;
+            }
+
+            RemoveWaiterAtLocked(list, index);
+            if (list.Count == 0)
+            {
+                emptied ??= new List<ulong>();
+                emptied.Add(address);
+            }
+        }
+
+        if (emptied is not null)
+        {
+            foreach (var address in emptied)
+            {
+                _waiters.Remove(address);
+            }
+        }
+    }
+
+    private static void RemoveWaiterAtLocked(List<WaitingDcb> list, int index)
+    {
+        list.RemoveAt(index);
+        if (_waiterCount > 0)
+        {
+            _waiterCount--;
+        }
+    }
+
     /// <summary>Records the value a label producer wrote, for the deadlock
     /// breaker. Also latches any already-waiting waiter it satisfies.</summary>
     public static bool RecordProduced(object memory, ulong address, ulong value)
@@ -614,7 +725,7 @@ internal static class GpuWaitRegistry
 
                     broken ??= new List<WaitingDcb>();
                     broken.Add(waiter);
-                    list.RemoveAt(i);
+                    RemoveWaiterAtLocked(list, i);
                 }
 
                 if (list.Count == 0)
@@ -676,6 +787,7 @@ internal static class GpuWaitRegistry
         {
             _waiters.Clear();
             _lastProduced.Clear();
+            _waiterCount = 0;
         }
     }
 }

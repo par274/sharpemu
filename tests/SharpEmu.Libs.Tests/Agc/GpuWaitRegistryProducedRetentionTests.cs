@@ -58,6 +58,25 @@ public sealed class GpuWaitRegistryProducedRetentionTests
         GpuWaitRegistry.Clear();
     }
 
+    [Fact]
+    public void OrphanedWaitersArePrunedWhenTheRegistryHitsItsCap()
+    {
+        GpuWaitRegistry.Clear();
+        var memory = new object();
+
+        // Flood the registry with producerless waits past the hard cap.
+        for (var i = 0; i < 5000; i++)
+        {
+            GpuWaitRegistry.Register(
+                0x7040_0000_0000UL + ((ulong)i * 8),
+                NewWaiter(memory, 0x7040_0000_0000UL + ((ulong)i * 8)));
+        }
+
+        Assert.True(GpuWaitRegistry.Count <= 4096);
+        Assert.True(GpuWaitRegistry.Count > 0);
+        GpuWaitRegistry.Clear();
+    }
+
     private static GpuWaitRegistry.WaitingDcb NewWaiter(object memory, ulong address) => new()
     {
         WaitAddress = address,
