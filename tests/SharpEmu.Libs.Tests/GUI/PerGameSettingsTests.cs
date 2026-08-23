@@ -59,12 +59,31 @@ public sealed class PerGameSettingsTests
     }
 
     [Fact]
+    public void NormalizeFromJson_DiagnosticOverrides_AreCanonical()
+    {
+        const string json = """
+            {
+              "DiagnosticsProfile": "custom",
+              "DiagnosticCategories": ["video", "AgcShaders", "bad"]
+            }
+            """;
+
+        var settings = PerGameSettings.NormalizeFromJson(json);
+
+        Assert.NotNull(settings);
+        Assert.Equal("Custom", settings.DiagnosticsProfile);
+        Assert.Equal(["AgcShaders", "Video"], settings.DiagnosticCategories);
+    }
+
+    [Fact]
     public void RemoveInheritedValues_AllMatchingValues_ProducesEmptySettings()
     {
         var global = new GuiSettings
         {
             LogLevel = "Info",
             ImportTraceLimit = 32,
+            DiagnosticsProfile = "Off",
+            DiagnosticCategories = [],
             StrictDynlibResolution = true,
             LogToFile = false,
             WindowMode = "Borderless",
@@ -80,6 +99,8 @@ public sealed class PerGameSettingsTests
         {
             LogLevel = "info",
             ImportTraceLimit = 32,
+            DiagnosticsProfile = "off",
+            DiagnosticCategories = [],
             StrictDynlibResolution = true,
             LogToFile = false,
             WindowMode = "borderless",
@@ -121,6 +142,26 @@ public sealed class PerGameSettingsTests
         Assert.Equal("2560x1440", perGame.Resolution);
         Assert.False(perGame.VSync);
         Assert.Equal(["SHARPEMU_VK_VALIDATION"], perGame.EnvironmentToggles);
+    }
+
+    [Fact]
+    public void RemoveInheritedValues_DifferentDiagnosticProfile_RemainsOverride()
+    {
+        var global = new GuiSettings
+        {
+            DiagnosticsProfile = "Off",
+            DiagnosticCategories = [],
+        };
+        var perGame = new PerGameSettings
+        {
+            DiagnosticsProfile = "Compatibility",
+            DiagnosticCategories = ["Imports", "AgcUnsupported"],
+        };
+
+        perGame.RemoveInheritedValues(global);
+
+        Assert.Equal("Compatibility", perGame.DiagnosticsProfile);
+        Assert.NotNull(perGame.DiagnosticCategories);
     }
 
     [Fact]

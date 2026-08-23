@@ -39,6 +39,7 @@ public partial class MainWindow
         GameSettingsButton.Click += (_, _) => OpenSelectedGameSettings();
 
         GameLogLevelBox.ItemsSource = _logLevelChoices;
+        WireGameDiagnostics();
         GameWindowModeBox.ItemsSource = _windowModeChoices;
         GameScalingModeBox.ItemsSource = _scalingModeChoices;
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
@@ -196,6 +197,7 @@ public partial class MainWindow
                 effective.LogLevel,
                 "Info");
             GameTraceImportsBox.Value = Math.Clamp(effective.ImportTraceLimit, 0, 4096);
+            ApplyGameDiagnosticSettings(effective);
             GameLogToFileToggle.IsChecked = effective.LogToFile;
             GameWindowModeBox.SelectedItem = FindChoice(
                 _windowModeChoices,
@@ -261,6 +263,9 @@ public partial class MainWindow
         {
             LogLevel = SelectedComboText(GameLogLevelBox, "Info"),
             ImportTraceLimit = (int)(GameTraceImportsBox.Value ?? 0),
+            DiagnosticsProfile = SelectedComboText(GameDiagnosticsProfileBox, "Off"),
+            DiagnosticCategories = SharpEmu.Logging.SharpEmuDiagnostics.CategoryNames(
+                ReadDiagnosticToggles(GameDiagnosticToggles())),
             StrictDynlibResolution = GameStrictToggle.IsChecked == true,
             LogToFile = GameLogToFileToggle.IsChecked == true,
             WindowMode = SelectedComboText(GameWindowModeBox, "Windowed"),

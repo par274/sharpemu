@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Media;
+using SharpEmu.Logging;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -6446,16 +6447,26 @@ public static partial class KernelMemoryCompatExports
             _ = ctx.TryReadUInt64(stackPointer, out returnRip);
         }
 
-        Console.Error.WriteLine(
-            $"[LOADER][TRACE] {operation}: ret=0x{returnRip:X16} len=0x{length:X16} align=0x{alignment:X16} type=0x{memoryType:X8} out=0x{outAddress:X16} selected=0x{selectedAddress:X16} result={result?.ToString() ?? "<pending>"}");
+        var line =
+            $"[LOADER][TRACE] {operation}: ret=0x{returnRip:X16} len=0x{length:X16} align=0x{alignment:X16} type=0x{memoryType:X8} out=0x{outAddress:X16} selected=0x{selectedAddress:X16} result={result?.ToString() ?? "<pending>"}";
+        if (SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.Memory))
+        {
+            SharpEmuDiagnostics.Write(DiagnosticCategory.Memory, line);
+        }
+        else
+        {
+            Console.Error.WriteLine(line);
+        }
     }
 
     // Cached once so the ~8 direct-memory call sites don't each do a
     // GetEnvironmentVariable P/Invoke per operation.
-    private static readonly bool _traceDirectMemory = string.Equals(
+    private static readonly bool _legacyTraceDirectMemory = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_DIRECT_MEMORY"), "1", StringComparison.Ordinal);
 
-    private static bool ShouldTraceDirectMemory() => _traceDirectMemory;
+    private static bool ShouldTraceDirectMemory() =>
+        _legacyTraceDirectMemory ||
+        SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.Memory);
 
     private static bool TryReleaseDirectMemoryRangeLocked(ulong start, ulong length)
     {

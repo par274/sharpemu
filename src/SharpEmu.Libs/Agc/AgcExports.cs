@@ -8,6 +8,7 @@ using SharpEmu.Libs.Gpu;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.Logging;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 
@@ -1219,10 +1220,13 @@ public static partial class AgcExports
         IGuestCompiledShader> _depthOnlyVertexShaderCache = new();
     private static readonly Dictionary<ulong, ulong> _shaderHeadersByCode = new();
     private static readonly ConcurrentDictionary<ulong, byte> _arrayUploadUnsupported = new();
-    private static readonly bool _traceAgc = string.Equals(
+    private static readonly bool _legacyTraceAgc = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"),
         "1",
         StringComparison.Ordinal);
+    private static bool _traceAgc =>
+        _legacyTraceAgc ||
+        SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.AgcPackets);
     // Drop a draw on an undecodable texture descriptor instead of substituting
     // a 1x1 fallback binding. Off by default so a garbage descriptor degrades
     // the pass rather than dropping it (Demon's Souls composite feeders).
@@ -1230,30 +1234,42 @@ public static partial class AgcExports
         Environment.GetEnvironmentVariable("SHARPEMU_STRICT_SHADER_DESCRIPTORS"),
         "1",
         StringComparison.Ordinal);
-    private static readonly bool _traceAgcShader =
-        _traceAgc ||
+    private static readonly bool _legacyTraceAgcShader =
+        _legacyTraceAgc ||
         string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC_SHADER"),
             "1",
             StringComparison.Ordinal);
+    private static bool _traceAgcShader =>
+        _legacyTraceAgcShader ||
+        SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.AgcShaders);
     private static readonly ulong? _traceComputeShaderAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_COMPUTE_SHADER_ADDRESS"));
     private static readonly ulong? _tracePixelShaderAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_PIXEL_SHADER_ADDRESS"));
     private static readonly ulong? _traceRenderTargetAddress = ParseOptionalHexAddress(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_RENDER_TARGET_ADDRESS"));
-    private static readonly bool _traceDraws = string.Equals(
+    private static readonly bool _legacyTraceDraws = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DRAWS"),
         "1",
         StringComparison.Ordinal);
-    private static readonly bool _traceFramePackets = string.Equals(
+    private static bool _traceDraws =>
+        _legacyTraceDraws ||
+        SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.AgcDraws);
+    private static readonly bool _legacyTraceFramePackets = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_FRAME_PACKETS"),
         "1",
         StringComparison.Ordinal);
-    private static readonly bool _traceVertexRanges = string.Equals(
+    private static bool _traceFramePackets =>
+        _legacyTraceFramePackets ||
+        SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.AgcPackets);
+    private static readonly bool _legacyTraceVertexRanges = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_VERTEX_RANGES"),
         "1",
         StringComparison.Ordinal);
+    private static bool _traceVertexRanges =>
+        _legacyTraceVertexRanges ||
+        SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.AgcDraws);
     private static readonly bool _compatibilitySubmitCompletionEvent = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_AGC_SUBMIT_COMPLETION_EVENT"),
         "1",
@@ -2386,7 +2402,7 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        if (ShouldTraceHotPath(ref _packetPayloadTraceCount))
+        if (ShouldTraceHotPath(ref _packetPayloadTraceCount, _traceAgc))
         {
             TraceAgc(
                 $"agc.get_packet_payload out=0x{outputAddress:X16} cmd=0x{commandAddress:X16} " +
@@ -3418,7 +3434,7 @@ public static partial class AgcExports
             }
         }
 
-        if (ShouldTraceHotPath(ref _dcbWriteDataTraceCount))
+        if (ShouldTraceHotPath(ref _dcbWriteDataTraceCount, _traceAgc))
         {
             TraceAgc(
                 $"agc.dcb_write_data buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
@@ -3524,7 +3540,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        if (ShouldTraceHotPath(ref _dcbWaitRegMemTraceCount))
+        if (ShouldTraceHotPath(ref _dcbWaitRegMemTraceCount, _traceAgc))
         {
             TraceAgc(
                 $"agc.dcb_wait_reg_mem buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} " +
@@ -4810,6 +4826,11 @@ public static partial class AgcExports
         bool tracePackets)
     {
         var offset = 0u;
+        var traceUnsupported =
+            tracePackets ||
+            SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.AgcUnsupported);
+        var traceFramePackets = _traceFramePackets;
+        var traceDraws = _traceDraws;
         while (offset < dwordCount)
         {
             var currentAddress = commandAddress + ((ulong)offset * sizeof(uint));
@@ -4868,18 +4889,21 @@ public static partial class AgcExports
 
             var op = (header >> 8) & 0xFFu;
             var register = (header >> 2) & 0x3Fu;
-            if (!KnownPm4Opcodes.Contains(op) && _seenUnknownOpcodes.Add(op))
+            if (traceUnsupported &&
+                !KnownPm4Opcodes.Contains(op) &&
+                _seenUnknownOpcodes.Add(op))
             {
                 TryReadUInt32(ctx, currentAddress + 4, out var unknownPayload0);
                 TryReadUInt32(ctx, currentAddress + 8, out var unknownPayload1);
                 var possibleTarget = ((ulong)(unknownPayload1 & 0xFFFFu) << 32) | unknownPayload0;
-                Console.Error.WriteLine(
+                WriteAgcDiagnostic(
+                    DiagnosticCategory.AgcUnsupported,
                     $"[LOADER][WARN] agc.dcb.unknown_opcode op=0x{op:X2} reg=0x{register:X2} " +
                     $"len={length} addr=0x{currentAddress:X16} queue={state.QueueName} " +
                     $"payload0=0x{unknownPayload0:X8} payload1=0x{unknownPayload1:X8} " +
                     $"possible_target=0x{possibleTarget:X16}");
             }
-            if (_traceFramePackets && ReferenceEquals(state, gpuState.Graphics))
+            if (traceFramePackets && ReferenceEquals(state, gpuState.Graphics))
             {
                 var packetKey = (op, op == ItNop ? register : uint.MaxValue);
                 state.FramePacketCounts[packetKey] =
@@ -4893,7 +4917,7 @@ public static partial class AgcExports
                 TraceSubmittedPacket(ctx, currentAddress, offset, header, length, op, register);
             }
 
-            if (_traceDraws)
+            if (traceDraws)
             {
                 CountSubmittedOpcode(op, register);
             }
@@ -5437,7 +5461,8 @@ public static partial class AgcExports
                     .Select(entry => entry.Key.Register == uint.MaxValue
                         ? $"0x{entry.Key.Op:X2}:{entry.Value}"
                         : $"0x{entry.Key.Op:X2}/r{entry.Key.Register}:{entry.Value}"));
-            Console.Error.WriteLine(
+            WriteAgcDiagnostic(
+                DiagnosticCategory.AgcPackets,
                 $"[FRAMEPKT] flip={flip} submission={state.ActiveSubmissionId} " +
                 $"packets={state.FramePacketCount} draws={state.FrameDrawCount} " +
                 $"dispatches={state.FrameDispatchCount} opcodes=[{opcodes}]");
@@ -5462,7 +5487,8 @@ public static partial class AgcExports
             return;
         }
 
-        Console.Error.WriteLine(
+        WriteAgcDiagnostic(
+            DiagnosticCategory.AgcPackets,
             $"[FRAMEPKT] parse-failure queue={state.QueueName} " +
             $"submission={state.ActiveSubmissionId} offset={offset} " +
             $"address=0x{address:X16} header=0x{header:X8} reason={reason}");
@@ -5474,6 +5500,11 @@ public static partial class AgcExports
         VideoOutExports.DisplayBufferInfo buffer,
         string path)
     {
+        if (!_traceAgcShader)
+        {
+            return;
+        }
+
         lock (_submitTraceGate)
         {
             if (!_tracedDisplayBuffers.Add((handle, index, buffer.Address, path)))
@@ -6423,7 +6454,7 @@ public static partial class AgcExports
             return;
         }
 
-        if (ShouldTraceHotPath(ref _standardDmaTraceCount))
+        if (ShouldTraceHotPath(ref _standardDmaTraceCount, _traceAgcShader))
         {
             TraceAgcShader(
                 $"agc.dma_packet dst=0x{destinationAddress:X16} " +
@@ -7548,7 +7579,8 @@ public static partial class AgcExports
             6 => maskedValue > reference,
             _ => true,
         };
-        if (!tracePacket && (satisfied || !ShouldTraceHotPath(ref _unsatisfiedWaitTraceCount)))
+        if (!tracePacket &&
+            (satisfied || !ShouldTraceHotPath(ref _unsatisfiedWaitTraceCount, _traceAgc)))
         {
             return;
         }
@@ -8083,7 +8115,7 @@ public static partial class AgcExports
         if (TryGetCbColorControlMode(state.CxRegisters, out var cbMode) &&
             IsCbMetadataColorMode(cbMode))
         {
-            if (_traceAgcShader || ShouldTraceHotPath(ref _cbMetadataSkipTraceCount))
+            if (ShouldTraceHotPath(ref _cbMetadataSkipTraceCount, _traceAgcShader))
             {
                 TraceAgcShader(
                     $"agc.cb_metadata_skip seq={drawSequence} mode={cbMode} " +
@@ -8470,7 +8502,7 @@ public static partial class AgcExports
                 }
             }
 
-            if (ShouldTraceHotPath(ref _translatedDrawTraceCount))
+            if (ShouldTraceHotPath(ref _translatedDrawTraceCount, _traceAgcShader))
             {
                 TraceAgcShader(
                     $"agc.shader_draw_seen seq={drawSequence} " +
@@ -13681,8 +13713,16 @@ public static partial class AgcExports
         uint psInputAddr,
         string? translationError = null)
     {
+        var traceShader = _traceAgcShader;
+        var traceUnsupported =
+            SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.AgcUnsupported);
+        if (!traceShader && !traceUnsupported)
+        {
+            return;
+        }
+
         var firstFailure = false;
-        if (!string.IsNullOrEmpty(translationError))
+        if (traceUnsupported && !string.IsNullOrEmpty(translationError))
         {
             lock (_submitTraceGate)
             {
@@ -13692,20 +13732,27 @@ public static partial class AgcExports
         }
 
         if (!firstFailure &&
-            !ShouldTraceHotPath(ref _shaderTranslationMissTraceCount))
+            !ShouldTraceHotPath(ref _shaderTranslationMissTraceCount, traceShader))
         {
             return;
         }
 
-        // Translation failures are compatibility issues, not merely verbose
-        // shader diagnostics. Report each distinct failure once even when AGC
-        // tracing is disabled so normal runs preserve the missing opcode or
-        // unsupported translation reason needed to fix the game.
+        // Compatibility mode reports each distinct translation failure once
+        // without enabling the expensive shader-description path below.
         if (firstFailure)
         {
-            Console.Error.WriteLine(
+            WriteAgcDiagnostic(
+                DiagnosticCategory.AgcUnsupported,
                 $"[COMPAT][SHADER] ps=0x{pixelShaderAddress:X16} " +
                 $"es=0x{exportShaderAddress:X16} error={translationError}");
+        }
+
+        // Compatibility mode records only the unique failure. Detailed shader
+        // description/evaluation is intentionally excluded because it can
+        // compile and inspect bindings on a guest render thread.
+        if (!traceShader)
+        {
+            return;
         }
 
         if ((!hasPixelShader || !hasPsInputEna || !hasPsInputAddr) &&
@@ -15272,8 +15319,13 @@ public static partial class AgcExports
         return true;
     }
 
-    private static bool ShouldTraceHotPath(ref long counter)
+    private static bool ShouldTraceHotPath(ref long counter, bool enabled)
     {
+        if (!enabled)
+        {
+            return false;
+        }
+
         var count = Interlocked.Increment(ref counter);
         return count <= 8 || count % 100_000 == 0;
     }
@@ -15339,7 +15391,9 @@ public static partial class AgcExports
     {
         if (_traceAgc)
         {
-            Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message.ToStringAndClear()}");
+            WriteAgcDiagnostic(
+                DiagnosticCategory.AgcPackets,
+                $"[LOADER][TRACE] t={TraceSeconds()} {message.ToStringAndClear()}");
         }
     }
 
@@ -15350,7 +15404,9 @@ public static partial class AgcExports
             return;
         }
 
-        Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message}");
+        WriteAgcDiagnostic(
+            DiagnosticCategory.AgcPackets,
+            $"[LOADER][TRACE] t={TraceSeconds()} {message}");
     }
 
     private static void TraceAgcShader(
@@ -15358,7 +15414,9 @@ public static partial class AgcExports
     {
         if (_traceAgcShader)
         {
-            Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message.ToStringAndClear()}");
+            WriteAgcDiagnostic(
+                DiagnosticCategory.AgcShaders,
+                $"[LOADER][TRACE] t={TraceSeconds()} {message.ToStringAndClear()}");
         }
     }
 
@@ -15369,7 +15427,23 @@ public static partial class AgcExports
             return;
         }
 
-        Console.Error.WriteLine($"[LOADER][TRACE] t={TraceSeconds()} {message}");
+        WriteAgcDiagnostic(
+            DiagnosticCategory.AgcShaders,
+            $"[LOADER][TRACE] t={TraceSeconds()} {message}");
+    }
+
+    private static void WriteAgcDiagnostic(DiagnosticCategory category, string message)
+    {
+        if (SharpEmuDiagnostics.IsEnabled(category))
+        {
+            SharpEmuDiagnostics.Write(category, message);
+        }
+        else
+        {
+            // Preserve the legacy SHARPEMU_LOG_AGC* switches. New diagnostic
+            // profiles use the bounded asynchronous path above.
+            Console.Error.WriteLine(message);
+        }
     }
 
     private static string FormatShaderDwords(IReadOnlyList<uint> values) =>
@@ -15475,14 +15549,20 @@ public static partial class AgcExports
     private static void TraceCreateShader(ulong destinationAddress, ulong headerAddress, ulong codeAddress, string detail)
     {
         var isOk = string.Equals(detail, "ok", StringComparison.Ordinal);
-        if (isOk &&
-            (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC"), "1", StringComparison.Ordinal) ||
-             !ShouldTraceHotPath(ref _createShaderTraceCount)))
+        var category = isOk
+            ? DiagnosticCategory.AgcPackets
+            : DiagnosticCategory.AgcUnsupported;
+        var enabled = isOk
+            ? _traceAgc
+            : _traceAgc || SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.AgcUnsupported);
+        if (!enabled ||
+            (isOk && !ShouldTraceHotPath(ref _createShaderTraceCount, enabled)))
         {
             return;
         }
 
-        Console.Error.WriteLine(
+        WriteAgcDiagnostic(
+            category,
             $"[LOADER][TRACE] agc.create_shader dst=0x{destinationAddress:X16} header=0x{headerAddress:X16} code=0x{codeAddress:X16} {detail}");
     }
 

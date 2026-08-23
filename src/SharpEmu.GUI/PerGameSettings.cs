@@ -17,6 +17,10 @@ public sealed class PerGameSettings
 
     public int? ImportTraceLimit { get; set; }
 
+    public string? DiagnosticsProfile { get; set; }
+
+    public List<string>? DiagnosticCategories { get; set; }
+
     public bool? StrictDynlibResolution { get; set; }
 
     public bool? LogToFile { get; set; }
@@ -41,6 +45,8 @@ public sealed class PerGameSettings
     public bool IsEmpty =>
         LogLevel is null &&
         ImportTraceLimit is null &&
+        DiagnosticsProfile is null &&
+        DiagnosticCategories is null &&
         StrictDynlibResolution is null &&
         LogToFile is null &&
         WindowMode is null &&
@@ -89,6 +95,19 @@ public sealed class PerGameSettings
             settings.EnvironmentToggles = toggles.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
         }
 
+        if (settings?.DiagnosticsProfile is { } profile)
+        {
+            settings.DiagnosticsProfile = SharpEmu.Logging.SharpEmuDiagnostics
+                .ParseProfile(profile)
+                .ToString();
+        }
+
+        if (settings?.DiagnosticCategories is { } categories)
+        {
+            settings.DiagnosticCategories = SharpEmu.Logging.SharpEmuDiagnostics.CategoryNames(
+                SharpEmu.Logging.SharpEmuDiagnostics.ParseCategories(categories));
+        }
+
         return settings;
     }
 
@@ -106,6 +125,20 @@ public sealed class PerGameSettings
         if (ImportTraceLimit == global.ImportTraceLimit)
         {
             ImportTraceLimit = null;
+        }
+
+        if (string.Equals(
+                DiagnosticsProfile,
+                global.DiagnosticsProfile,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            DiagnosticsProfile = null;
+        }
+
+        if (DiagnosticCategories is { } diagnosticCategories &&
+            DiagnosticCategoriesEqual(diagnosticCategories, global.DiagnosticCategories))
+        {
+            DiagnosticCategories = null;
         }
 
         if (StrictDynlibResolution == global.StrictDynlibResolution)
@@ -204,6 +237,12 @@ public sealed class PerGameSettings
         IEnumerable<string> right) =>
         NormalizeEnvironmentEntries(left).SetEquals(NormalizeEnvironmentEntries(right));
 
+    private static bool DiagnosticCategoriesEqual(
+        IEnumerable<string> left,
+        IEnumerable<string> right) =>
+        SharpEmu.Logging.SharpEmuDiagnostics.ParseCategories(left) ==
+        SharpEmu.Logging.SharpEmuDiagnostics.ParseCategories(right);
+
     private static HashSet<string> NormalizeEnvironmentEntries(IEnumerable<string> entries)
     {
         var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -232,6 +271,8 @@ public sealed class PerGameSettings
 public sealed record EffectiveLaunchSettings(
     string LogLevel,
     int ImportTraceLimit,
+    string DiagnosticsProfile,
+    IReadOnlyList<string> DiagnosticCategories,
     bool StrictDynlibResolution,
     bool LogToFile,
     string WindowMode,
@@ -246,6 +287,8 @@ public sealed record EffectiveLaunchSettings(
     public static EffectiveLaunchSettings Resolve(GuiSettings global, PerGameSettings? perGame) => new(
         perGame?.LogLevel ?? global.LogLevel,
         perGame?.ImportTraceLimit ?? global.ImportTraceLimit,
+        perGame?.DiagnosticsProfile ?? global.DiagnosticsProfile,
+        perGame?.DiagnosticCategories ?? global.DiagnosticCategories,
         perGame?.StrictDynlibResolution ?? global.StrictDynlibResolution,
         perGame?.LogToFile ?? global.LogToFile,
         perGame?.WindowMode ?? global.WindowMode,

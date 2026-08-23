@@ -12,6 +12,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace SharpEmu.Libs.VideoOut;
@@ -78,10 +79,13 @@ public static class VideoOutExports
     private static string _applicationWindowTitle = "VideoOut";
     private static string _selectedGpuName = string.Empty;
     private static string _applicationTitleId = "UNKNOWN";
-    private static readonly bool _logFrameRate = string.Equals(
+    private static readonly bool _legacyLogFrameRate = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
         "1",
         StringComparison.Ordinal);
+    private static bool _logFrameRate =>
+        _legacyLogFrameRate ||
+        SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.Video);
     private static long _frameRateWindowStart = Stopwatch.GetTimestamp();
     private static long _submittedFrameCount;
     private static int _diagnosticFlipCount;
@@ -2108,22 +2112,61 @@ public static class VideoOutExports
         return true;
     }
 
-    private static readonly bool _traceVideoOut = string.Equals(
+    private static readonly bool _legacyTraceVideoOut = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT"),
         "1",
         StringComparison.Ordinal);
+    private static bool _traceVideoOut =>
+        _legacyTraceVideoOut ||
+        SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.Video);
     private static readonly bool _dumpVideoOut = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_DUMP_VIDEOOUT"),
         "1",
         StringComparison.Ordinal);
 
-    private static void TraceVideoOut(string message)
+    [InterpolatedStringHandler]
+    private ref struct VideoOutTraceHandler
     {
-        if (!_traceVideoOut)
+        private DefaultInterpolatedStringHandler _inner;
+
+        public VideoOutTraceHandler(int literalLength, int formattedCount, out bool shouldAppend)
+        {
+            Enabled = _traceVideoOut;
+            shouldAppend = Enabled;
+            _inner = Enabled
+                ? new DefaultInterpolatedStringHandler(literalLength, formattedCount)
+                : default;
+        }
+
+        public bool Enabled { get; }
+
+        public void AppendLiteral(string value) => _inner.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) =>
+            _inner.AppendFormatted(value, format);
+
+        public string ToStringAndClear() =>
+            Enabled ? _inner.ToStringAndClear() : string.Empty;
+    }
+
+    private static void TraceVideoOut(
+        [InterpolatedStringHandlerArgument] ref VideoOutTraceHandler message)
+    {
+        if (!message.Enabled)
         {
             return;
         }
 
-        Console.Error.WriteLine($"[LOADER][TRACE] {message}");
+        var line = $"[LOADER][TRACE] {message.ToStringAndClear()}";
+        if (SharpEmuDiagnostics.IsEnabled(DiagnosticCategory.Video))
+        {
+            SharpEmuDiagnostics.Write(DiagnosticCategory.Video, line);
+        }
+        else
+        {
+            Console.Error.WriteLine(line);
+        }
     }
 }
