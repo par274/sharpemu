@@ -3200,7 +3200,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				{
 					nint address = (nint)(ptr + i);
 					int remainingBytes = scanBytes - i;
-					if (TryPatchTlsLoadInstruction(address, ptr + i, remainingBytes))
+					if (TryPatchTlsLoadInstruction(address, ptr + i, remainingBytes, i))
 					{
 						num3++;
 					}
@@ -3343,9 +3343,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
-	private unsafe bool TryPatchTlsLoadInstruction(nint address, byte* source, int availableLength)
+	private unsafe bool TryPatchTlsLoadInstruction(nint address, byte* source, int availableLength, int regionOffset)
 	{
 		if (availableLength < MinTlsPatchInstructionBytes)
+		{
+			return false;
+		}
+
+		// A bare 0xEB (JMP rel8) always owns a disp8 after it, so it can
+		// never be the last byte of a valid instruction. If it precedes our
+		// candidate, we're mid-instruction: reject and let the scan retry.
+		if (regionOffset >= 1 && source[-1] == 0xEB)
 		{
 			return false;
 		}
