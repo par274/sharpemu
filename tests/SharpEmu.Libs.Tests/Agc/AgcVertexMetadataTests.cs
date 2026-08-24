@@ -74,7 +74,7 @@ public sealed class AgcVertexMetadataTests
     }
 
     [Fact]
-    public void MergeVertexInputs_OverlaysFormatWithoutRebasingCapture()
+    public void MergeVertexInputs_OverlaysLayoutWithoutRebasingCapture()
     {
         const ulong memoryBase = 0x1_0000_0000;
         var memory = new FakeCpuMemory(memoryBase, 0x2000);
@@ -114,7 +114,7 @@ public sealed class AgcVertexMetadataTests
                 NumberFormat: 7,
                 BaseAddress: sharpBase,
                 Stride: 16,
-                OffsetBytes: 0,
+                OffsetBytes: 12,
                 Data: data,
                 DataLength: data.Length,
                 DataPooled: false),
@@ -133,6 +133,137 @@ public sealed class AgcVertexMetadataTests
         Assert.Equal(0u, merged[0].NumberFormat); // Unorm
         Assert.Equal(12u, merged[0].OffsetBytes);
         Assert.Equal(0x40u, merged[0].Pc);
+    }
+
+    [Fact]
+    public void MergeVertexInputs_MetadataCorrectsStaleStride40()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        var memory = new FakeCpuMemory(memoryBase, 0x2000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        const ulong semanticsAddress = memoryBase + 0x100;
+        const ulong attribTable = memoryBase + 0x200;
+        const ulong bufferTable = memoryBase + 0x300;
+        const ulong sharpBase = memoryBase + 0x800;
+
+        WriteUInt32(memory, semanticsAddress, 0u | (0u << 8) | (4u << 16));
+        WriteUInt32(memory, attribTable, 0u | (56u << 5) | (12u << 14));
+        WriteUInt32(memory, bufferTable, (uint)(sharpBase & 0xFFFF_FFFFUL));
+        WriteUInt32(memory, bufferTable + 4, (uint)(sharpBase >> 32) | (40u << 16));
+
+        var scalars = new uint[32];
+        scalars[4] = (uint)(attribTable & 0xFFFF_FFFFUL);
+        scalars[5] = (uint)(attribTable >> 32);
+        scalars[6] = (uint)(bufferTable & 0xFFFF_FFFFUL);
+        scalars[7] = (uint)(bufferTable >> 32);
+        var tables = new AgcVertexMetadata.VertexTableRegisters(
+            VertexBufferReg: 6,
+            VertexAttribReg: 4,
+            InputSemanticsCount: 1,
+            InputSemanticsAddress: semanticsAddress);
+
+        var data = new byte[160];
+        var discovered = new[]
+        {
+            new Gen5VertexInputBinding(
+                0x40, 0, 4, 14, 7, sharpBase, 32, 12, data, data.Length, false),
+        };
+
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            ctx,
+            scalars,
+            tables,
+            discovered);
+
+        Assert.Single(merged);
+        Assert.Equal(40u, merged[0].Stride);
+        Assert.Equal(12u, merged[0].OffsetBytes);
+        Assert.Equal(sharpBase, merged[0].BaseAddress);
+        Assert.Same(data, merged[0].Data);
+        Assert.Equal(0x40u, merged[0].Pc);
+    }
+
+    [Fact]
+    public void MergeVertexInputs_ConflictingMetadataOffsetDoesNotMoveBinding()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        var memory = new FakeCpuMemory(memoryBase, 0x2000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        const ulong semanticsAddress = memoryBase + 0x100;
+        const ulong attribTable = memoryBase + 0x200;
+        const ulong bufferTable = memoryBase + 0x300;
+        const ulong sharpBase = memoryBase + 0x800;
+
+        WriteUInt32(memory, semanticsAddress, 0u | (0u << 8) | (4u << 16));
+        WriteUInt32(memory, attribTable, 0u | (56u << 5) | (12u << 14));
+        WriteUInt32(memory, bufferTable, (uint)(sharpBase & 0xFFFF_FFFFUL));
+        WriteUInt32(memory, bufferTable + 4, (uint)(sharpBase >> 32) | (40u << 16));
+
+        var scalars = new uint[32];
+        scalars[4] = (uint)(attribTable & 0xFFFF_FFFFUL);
+        scalars[5] = (uint)(attribTable >> 32);
+        scalars[6] = (uint)(bufferTable & 0xFFFF_FFFFUL);
+        scalars[7] = (uint)(bufferTable >> 32);
+        var tables = new AgcVertexMetadata.VertexTableRegisters(
+            VertexBufferReg: 6,
+            VertexAttribReg: 4,
+            InputSemanticsCount: 1,
+            InputSemanticsAddress: semanticsAddress);
+
+        var original = new Gen5VertexInputBinding(
+            0x40, 0, 4, 14, 7, sharpBase, 32, 0, new byte[160], 160, false);
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            ctx,
+            scalars,
+            tables,
+            [original]);
+
+        Assert.Same(original, Assert.Single(merged));
+    }
+
+    [Fact]
+    public void MergeVertexInputs_UsesOffsetRelativeToCapturedBase()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        var memory = new FakeCpuMemory(memoryBase, 0x2000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        const ulong semanticsAddress = memoryBase + 0x100;
+        const ulong attribTable = memoryBase + 0x200;
+        const ulong bufferTable = memoryBase + 0x300;
+        const ulong capturedBase = memoryBase + 0x7F8;
+        const ulong sharpBase = memoryBase + 0x800;
+
+        WriteUInt32(memory, semanticsAddress, 0u | (0u << 8) | (4u << 16));
+        WriteUInt32(memory, attribTable, 0u | (56u << 5) | (12u << 14));
+        WriteUInt32(memory, bufferTable, (uint)(sharpBase & 0xFFFF_FFFFUL));
+        WriteUInt32(memory, bufferTable + 4, (uint)(sharpBase >> 32) | (40u << 16));
+
+        var scalars = new uint[32];
+        scalars[4] = (uint)(attribTable & 0xFFFF_FFFFUL);
+        scalars[5] = (uint)(attribTable >> 32);
+        scalars[6] = (uint)(bufferTable & 0xFFFF_FFFFUL);
+        scalars[7] = (uint)(bufferTable >> 32);
+        var tables = new AgcVertexMetadata.VertexTableRegisters(
+            VertexBufferReg: 6,
+            VertexAttribReg: 4,
+            InputSemanticsCount: 1,
+            InputSemanticsAddress: semanticsAddress);
+
+        var data = new byte[160];
+        var merged = AgcVertexMetadata.MergeVertexInputsFromMetadata(
+            ctx,
+            scalars,
+            tables,
+            [new Gen5VertexInputBinding(
+                0x40, 0, 4, 14, 7, capturedBase, 32, 20, data, data.Length, false)]);
+
+        Assert.Equal(40u, Assert.Single(merged).Stride);
+        Assert.Equal(20u, merged[0].OffsetBytes);
+        Assert.Equal(capturedBase, merged[0].BaseAddress);
+        Assert.Same(data, merged[0].Data);
     }
 
     [Fact]
