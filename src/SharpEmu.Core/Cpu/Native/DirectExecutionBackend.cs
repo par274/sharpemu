@@ -8,6 +8,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Iced.Intel;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Cpu.Debugging;
 using SharpEmu.Core.Loader;
@@ -3350,10 +3351,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return false;
 		}
 
-		// A bare 0xEB (JMP rel8) always owns a disp8 after it, so it can
-		// never be the last byte of a valid instruction. If it precedes our
-		// candidate, we're mid-instruction: reject and let the scan retry.
-		if (regionOffset >= 1 && source[-1] == 0xEB)
+		var region = new ReadOnlySpan<byte>(source - regionOffset, regionOffset + availableLength);
+		if (IsTlsLoadCandidateInsideShortJump(region, regionOffset))
 		{
 			return false;
 		}
@@ -3408,6 +3407,85 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 
 		return PatchTlsLoadInstruction(address, instructionLength, destinationRegister);
+	}
+
+	internal static bool IsTlsLoadCandidateInsideShortJump(ReadOnlySpan<byte> region, int candidateOffset)
+	{
+		if ((uint)candidateOffset >= (uint)region.Length ||
+			candidateOffset < 1 ||
+			region[candidateOffset - 1] != 0xEB)
+		{
+			return false;
+		}
+
+		// The byte before the candidate can be either a JMP rel8 opcode or
+		// the rel8 operand of an instruction that ends at the candidate.
+		// Dreaming Sarah has `75 EB 66 66 66 64 ...`: EB is the backward
+		// displacement of JNZ, so the first 66 is the real TLS boundary.
+		// Preserve that boundary while still rejecting GTA V's `EB 66 66
+		// 64 ...`, where the first 66 belongs to the JMP instruction.
+		if (IsRel8ControlFlowInstructionEndingAtCandidate(region, candidateOffset))
+		{
+			return false;
+		}
+
+		return true;
+	}
+
+	private static bool IsRel8ControlFlowInstructionEndingAtCandidate(
+		ReadOnlySpan<byte> region,
+		int candidateOffset)
+	{
+		if (candidateOffset < 2)
+		{
+			return false;
+		}
+
+		var branchOffset = candidateOffset - 2;
+		var opcode = region[branchOffset];
+		if (!((opcode >= 0x70 && opcode <= 0x7F) ||
+			opcode is >= 0xE0 and <= 0xE3 ||
+			opcode == 0xEB))
+		{
+			return false;
+		}
+
+		var branchTarget = candidateOffset + (sbyte)region[candidateOffset - 1];
+		if (branchTarget < 0 || branchTarget >= branchOffset)
+		{
+			return false;
+		}
+
+		// A byte pair that merely looks like Jcc/LOOP/JMP is not sufficient:
+		// decode forward from its backward target and require the stream to
+		// land exactly on the proposed branch. This makes the exception depend
+		// on an actual instruction boundary instead of another adjacent-byte
+		// guess.
+		var decoder = Decoder.Create(
+			64,
+			new ByteArrayCodeReader(region[branchTarget..candidateOffset].ToArray()));
+		decoder.IP = (ulong)branchTarget;
+		while (decoder.IP < (ulong)candidateOffset)
+		{
+			var instructionOffset = (int)decoder.IP;
+			decoder.Decode(out var instruction);
+			if (instruction.Code == Code.INVALID || instruction.Length <= 0)
+			{
+				return false;
+			}
+
+			if (instructionOffset == branchOffset)
+			{
+				return instruction.Length == 2 && decoder.IP == (ulong)candidateOffset;
+			}
+
+			if (decoder.IP > (ulong)branchOffset)
+			{
+				return false;
+			}
+		}
+
+		return false;
 	}
 
 	private unsafe bool PatchTlsLoadInstruction(nint address, int instructionLength, int destinationRegister)
