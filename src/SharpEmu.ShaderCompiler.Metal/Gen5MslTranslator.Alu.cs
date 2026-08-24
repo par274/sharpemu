@@ -144,11 +144,35 @@ public static partial class Gen5MslTranslator
 
                 // ---- float arithmetic ----
                 "VAddF32" => FloatResult(instruction, $"{F(instruction, 0)} + {F(instruction, 1)}"),
+                "VAddF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"{F16(instruction, 0)} + {F16(instruction, 1)}"),
                 "VSubF32" => FloatResult(instruction, $"{F(instruction, 0)} - {F(instruction, 1)}"),
                 "VSubrevF32" => FloatResult(instruction, $"{F(instruction, 1)} - {F(instruction, 0)}"),
+                "VSubF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"{F16(instruction, 0)} - {F16(instruction, 1)}"),
+                "VSubrevF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"{F16(instruction, 1)} - {F16(instruction, 0)}"),
                 "VMulF32" => FloatResult(instruction, $"{F(instruction, 0)} * {F(instruction, 1)}"),
+                "VMulF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"{F16(instruction, 0)} * {F16(instruction, 1)}"),
                 "VMinF32" => FloatResult(instruction, $"fmin({F(instruction, 0)}, {F(instruction, 1)})"),
                 "VMaxF32" => FloatResult(instruction, $"fmax({F(instruction, 0)}, {F(instruction, 1)})"),
+                "VMinF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"fmin({F16(instruction, 0)}, {F16(instruction, 1)})"),
+                "VMaxF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"fmax({F16(instruction, 0)}, {F16(instruction, 1)})"),
                 // The decoder normalizes mk/ak literal placement, so every MAD/FMA
                 // form is fma(src0, src1, src2) exactly like the SPIR-V translator.
                 "VFmaF32" or "VMadF32" or "VMadAkF32" or "VMadMkF32" or "VFmaAkF32" or "VFmaMkF32" =>
@@ -578,23 +602,46 @@ public static partial class Gen5MslTranslator
             {
                 condition = EmitCompareClass(instruction);
             }
-            else if (opcode is "VCmpTruF32" or "VCmpxTruF32" or "VCmpTI32" or "VCmpTU32")
+            else if (opcode is
+                     "VCmpTruF32" or "VCmpxTruF32" or
+                     "VCmpTruF16" or "VCmpxTruF16" or
+                     "VCmpTI32" or "VCmpTU32")
             {
                 condition = "true";
             }
-            else if (opcode is "VCmpFF32" or "VCmpxFF32" or "VCmpFI32" or "VCmpFU32")
+            else if (opcode is
+                     "VCmpFF32" or "VCmpxFF32" or
+                     "VCmpFF16" or "VCmpxFF16" or
+                     "VCmpFI32" or "VCmpFU32")
             {
                 condition = "false";
             }
-            else if (opcode is "VCmpOF32" or "VCmpxOF32")
+            else if (opcode is
+                     "VCmpOF32" or "VCmpxOF32" or
+                     "VCmpOF16" or "VCmpxOF16")
             {
-                condition = $"(!isnan({F(instruction, 0)}) && !isnan({F(instruction, 1)}))";
+                var left = opcode.EndsWith("F16", StringComparison.Ordinal)
+                    ? F16(instruction, 0)
+                    : F(instruction, 0);
+                var right = opcode.EndsWith("F16", StringComparison.Ordinal)
+                    ? F16(instruction, 1)
+                    : F(instruction, 1);
+                condition = $"(!isnan({left}) && !isnan({right}))";
             }
-            else if (opcode is "VCmpUF32" or "VCmpxUF32")
+            else if (opcode is
+                     "VCmpUF32" or "VCmpxUF32" or
+                     "VCmpUF16" or "VCmpxUF16")
             {
-                condition = $"(isnan({F(instruction, 0)}) || isnan({F(instruction, 1)}))";
+                var left = opcode.EndsWith("F16", StringComparison.Ordinal)
+                    ? F16(instruction, 0)
+                    : F(instruction, 0);
+                var right = opcode.EndsWith("F16", StringComparison.Ordinal)
+                    ? F16(instruction, 1)
+                    : F(instruction, 1);
+                condition = $"(isnan({left}) || isnan({right}))";
             }
-            else if (opcode.EndsWith("F32", StringComparison.Ordinal))
+            else if (opcode.EndsWith("F32", StringComparison.Ordinal) ||
+                     opcode.EndsWith("F16", StringComparison.Ordinal))
             {
                 // Ordered compares are the plain C operators (false on NaN);
                 // the Nxx forms are their unordered negations (true on NaN).
@@ -620,7 +667,13 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                var comparison = $"({F(instruction, 0)} {op} {F(instruction, 1)})";
+                var left = opcode.EndsWith("F16", StringComparison.Ordinal)
+                    ? F16(instruction, 0)
+                    : F(instruction, 0);
+                var right = opcode.EndsWith("F16", StringComparison.Ordinal)
+                    ? F16(instruction, 1)
+                    : F(instruction, 1);
+                var comparison = $"({left} {op} {right})";
                 condition = unordered ? $"(!{comparison})" : comparison;
             }
             else
@@ -1568,6 +1621,80 @@ public static partial class Gen5MslTranslator
             }
 
             return expression;
+        }
+
+        /// <summary>Reads the selected 16-bit half as a widened float.</summary>
+        private string F16(Gen5ShaderInstruction instruction, int sourceIndex)
+        {
+            var operand = instruction.Sources[sourceIndex];
+            string expression;
+            if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                Gen5InlineConstants.TryDecode(operand.Value, out var inline))
+            {
+                expression = operand.Value switch
+                {
+                    >= 128 and <= 192 => $"{operand.Value - 128}.0f",
+                    >= 193 and <= 208 => $"(-{operand.Value - 192}.0f)",
+                    _ => AsFloat(FormatUInt(inline)),
+                };
+            }
+            else
+            {
+                var raw = RawSource(
+                    instruction,
+                    sourceIndex,
+                    applySdwaIntegerModifiers: false);
+                var shift = instruction.Control is Gen5Vop3Control control &&
+                    (control.OperandSelect & (1u << sourceIndex)) != 0
+                        ? 16
+                        : 0;
+                expression =
+                    $"(float)as_type<half>((ushort)((({raw}) >> {shift}) & 0xFFFFu))";
+            }
+
+            var (absoluteMask, negateMask) = instruction.Control switch
+            {
+                Gen5Vop3Control control => (control.AbsoluteMask, control.NegateMask),
+                Gen5SdwaControl control => (control.AbsoluteMask, control.NegateMask),
+                Gen5DppControl control => (control.AbsoluteMask, control.NegateMask),
+                _ => (0u, 0u),
+            };
+            if ((absoluteMask & (1u << sourceIndex)) != 0)
+            {
+                expression = $"fabs({expression})";
+            }
+
+            if ((negateMask & (1u << sourceIndex)) != 0)
+            {
+                expression = $"(-{expression})";
+            }
+
+            return expression;
+        }
+
+        /// <summary>Rounds to f16 and preserves the unselected VGPR half.</summary>
+        private string Float16Result(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            string expression)
+        {
+            var control = instruction.Control as Gen5Vop3Control;
+            expression = (control?.OutputModifier ?? 0) switch
+            {
+                1 => $"(({expression}) * 2.0f)",
+                2 => $"(({expression}) * 4.0f)",
+                3 => $"(({expression}) * 0.5f)",
+                _ => expression,
+            };
+            if (control?.Clamp == true)
+            {
+                expression = $"clamp({expression}, 0.0f, 1.0f)";
+            }
+
+            var packed = $"(uint)as_type<ushort>(half({expression}))";
+            return ((control?.OperandSelect ?? 0) & 8) != 0
+                ? $"((v[{destination}] & 0x0000FFFFu) | (({packed}) << 16))"
+                : $"((v[{destination}] & 0xFFFF0000u) | ({packed}))";
         }
 
         /// <summary>

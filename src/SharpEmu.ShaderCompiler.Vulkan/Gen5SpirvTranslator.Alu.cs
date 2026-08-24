@@ -340,20 +340,42 @@ public static partial class Gen5SpirvTranslator
                 case "VAddF32":
                     result = EmitFloatBinary(instruction, SpirvOp.FAdd);
                     break;
+                case "VAddF16":
+                    result = EmitFloat16Binary(instruction, destination, SpirvOp.FAdd);
+                    break;
                 case "VSubF32":
                     result = EmitFloatBinary(instruction, SpirvOp.FSub);
                     break;
                 case "VSubrevF32":
                     result = EmitFloatBinary(instruction, SpirvOp.FSub, reverse: true);
                     break;
+                case "VSubF16":
+                    result = EmitFloat16Binary(instruction, destination, SpirvOp.FSub);
+                    break;
+                case "VSubrevF16":
+                    result = EmitFloat16Binary(
+                        instruction,
+                        destination,
+                        SpirvOp.FSub,
+                        reverse: true);
+                    break;
                 case "VMulF32":
                     result = EmitFloatBinary(instruction, SpirvOp.FMul);
+                    break;
+                case "VMulF16":
+                    result = EmitFloat16Binary(instruction, destination, SpirvOp.FMul);
                     break;
                 case "VMinF32":
                     result = EmitFloatExtBinary(instruction, 37);
                     break;
                 case "VMaxF32":
                     result = EmitFloatExtBinary(instruction, 40);
+                    break;
+                case "VMinF16":
+                    result = EmitFloat16ExtBinary(instruction, destination, 37);
+                    break;
+                case "VMaxF16":
+                    result = EmitFloat16ExtBinary(instruction, destination, 40);
                     break;
                 case "VMadF32":
                 case "VFmaF32":
@@ -1609,28 +1631,71 @@ public static partial class Gen5SpirvTranslator
                     condition,
                     SignedClass(0x020, 0x040, zero));
             }
-            else if (opcode is "VCmpFF32" or "VCmpxFF32" or "VCmpFI32" or "VCmpFU32")
+            else if (opcode is
+                     "VCmpFF32" or "VCmpxFF32" or
+                     "VCmpFF16" or "VCmpxFF16" or
+                     "VCmpFI32" or "VCmpFU32")
             {
                 condition = _module.ConstantBool(false);
             }
-            else if (opcode is "VCmpTruF32" or "VCmpxTruF32" or "VCmpTI32" or "VCmpTU32")
+            else if (opcode is
+                     "VCmpTruF32" or "VCmpxTruF32" or
+                     "VCmpTruF16" or "VCmpxTruF16" or
+                     "VCmpTI32" or "VCmpTU32")
             {
                 condition = _module.ConstantBool(true);
             }
             else if (opcode is
                      "VCmpOF32" or "VCmpxOF32" or
-                     "VCmpUF32" or "VCmpxUF32")
+                     "VCmpUF32" or "VCmpxUF32" or
+                     "VCmpOF16" or "VCmpxOF16" or
+                     "VCmpUF16" or "VCmpxUF16")
             {
-                var left = GetFloatSource(instruction, 0);
-                var right = GetFloatSource(instruction, 1);
+                var isHalf = opcode.EndsWith("F16", StringComparison.Ordinal);
+                var left = isHalf
+                    ? GetFloat16Source(instruction, 0)
+                    : GetFloatSource(instruction, 0);
+                var right = isHalf
+                    ? GetFloat16Source(instruction, 1)
+                    : GetFloatSource(instruction, 1);
                 var unordered = _module.AddInstruction(
                     SpirvOp.LogicalOr,
                     _boolType,
                     _module.AddInstruction(SpirvOp.IsNan, _boolType, left),
                     _module.AddInstruction(SpirvOp.IsNan, _boolType, right));
-                condition = opcode is "VCmpUF32" or "VCmpxUF32"
+                condition = opcode is
+                    "VCmpUF32" or "VCmpxUF32" or
+                    "VCmpUF16" or "VCmpxUF16"
                     ? unordered
                     : _module.AddInstruction(SpirvOp.LogicalNot, _boolType, unordered);
+            }
+            else if (opcode.EndsWith("F16", StringComparison.Ordinal))
+            {
+                var left = GetFloat16Source(instruction, 0);
+                var right = GetFloat16Source(instruction, 1);
+                var operation = opcode switch
+                {
+                    "VCmpLtF16" or "VCmpxLtF16" => SpirvOp.FOrdLessThan,
+                    "VCmpEqF16" or "VCmpxEqF16" => SpirvOp.FOrdEqual,
+                    "VCmpLeF16" or "VCmpxLeF16" => SpirvOp.FOrdLessThanEqual,
+                    "VCmpGtF16" or "VCmpxGtF16" => SpirvOp.FOrdGreaterThan,
+                    "VCmpLgF16" or "VCmpxLgF16" => SpirvOp.FOrdNotEqual,
+                    "VCmpGeF16" or "VCmpxGeF16" => SpirvOp.FOrdGreaterThanEqual,
+                    "VCmpNeqF16" or "VCmpxNeqF16" => SpirvOp.FUnordNotEqual,
+                    "VCmpNltF16" or "VCmpxNltF16" => SpirvOp.FUnordGreaterThanEqual,
+                    "VCmpNleF16" or "VCmpxNleF16" => SpirvOp.FUnordGreaterThan,
+                    "VCmpNgtF16" or "VCmpxNgtF16" => SpirvOp.FUnordLessThanEqual,
+                    "VCmpNgeF16" or "VCmpxNgeF16" => SpirvOp.FUnordLessThan,
+                    "VCmpNlgF16" or "VCmpxNlgF16" => SpirvOp.FUnordEqual,
+                    _ => SpirvOp.Nop,
+                };
+                if (operation == SpirvOp.Nop)
+                {
+                    error = $"unsupported half compare {opcode}";
+                    return false;
+                }
+
+                condition = _module.AddInstruction(operation, _boolType, left, right);
             }
             else if (opcode is not ("VCmpClassF32" or "VCmpxClassF32") &&
                      opcode.EndsWith("F32", StringComparison.Ordinal))
@@ -3108,6 +3173,70 @@ public static partial class Gen5SpirvTranslator
                     sourceAllowsWrite));
         }
 
+        private uint GetFloat16Source(
+            Gen5ShaderInstruction instruction,
+            int sourceIndex)
+        {
+            var operand = instruction.Sources[sourceIndex];
+            uint value;
+            if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                operand.Value is >= 128 and <= 192)
+            {
+                value = Float(operand.Value - 128);
+            }
+            else if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                     operand.Value is >= 193 and <= 208)
+            {
+                value = Float(-(operand.Value - 192));
+            }
+            else if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                     Gen5InlineConstants.TryDecode(operand.Value, out var inline))
+            {
+                value = Bitcast(_floatType, UInt(inline));
+            }
+            else
+            {
+                var raw = GetRawSource(
+                    instruction,
+                    sourceIndex,
+                    applySdwaIntegerModifiers: false);
+                if (instruction.Control is Gen5Vop3Control control &&
+                    (control.OperandSelect & (1u << sourceIndex)) != 0)
+                {
+                    raw = ShiftRightLogical(raw, UInt(16));
+                }
+
+                value = Bitcast(_floatType, EmitHalfToFloat(raw));
+            }
+
+            uint absoluteMask = 0;
+            uint negateMask = 0;
+            switch (instruction.Control)
+            {
+                case Gen5Vop3Control control:
+                    absoluteMask = control.AbsoluteMask;
+                    negateMask = control.NegateMask;
+                    break;
+                case Gen5SdwaControl control:
+                    absoluteMask = control.AbsoluteMask;
+                    negateMask = control.NegateMask;
+                    break;
+                case Gen5DppControl control:
+                    absoluteMask = control.AbsoluteMask;
+                    negateMask = control.NegateMask;
+                    break;
+            }
+
+            if ((absoluteMask & (1u << sourceIndex)) != 0)
+            {
+                value = Ext(4, _floatType, value);
+            }
+
+            return (negateMask & (1u << sourceIndex)) != 0
+                ? _module.AddInstruction(SpirvOp.FNegate, _floatType, value)
+                : value;
+        }
+
         private uint GetFloatSource(
             Gen5ShaderInstruction instruction,
             int sourceIndex)
@@ -3231,6 +3360,33 @@ public static partial class Gen5SpirvTranslator
                 register + 1,
                 _module.AddInstruction(SpirvOp.UConvert, _uintType, high));
         }
+
+        private uint EmitFloat16Binary(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            SpirvOp operation,
+            bool reverse = false)
+        {
+            var left = GetFloat16Source(instruction, reverse ? 1 : 0);
+            var right = GetFloat16Source(instruction, reverse ? 0 : 1);
+            return EmitFloat16Result(
+                instruction,
+                destination,
+                _module.AddInstruction(operation, _floatType, left, right));
+        }
+
+        private uint EmitFloat16ExtBinary(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            uint operation) =>
+            EmitFloat16Result(
+                instruction,
+                destination,
+                Ext(
+                    operation,
+                    _floatType,
+                    GetFloat16Source(instruction, 0),
+                    GetFloat16Source(instruction, 1)));
 
         private uint EmitFloatBinary(
             Gen5ShaderInstruction instruction,
@@ -3751,6 +3907,35 @@ public static partial class Gen5SpirvTranslator
                 sourceActive,
                 shuffled,
                 UInt(0));
+        }
+
+        private uint EmitFloat16Result(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            uint value)
+        {
+            var control = instruction.Control as Gen5Vop3Control;
+            value = (control?.OutputModifier ?? 0) switch
+            {
+                1 => _module.AddInstruction(SpirvOp.FMul, _floatType, value, Float(2)),
+                2 => _module.AddInstruction(SpirvOp.FMul, _floatType, value, Float(4)),
+                3 => _module.AddInstruction(SpirvOp.FMul, _floatType, value, Float(0.5f)),
+                _ => value,
+            };
+            if (control?.Clamp == true)
+            {
+                value = Ext(43, _floatType, value, Float(0), Float(1));
+            }
+
+            var half = EmitFloatToHalf(Bitcast(_uintType, value));
+            var current = LoadV(destination);
+            return ((control?.OperandSelect ?? 0) & 8) != 0
+                ? BitwiseOr(
+                    BitwiseAnd(current, UInt(0x0000_FFFF)),
+                    ShiftLeftLogical(half, UInt(16)))
+                : BitwiseOr(
+                    BitwiseAnd(current, UInt(0xFFFF_0000)),
+                    half);
         }
 
         private uint EmitFloatResult(
