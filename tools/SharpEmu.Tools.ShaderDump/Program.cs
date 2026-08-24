@@ -17,7 +17,9 @@
 // failure that must stay loud. Any unexpected outcome makes the tool exit
 // non-zero, so it can gate scripts/CI.
 //
-// Usage: SharpEmu.Tools.ShaderDump [output-directory]
+// Usage:
+//   SharpEmu.Tools.ShaderDump [output-directory]
+//   SharpEmu.Tools.ShaderDump --inspect <shader.bin> [byte-count]
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
@@ -25,6 +27,76 @@ using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 
 const ulong ProgramAddress = 0x100000;
+
+if (args.Length >= 1 && string.Equals(args[0], "--inspect", StringComparison.Ordinal))
+{
+    if (args.Length is < 2 or > 3)
+    {
+        Console.Error.WriteLine(
+            "Usage: SharpEmu.Tools.ShaderDump --inspect <shader.bin> [byte-count]");
+        Environment.ExitCode = 2;
+        return;
+    }
+
+    var inputPath = Path.GetFullPath(args[1]);
+    var input = File.ReadAllBytes(inputPath);
+    var requestedByteCount = input.Length;
+    if (args.Length >= 3)
+    {
+        var value = args[2];
+        requestedByteCount = value.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            ? Convert.ToInt32(value[2..], 16)
+            : Convert.ToInt32(value, 10);
+    }
+
+    if (requestedByteCount <= 0 ||
+        requestedByteCount > input.Length ||
+        requestedByteCount % sizeof(uint) != 0)
+    {
+        Console.Error.WriteLine(
+            $"Invalid byte count {requestedByteCount}; expected a positive, " +
+            $"4-byte-aligned value no larger than {input.Length}.");
+        Environment.ExitCode = 2;
+        return;
+    }
+
+    var words = new uint[requestedByteCount / sizeof(uint)];
+    for (var index = 0; index < words.Length; index++)
+    {
+        words[index] = BinaryPrimitives.ReadUInt32LittleEndian(
+            input.AsSpan(index * sizeof(uint), sizeof(uint)));
+    }
+
+    var memory = new FakeMemory();
+    memory.AddRegion(ProgramAddress, words);
+    var ctx = new CpuContext(memory, Generation.Gen5);
+    if (!Gen5ShaderTranslator.TryDecodeProgram(
+            ctx,
+            ProgramAddress,
+            out var program,
+            out var decodeError))
+    {
+        Console.Error.WriteLine($"Decode failed: {decodeError}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    Console.WriteLine(
+        $"path={inputPath} bytes={requestedByteCount} " +
+        $"instructions={program!.Instructions.Count}");
+    foreach (var instruction in program.Instructions)
+    {
+        Console.WriteLine(
+            $"pc=0x{instruction.Pc:X} enc={instruction.Encoding} " +
+            $"op={instruction.Opcode} " +
+            $"words={string.Join(',', instruction.Words.Select(word => $"{word:X8}"))} " +
+            $"src={string.Join('/', instruction.Sources)} " +
+            $"dst={string.Join('/', instruction.Destinations)} " +
+            $"control={instruction.Control?.ToString() ?? "-"}");
+    }
+
+    return;
+}
 
 (string Name, bool ExpectTranslate, uint[] Words)[] testPrograms =
 [
