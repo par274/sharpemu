@@ -14,7 +14,7 @@ public sealed class GuestMemoryAllocatorTests
     public void FreedRangesAreReusedAndCoalesced()
     {
         using var memory = new PhysicalVirtualMemory(new FakeHostMemory());
-        const ulong usableArenaSize = 0x0100_0000 - 0x1000;
+        const ulong usableArenaSize = 0x2000_0000 - 0x1000;
 
         Assert.True(memory.TryAllocateGuestMemory(0x4000, 0x1000, out var first));
         Assert.True(memory.TryAllocateGuestMemory(0x8000, 0x1000, out var second));
@@ -32,6 +32,16 @@ public sealed class GuestMemoryAllocatorTests
 
         Assert.True(memory.TryAllocateGuestMemory(usableArenaSize, 0x1000, out var coalesced));
         Assert.Equal(first, coalesced);
+    }
+
+    [Fact]
+    public void ArenaSupportsAllocationsBeyondLegacySixteenMiBLimit()
+    {
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory());
+
+        Assert.True(memory.TryAllocateGuestMemory(0x0100_0000, 0x1000, out var first));
+        Assert.True(memory.TryAllocateGuestMemory(0x0020_0000, 0x1000, out var beyondLegacyLimit));
+        Assert.Equal(first + 0x0100_0000, beyondLegacyLimit);
     }
 
     [Fact]

@@ -29,7 +29,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private const ulong PageSize = 0x1000;
     private const ulong HostAllocationGranularity = 0x10000;
     private const ulong GuestAllocationArenaAddress = 0x00006000_0000_0000;
-    private const ulong GuestAllocationArenaSize = 0x0100_0000;
+    // Full C++ runtimes can route large numbers of HLE-backed heap allocations
+    // through this arena. The original 16 MiB capacity could be exhausted
+    // during asset setup, turning a valid allocation request into a null
+    // pointer that failed later in unrelated guest code. Keep enough capacity
+    // for those workloads. Adapted from foufouadi's allocator-exhaustion
+    // investigation.
+    private const ulong GuestAllocationArenaSize = 0x2000_0000;
     private const ulong GuestAllocationArenaStartOffset = PageSize;
     private const ulong LargeDataReserveThreshold = 0x4000_0000UL; // 1 GiB
     private const ulong FullCommitRegionLimit = 4UL << 30;
