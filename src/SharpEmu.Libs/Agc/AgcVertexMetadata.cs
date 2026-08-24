@@ -238,10 +238,12 @@ internal static class AgcVertexMetadata
     }
 
     /// <summary>
-    /// Patch IR-discovered fetches from the attrib table onto the V# format/offset.
+    /// Patch IR-discovered fetches from the attrib table onto the V# layout.
     /// Prefer 1:1 Location pairing when counts match on one interleaved stream
-    /// (GTA UI glyphs). Otherwise match by stride + byte offset. Never rebases
-    /// BaseAddress/Data/Location/Pc/PerInstance.
+    /// (GTA UI glyphs). Otherwise match by the effective captured byte offset.
+    /// Never rebases BaseAddress/Data/Location/Pc or overwrites a discovered
+    /// offset: metadata may refine the format, stride and instance rate only
+    /// after both address keys independently resolve to the same attribute.
     /// </summary>
     internal static IReadOnlyList<Gen5VertexInputBinding> MergeVertexInputsFromMetadata(
         CpuContext ctx,
@@ -269,13 +271,13 @@ internal static class AgcVertexMetadata
         var changed = false;
         foreach (var input in discovered)
         {
-            if (!TryMatchMetadataResource(input, resources, usedResources, out var resource, out var fillOffset))
+            if (!TryMatchMetadataResource(input, resources, usedResources, out var resource))
             {
                 merged.Add(input);
                 continue;
             }
 
-            var refined = ApplyMetadataFormat(input, resource, fillOffset);
+            var refined = ApplyMetadataFormat(input, resource);
             changed |= refined != input;
             merged.Add(refined);
         }
@@ -286,7 +288,7 @@ internal static class AgcVertexMetadata
     /// <summary>
     /// When discovery and metadata describe the same interleaved stream with
     /// equal attribute counts, pair by sorted Location (semantic order).
-    /// Keeps each binding's Pc/Location for SPIR-V; overlays format + offset.
+    /// Keeps each binding's Pc/Location/address for SPIR-V and overlays layout.
     /// </summary>
     private static bool TryMergeByLocationPairing(
         IReadOnlyList<Gen5VertexInputBinding> discovered,
@@ -299,45 +301,41 @@ internal static class AgcVertexMetadata
             return false;
         }
 
-        var orderedInputs = discovered.OrderBy(static input => input.Location).ToArray();
+        var orderedInputs = discovered
+            .Select(static (input, originalIndex) => (Input: input, OriginalIndex: originalIndex))
+            .OrderBy(static entry => entry.Input.Location)
+            .ThenBy(static entry => entry.OriginalIndex)
+            .ToArray();
         var orderedResources = resources.OrderBy(static resource => resource.Location).ToArray();
         var streamBase = orderedResources[0].SharpBase;
         var streamStride = orderedResources[0].Stride;
         for (var index = 0; index < orderedResources.Length; index++)
         {
             var resource = orderedResources[index];
-            var input = orderedInputs[index];
+            var input = orderedInputs[index].Input;
             if (resource.SharpBase != streamBase ||
                 resource.Stride != streamStride ||
-                (input.Stride != 0 && input.Stride != streamStride) ||
-                !IsSameVertexStream(input, resource))
+                !TryGetMetadataOffset(input, resource, out var resolvedOffset) ||
+                resolvedOffset != input.OffsetBytes)
             {
                 return false;
             }
         }
 
-        var byPc = new Dictionary<uint, Gen5VertexInputBinding>(discovered.Count);
+        var result = discovered.ToArray();
         var changed = false;
         for (var index = 0; index < orderedInputs.Length; index++)
         {
-            var input = orderedInputs[index];
+            var input = orderedInputs[index].Input;
             var resource = orderedResources[index];
-            var fillOffset = input.BaseAddress == resource.SharpBase ||
-                             IsAddressInsideCapturedSpan(input, resource.SharpBase);
-            var refined = ApplyMetadataFormat(input, resource, fillOffset);
+            var refined = ApplyMetadataFormat(input, resource);
             changed |= refined != input;
-            byPc[input.Pc] = refined;
+            result[orderedInputs[index].OriginalIndex] = refined;
         }
 
         if (!changed)
         {
             return false;
-        }
-
-        var result = new Gen5VertexInputBinding[discovered.Count];
-        for (var index = 0; index < discovered.Count; index++)
-        {
-            result[index] = byPc[discovered[index].Pc];
         }
 
         merged = result;
@@ -346,8 +344,7 @@ internal static class AgcVertexMetadata
 
     private static Gen5VertexInputBinding ApplyMetadataFormat(
         Gen5VertexInputBinding input,
-        MetadataVertexResource resource,
-        bool fillOffsetBytes)
+        MetadataVertexResource resource)
     {
         var components = input.ComponentCount != 0 &&
                          input.ComponentCount < resource.ComponentCount
@@ -359,7 +356,8 @@ internal static class AgcVertexMetadata
             DataFormat = resource.DataFormat,
             NumberFormat = resource.NumberFormat,
             ComponentCount = components,
-            OffsetBytes = fillOffsetBytes ? resource.OffsetBytes : input.OffsetBytes,
+            Stride = resource.Stride,
+            PerInstance = resource.PerInstance,
         };
     }
 
@@ -434,14 +432,11 @@ internal static class AgcVertexMetadata
         Gen5VertexInputBinding input,
         IReadOnlyList<MetadataVertexResource> resources,
         bool[] usedResources,
-        out MetadataVertexResource resource,
-        out bool fillOffsetBytes)
+        out MetadataVertexResource resource)
     {
         resource = default;
-        fillOffsetBytes = false;
         var bestScore = int.MinValue;
         var bestIndex = -1;
-        var bestFillOffset = false;
         for (var index = 0; index < resources.Count; index++)
         {
             if (usedResources[index])
@@ -450,100 +445,64 @@ internal static class AgcVertexMetadata
             }
 
             var candidate = resources[index];
-            if (candidate.Stride != 0 &&
-                input.Stride != 0 &&
-                candidate.Stride != input.Stride)
+            if (!TryGetMetadataOffset(input, candidate, out var resolvedOffset) ||
+                resolvedOffset != input.OffsetBytes)
             {
                 continue;
             }
 
-            if (!IsSameVertexStream(input, candidate))
-            {
-                continue;
-            }
+            // The effective captured offset (including any base rebasing done
+            // while coalescing adjacent vertex streams) is the primary key.
+            var score = 400;
 
-            var attrAddress = candidate.SharpBase + candidate.OffsetBytes;
-            var score = int.MinValue;
-            var fillOffset = false;
-
-            // Post-capture interleaved: shared BaseAddress, distinct OffsetBytes.
-            if (input.OffsetBytes == candidate.OffsetBytes &&
-                (input.BaseAddress == candidate.SharpBase ||
-                 IsAddressInsideCapturedSpan(input, candidate.SharpBase)))
+            // Discovery can carry a stale inferred stride (notably 32 for a
+            // real stride-40 interleaved layout). Prefer a matching stride
+            // when candidates are otherwise equivalent, but do not reject an
+            // unambiguous metadata match: the V# descriptor is authoritative.
+            if (input.Stride == candidate.Stride)
             {
-                score = 400;
-            }
-            // IR prolog baked attrib offset into the V# base.
-            else if (input.BaseAddress == attrAddress)
-            {
-                score = 350;
-            }
-            // Discovery never saw the attrib offset — only safe when this
-            // resource's offset uniquely identifies it among unused entries.
-            else if (input.BaseAddress == candidate.SharpBase &&
-                     input.OffsetBytes == 0 &&
-                     candidate.OffsetBytes != 0 &&
-                     IsUniqueUnusedOffset(resources, usedResources, candidate.OffsetBytes, index))
-            {
-                score = 300;
-                fillOffset = true;
-            }
-            else if (input.BaseAddress == candidate.SharpBase &&
-                     input.OffsetBytes == 0 &&
-                     candidate.OffsetBytes == 0)
-            {
-                score = 250;
+                score += 25;
             }
 
             if (score > bestScore)
             {
                 bestScore = score;
                 bestIndex = index;
-                bestFillOffset = fillOffset;
             }
         }
 
-        // Require an offset-aware match. Bare SharpBase ties (score 250) are
-        // only accepted when a single unused resource remains for that stream.
-        if (bestIndex < 0 || bestScore < 300)
+        if (bestIndex < 0)
         {
-            if (bestIndex < 0 || bestScore < 250)
-            {
-                return false;
-            }
-
-            var unusedSameStream = 0;
-            for (var index = 0; index < resources.Count; index++)
-            {
-                if (!usedResources[index] && IsSameVertexStream(input, resources[index]))
-                {
-                    unusedSameStream++;
-                }
-            }
-
-            if (unusedSameStream != 1)
-            {
-                return false;
-            }
+            return false;
         }
 
         usedResources[bestIndex] = true;
         resource = resources[bestIndex];
-        fillOffsetBytes = bestFillOffset;
         return true;
     }
 
-    private static bool IsSameVertexStream(
+    private static bool TryGetMetadataOffset(
         Gen5VertexInputBinding input,
-        MetadataVertexResource resource)
+        MetadataVertexResource resource,
+        out uint offsetBytes)
     {
-        if (input.BaseAddress == resource.SharpBase ||
-            input.BaseAddress == resource.SharpBase + resource.OffsetBytes)
+        offsetBytes = input.OffsetBytes;
+        if (resource.SharpBase < input.BaseAddress ||
+            (!IsAddressInsideCapturedSpan(input, resource.SharpBase) &&
+             resource.SharpBase != input.BaseAddress))
         {
-            return true;
+            return false;
         }
 
-        return IsAddressInsideCapturedSpan(input, resource.SharpBase);
+        var relativeBase = resource.SharpBase - input.BaseAddress;
+        var resolvedOffset = relativeBase + resource.OffsetBytes;
+        if (resolvedOffset > uint.MaxValue)
+        {
+            return false;
+        }
+
+        offsetBytes = (uint)resolvedOffset;
+        return true;
     }
 
     private static bool IsAddressInsideCapturedSpan(
@@ -552,28 +511,6 @@ internal static class AgcVertexMetadata
         input.DataLength > 0 &&
         address >= input.BaseAddress &&
         address < input.BaseAddress + (ulong)input.DataLength;
-
-    private static bool IsUniqueUnusedOffset(
-        IReadOnlyList<MetadataVertexResource> resources,
-        bool[] usedResources,
-        uint offsetBytes,
-        int candidateIndex)
-    {
-        for (var index = 0; index < resources.Count; index++)
-        {
-            if (index == candidateIndex || usedResources[index])
-            {
-                continue;
-            }
-
-            if (resources[index].OffsetBytes == offsetBytes)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
 
     /// <summary>
     /// Attrib-table format
