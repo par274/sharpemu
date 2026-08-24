@@ -1638,16 +1638,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		if (_moduleManager.TryGetExport(nid, out ExportedFunction export))
 		{
-			if (IsKernelLibrary(export.LibraryName))
+			var preferLleForLibc = IsLibcLibrary(export.LibraryName) && PreferLleForLibcExport(export.Name);
+			if (!ShouldResolveRegisteredExportViaLle(export, preferLleForLibc))
 			{
-				if (_logAllImports)
+				if (_logAllImports && IsKernelLibrary(export.LibraryName))
 				{
 					Console.Error.WriteLine($"[LOADER][DEBUG] TryResolveDirectImportTarget: {nid} ({export.LibraryName}:{export.Name}) -> HLE (kernel library)");
 				}
-				return false;
-			}
-			if (!IsLibcLibrary(export.LibraryName) || !PreferLleForLibcExport(export.Name))
-			{
 				return false;
 			}
 			if (TryResolveRuntimeSymbolAddress(nid, out var value2) && IsDirectImportTargetUsable(value2))
@@ -1701,6 +1698,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 		}
 		return false;
+	}
+
+	internal static bool ShouldResolveRegisteredExportViaLle(
+		ExportedFunction export,
+		bool preferLleForLibc)
+	{
+		ArgumentNullException.ThrowIfNull(export);
+		return !IsKernelLibrary(export.LibraryName) && (export.PreferLle || preferLleForLibc);
 	}
 
 	private static bool IsHlePreferredNid(string nid)
