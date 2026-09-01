@@ -5292,11 +5292,22 @@ public static partial class AgcExports
                     VideoOutExports.TryGetDisplayBufferInfo(
                         handle,
                         displayBufferIndex,
-                        out var pendingDisplayBuffer) &&
-                    state.KnownRenderTargets.TryGetValue(
-                        pendingDisplayBuffer.Address,
-                        out var pendingDisplayTarget))
+                        out var pendingDisplayBuffer))
                 {
+                    if (!state.KnownRenderTargets.TryGetValue(
+                            pendingDisplayBuffer.Address,
+                            out var pendingDisplayTarget))
+                    {
+                        pendingDisplayTarget = new RenderTargetDescriptor(
+                            0,
+                            pendingDisplayBuffer.Address,
+                            pendingDisplayBuffer.Width,
+                            pendingDisplayBuffer.Height,
+                            9,
+                            0,
+                            0);
+                    }
+
                     var textures = CreateGuestDrawTextures(
                         ctx,
                         pendingComposite.Textures,
@@ -8112,15 +8123,6 @@ public static partial class AgcExports
 var renderTargets = GetRenderTargets(state.CxRegisters);
         TrackCmaskAddresses(state.CxRegisters, renderTargets);
         var drawSequence = ++gpuState.WorkSequence;
-        if (state.PendingTargetlessDraw is { } stalePendingDraw)
-        {
-            ReturnPooledDrawArrays(
-                stalePendingDraw,
-                globals: true,
-                vertex: true,
-                index: true);
-            state.PendingTargetlessDraw = null;
-        }
         state.TranslatedDraw = null;
         state.GuestDrawKind = GuestDrawKind.None;
 
@@ -8352,12 +8354,15 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             // modelling DCC block state.
             if (translatedDraw.IsDccFastClear)
             {
-                foreach (var target in translatedDraw.GuestTargets)
+                // Still create host GPU images (zero clear). RequestGuestColorClear
+                // alone never publishes _availableGuestImages, so later composites
+                // sample empty CPU tiles (Astro title gray/black).
+                if (translatedDraw.GuestTargets.Count > 0)
                 {
-                    if (target.Address != 0)
-                    {
-                        VulkanVideoPresenter.RequestGuestColorClear(target.Address);
-                    }
+                    VulkanVideoPresenter.SubmitOffscreenColorClear(
+                        translatedDraw.GuestTargets,
+                        0f, 0f, 0f, 0f,
+                        translatedDraw.PixelShaderAddress);
                 }
 
                 ReturnPooledDrawArrays(
@@ -9037,7 +9042,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         // draw a multi-render-target G-buffer (up to eight slots) in one pass.
         // Fall back to slot 0 if we cannot match any export to a bound target.
         var pixelColorExportMasks = pixelState.Program.PixelColorExportMasks;
-        var allBoundTargets = GetRenderTargets(state.CxRegisters);
+        var allBoundTargets = GetRenderTargets(state.CxRegisters, includeMaskedTargets: true);
         // At most 8 slots; a manual filter avoids the per-draw LINQ iterator/
         // closure allocations. Slots are distinct, so sorting by slot is stable.
         var selectedTargets = new List<RenderTargetDescriptor>(allBoundTargets.Count);
@@ -9051,13 +9056,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
 
         if (selectedTargets.Count == 0)
         {
-            foreach (var target in allBoundTargets)
-            {
-                if (target.Slot == 0)
-                {
-                    selectedTargets.Add(target);
-                }
-            }
+            selectedTargets.AddRange(allBoundTargets);
         }
 
         selectedTargets.Sort(static (left, right) => left.Slot.CompareTo(right.Slot));
@@ -11628,9 +11627,14 @@ private static long _indirectDrawProbeCount;
         // With the write tracker off (Windows default), IsGuestImageUploadKnown
         // uses a cheap guest-memory probe so static UI can still skip (Dead
         // Cells menus) while changing CPU content (GTA Bink) forces a copy.
-        if (!isStorage &&
+        if (!_textureCopySkipDisabled &&
+            !isStorage &&
             !wantsArrayUpload &&
             descriptor.Address != 0 &&
+            GuestGpu.Current.IsGpuGuestImageAvailable(
+                descriptor.Address,
+                descriptor.Format,
+                descriptor.NumberType) &&
             GuestGpu.Current.IsGuestImageUploadKnown(
                 descriptor.Address,
                 descriptor.Format,
