@@ -720,6 +720,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly Dictionary<ulong, ExternalGuestThreadState> _externalGuestThreads = new Dictionary<ulong, ExternalGuestThreadState>();
 
+	private int _mainHostThreadId;
+
 	[ThreadStatic]
 	private static ulong _currentExternalGuestThreadHandle;
 
@@ -880,7 +882,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		ulong Rax,
 		ulong Rbx,
 		ulong Rcx,
-		ulong Rdx);
+		ulong Rdx,
+		ulong Rsi = 0,
+		ulong Rdi = 0,
+		ulong R8 = 0,
+		ulong R9 = 0,
+		ulong R10 = 0,
+		ulong R11 = 0,
+		ulong R12 = 0,
+		ulong R13 = 0,
+		ulong R14 = 0,
+		ulong R15 = 0);
 
 	public string BackendName => "native-backend";
 
@@ -2935,7 +2947,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
 		int hostPauseJump = offset;
 		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4C);
+		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4D); // REX.W | REX.R | REX.B (r10, [r9])
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0xB1); EmitByte(code, ref offset, 0x11); // lock cmpxchg [r9], r10
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
 		int hostRetryJump = offset;
@@ -3018,8 +3030,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
 		int guestPauseJump = offset;
 		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4C);
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0xB1); EmitByte(code, ref offset, 0x11);
+		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4D); // REX.W | REX.R | REX.B (r10, [r9])
+		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0xB1); EmitByte(code, ref offset, 0x11); // lock cmpxchg [r9], r10
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
 		int guestRetryJump = offset;
 		EmitUInt32(code, ref offset, 0u);
@@ -6259,6 +6271,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
 		try
 		{
+			_mainHostThreadId = unchecked((int)GetCurrentThreadId());
 			_activeExecutionBackend = this;
 			_activeCpuContext = context;
 			_activeEntryReturnSentinelRip = 0;
@@ -6456,6 +6469,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
+			_mainHostThreadId = 0;
 			StopReadyThreadDispatcher();
 			StopStallWatchdog();
 			ActiveEntryReturnSentinelRip = 0uL;
@@ -6871,6 +6885,61 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				Console.Error.WriteLine($"[LOADER][ERROR] Stall stack: [rsp]=0x{value:X16} [rsp+8]=0x{value2:X16}");
 			}
 
+			var mainHostThreadId = Volatile.Read(ref _mainHostThreadId);
+			if (mainHostThreadId != 0 && TryCaptureHostThreadContext(mainHostThreadId, out var mainCtx))
+			{
+				Console.Error.WriteLine($"[LOADER][ERROR] Live hardware context (main thread {mainHostThreadId}):");
+				Console.Error.WriteLine($"[LOADER][ERROR]   RIP=0x{mainCtx.Rip:X16} RSP=0x{mainCtx.Rsp:X16} RBP=0x{mainCtx.Rbp:X16}");
+				Console.Error.WriteLine($"[LOADER][ERROR]   RAX=0x{mainCtx.Rax:X16} RBX=0x{mainCtx.Rbx:X16} RCX=0x{mainCtx.Rcx:X16} RDX=0x{mainCtx.Rdx:X16}");
+				Console.Error.WriteLine($"[LOADER][ERROR]   RSI=0x{mainCtx.Rsi:X16} RDI=0x{mainCtx.Rdi:X16} R8=0x{mainCtx.R8:X16} R9=0x{mainCtx.R9:X16}");
+				Console.Error.WriteLine($"[LOADER][ERROR]   R10=0x{mainCtx.R10:X16} R11=0x{mainCtx.R11:X16} R12=0x{mainCtx.R12:X16} R13=0x{mainCtx.R13:X16} R14=0x{mainCtx.R14:X16} R15=0x{mainCtx.R15:X16}");
+
+				string ripModule = ResolveHostAddress(mainCtx.Rip);
+				Console.Error.WriteLine($"[LOADER][ERROR]   RIP location: {ripModule}");
+
+				if (VirtualQuery((void*)(mainCtx.Rip - 32), out var mbiPre, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0 &&
+					mbiPre.State == 0x1000 && (mbiPre.Protect & 0xEE) != 0)
+				{
+					Span<byte> preBytes = stackalloc byte[48];
+					fixed (byte* dst = preBytes)
+					{
+						Buffer.MemoryCopy((void*)(mainCtx.Rip - 32), dst, 48, 48);
+					}
+					Console.Error.WriteLine($"[LOADER][ERROR]   Live bytes @[RIP-32..RIP+16]: {BitConverter.ToString(preBytes.ToArray()).Replace("-", " ")}");
+				}
+
+				Span<byte> liveBytes = stackalloc byte[16];
+				if (VirtualQuery((void*)mainCtx.Rip, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0 &&
+					mbi.State == 0x1000 && (mbi.Protect & 0xEE) != 0)
+				{
+					fixed (byte* dst = liveBytes)
+					{
+						Buffer.MemoryCopy((void*)mainCtx.Rip, dst, 16, 16);
+					}
+					Console.Error.WriteLine($"[LOADER][ERROR]   Live bytes @RIP: {BitConverter.ToString(liveBytes.ToArray()).Replace("-", " ")}");
+				}
+
+				if (VirtualQuery((void*)mainCtx.Rsp, out var sMbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0 &&
+					sMbi.State == 0x1000 && (sMbi.Protect & 0xEE) != 0)
+				{
+					Console.Error.WriteLine("[LOADER][ERROR]   Live stack frames (host code pointers):");
+					for (int offset = 0; offset < 256; offset += 8)
+					{
+						var val = *(ulong*)(mainCtx.Rsp + (ulong)offset);
+						if (val != 0)
+						{
+							var resolved = ResolveHostAddress(val);
+							if (!resolved.StartsWith("0x", StringComparison.Ordinal) ||
+								(VirtualQuery((void*)val, out var ptrMbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) != 0 &&
+								 ptrMbi.State == 0x1000 && (ptrMbi.Protect & 0xEE) != 0))
+							{
+								Console.Error.WriteLine($"[LOADER][ERROR]     [rsp+0x{offset:X2}] = 0x{val:X16} ({resolved})");
+							}
+						}
+					}
+				}
+			}
+
 			var threads = SnapshotGuestThreads();
 			if (threads.Length != 0)
 			{
@@ -6950,7 +7019,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				ReadCtxU64(contextRecord, 120),
 				ReadCtxU64(contextRecord, 144),
 				ReadCtxU64(contextRecord, 128),
-				ReadCtxU64(contextRecord, 136));
+				ReadCtxU64(contextRecord, 136),
+				ReadCtxU64(contextRecord, 168),
+				ReadCtxU64(contextRecord, 176),
+				ReadCtxU64(contextRecord, 184),
+				ReadCtxU64(contextRecord, 192),
+				ReadCtxU64(contextRecord, 200),
+				ReadCtxU64(contextRecord, 208),
+				ReadCtxU64(contextRecord, 216),
+				ReadCtxU64(contextRecord, 224),
+				ReadCtxU64(contextRecord, 232),
+				ReadCtxU64(contextRecord, 240));
 			return true;
 		}
 		finally
@@ -6965,6 +7044,23 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			_ = CloseHandle(threadHandle);
 		}
+	}
+
+	private static string ResolveHostAddress(ulong addr)
+	{
+		try
+		{
+			foreach (ProcessModule mod in Process.GetCurrentProcess().Modules)
+			{
+				var b = (ulong)mod.BaseAddress;
+				if (addr >= b && addr < b + (ulong)mod.ModuleMemorySize)
+				{
+					return $"{mod.ModuleName}+0x{addr - b:X}";
+				}
+			}
+		}
+		catch { }
+		return $"0x{addr:X16}";
 	}
 
 
