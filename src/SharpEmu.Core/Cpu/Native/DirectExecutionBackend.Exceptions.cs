@@ -148,6 +148,11 @@ public sealed partial class DirectExecutionBackend
 			{
 				return -1;
 			}
+			if (exceptionCode == 3221225477u &&
+				TryRecoverInflateFastEpilogue(exceptionRecord, contextRecord, rip, rsp))
+			{
+				return -1;
+			}
 			if (exceptionCode == StatusIllegalInstruction &&
 				TryRecoverIllegalInstruction(contextRecord, rip))
 			{
@@ -317,9 +322,11 @@ public sealed partial class DirectExecutionBackend
 
 			DumpPointerWindow("fault-register-rbx", rbx, 0x60);
 			DumpPointerWindow("fault-register-rsi", rsi, 0x60);
+			DumpPointerWindow("fault-register-rcx", rcx, 0x80);
 			DumpPointerWindow("fault-register-rdi", rdi, 0x60);
 			DumpPointerWindow("fault-register-r13", r13, 0x60);
 			DumpPointerWindow("fault-register-r14", r14, 0x60);
+
 
 			try
 			{
@@ -665,6 +672,179 @@ public sealed partial class DirectExecutionBackend
 				$"rip=0x{rip:X16} -> 0x{rip + emptyPoolFallbackDelta:X16}");
 			Console.Error.Flush();
 		}
+
+		return true;
+	}
+
+	private unsafe bool TryRecoverInflateFastEpilogue(EXCEPTION_RECORD* exceptionRecord, void* contextRecord, ulong rip, ulong rsp)
+	{
+		// Only apply this compat recovery for Ghostrunner (PPSA03685)
+		var currentTitleId = CurrentTitleId ?? SharpEmu.Libs.VideoOut.VideoOutExports.GetApplicationTitleId();
+		if (!string.Equals(currentTitleId, "PPSA03685", StringComparison.OrdinalIgnoreCase))
+		{
+			return false;
+		}
+
+		const ulong epilogueStoreRip = 0x0000000804A2C23EuL;
+		const ulong epilogueStateStoreRip = 0x0000000804A2C25AuL;
+
+		if (rip != epilogueStoreRip && rip != epilogueStateStoreRip)
+		{
+			return false;
+		}
+
+		// Check if this is the state fault at 0x804A2C25A (mov [rcx + 0x48], rax)
+		if (rip == epilogueStateStoreRip)
+		{
+			ulong rcxFault = ReadCtxU64(contextRecord, CTX_RCX);
+			if (rcxFault >= 0x10000UL && exceptionRecord->ExceptionInformation[1] != 0x48)
+			{
+				return false;
+			}
+
+			Console.Error.WriteLine("[LOADER][INFO] >>> INFLATE_FAST EPILOGUE STATE RECOVERY TRIGGERED AT 0x804A2C25A <<<");
+
+			// Recover strm from rdi or caller frame
+			ulong strm = ReadCtxU64(contextRecord, CTX_RDI);
+			if (strm < 0x10000UL)
+			{
+				if (TryReadQword(rsp + 0x108, out ulong candidate) && candidate >= 0x10000)
+				{
+					strm = candidate;
+				}
+				else if (TryReadQword(rsp + 0x80, out ulong savedRbp))
+				{
+					if (TryReadQword((ulong)((long)savedRbp - 0x58), out ulong candidate2) && candidate2 >= 0x10000)
+					{
+						strm = candidate2;
+					}
+					else if (TryReadQword(savedRbp + 0x20, out ulong candidate3) && candidate3 >= 0x10000)
+					{
+						strm = candidate3;
+					}
+				}
+			}
+
+			if (strm < 0x10000UL)
+			{
+				Console.Error.WriteLine("[LOADER][ERROR] Could not locate strm for state recovery at 0x804A2C25A!");
+				return false;
+			}
+
+			ulong state = *(ulong*)(strm + 0x38);
+			if (state < 0x10000UL)
+			{
+				state = *(ulong*)(strm + 0x28);
+			}
+
+			if (state < 0x10000UL)
+			{
+				Console.Error.WriteLine($"[LOADER][ERROR] Invalid state pointer from strm (0x{strm:X16}): 0x{state:X16}");
+				return false;
+			}
+
+			ulong raxVal = ReadCtxU64(contextRecord, CTX_RAX);
+			ulong r8Val = ReadCtxU64(contextRecord, CTX_R8);
+
+			*(ulong*)(state + 0x48) = raxVal;
+			*(uint*)(state + 0x50) = (uint)r8Val;
+
+			WriteCtxU64(contextRecord, CTX_RCX, state);
+			WriteCtxU64(contextRecord, CTX_RIP, 0x0000000804A2C262uL);
+
+			Console.Error.WriteLine($"[LOADER][INFO]   Recovered state: 0x{state:X16}");
+			Console.Error.WriteLine($"[LOADER][INFO]   Executed state->hold = 0x{raxVal:X16}, state->bits = {r8Val & 0xFF}");
+			Console.Error.WriteLine("[LOADER][INFO] >>> INFLATE_FAST EPILOGUE STATE RECOVERY COMPLETED - RESUMING <<<");
+			Console.Error.Flush();
+			return true;
+		}
+
+		// Otherwise, fault at 0x804A2C23E
+		ulong rdiVal = ReadCtxU64(contextRecord, CTX_RDI);
+		if (rdiVal != 0)
+		{
+			return false;
+		}
+
+		Console.Error.WriteLine("[LOADER][INFO] >>> INFLATE_FAST EPILOGUE RECOVERY TRIGGERED AT 0x804A2C23E <<<");
+
+		// 1. Recover strm from caller frame:
+		// In inflate_fast frame:
+		// [rsp + 0x80] is caller's saved RBP
+		// [rsp + 0x108] holds strm (0x00007FFFF01FF470)
+		ulong strmVal = 0;
+		if (TryReadQword(rsp + 0x108, out ulong cand) && cand >= 0x10000)
+		{
+			strmVal = cand;
+		}
+		if (strmVal == 0 && TryReadQword(rsp + 0x80, out ulong savedRbpVal))
+		{
+			if (TryReadQword((ulong)((long)savedRbpVal - 0x58), out ulong cand2) && cand2 >= 0x10000)
+			{
+				strmVal = cand2;
+			}
+			else if (TryReadQword(savedRbpVal + 0x20, out ulong cand3) && cand3 >= 0x10000)
+			{
+				strmVal = cand3;
+			}
+		}
+
+		if (strmVal == 0)
+		{
+			Console.Error.WriteLine("[LOADER][ERROR] Could not locate strm in stack frame for inflate_fast recovery!");
+			return false;
+		}
+
+		Console.Error.WriteLine($"[LOADER][INFO]   Recovered strm: 0x{strmVal:X16}");
+
+		// 2. Set rdi = strm in CPU context
+		WriteCtxU64(contextRecord, CTX_RDI, strmVal);
+
+		// 3. If r10 is invalid or underflowed, recover actual input position
+		ulong r10Val = ReadCtxU64(contextRecord, CTX_R10);
+		bool isInvalidInPointer = (r10Val < 0x10000UL) || (r10Val > 0x00007FFFFFFFFFFEUL);
+		if (isInvalidInPointer)
+		{
+			ulong inEnd = 0;
+			if (TryReadQword(rsp, out inEnd) && inEnd >= 0x10000)
+			{
+				ulong raxVal = ReadCtxU64(contextRecord, CTX_RAX);
+				ulong unusedBytes = raxVal & 0xFFFFFFFFUL; // bits >> 3
+				ulong recoveredNextIn = inEnd - unusedBytes + 1;
+				r10Val = recoveredNextIn - 1;
+				WriteCtxU64(contextRecord, CTX_R10, r10Val);
+				WriteCtxU64(contextRecord, CTX_RDX, recoveredNextIn);
+				Console.Error.WriteLine($"[LOADER][INFO]   Recovered r10 (in): 0x{r10Val:X16} (in_end=0x{inEnd:X16}, unused={unusedBytes})");
+			}
+		}
+
+		// 4. Recover rcx (strm->state) if needed so subsequent stores at 0x804A2C25A succeed
+		ulong rcxVal = ReadCtxU64(contextRecord, CTX_RCX);
+		if (rcxVal < 0x10000UL)
+		{
+			ulong state = *(ulong*)(strmVal + 0x38);
+			if (state < 0x10000UL)
+			{
+				state = *(ulong*)(strmVal + 0x28);
+			}
+			if (state >= 0x10000UL)
+			{
+				WriteCtxU64(contextRecord, CTX_RCX, state);
+				Console.Error.WriteLine($"[LOADER][INFO]   Recovered rcx (strm->state): 0x{state:X16}");
+			}
+		}
+
+		// 5. Perform the stores directly to ensure stream consistency
+		ulong rdxVal = ReadCtxU64(contextRecord, CTX_RDX);
+		ulong r9Val  = ReadCtxU64(contextRecord, CTX_R9);
+
+		*(ulong*)strmVal = rdxVal;
+		*(ulong*)(strmVal + 0x18) = r9Val + 1;
+
+		Console.Error.WriteLine($"[LOADER][INFO]   Executed strm->next_in  = 0x{rdxVal:X16}");
+		Console.Error.WriteLine($"[LOADER][INFO]   Executed strm->next_out = 0x{r9Val + 1:X16}");
+		Console.Error.WriteLine("[LOADER][INFO] >>> INFLATE_FAST EPILOGUE RECOVERY COMPLETED - RESUMING <<<");
+		Console.Error.Flush();
 
 		return true;
 	}
@@ -1233,17 +1413,24 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	private static bool TryReadHostQword(ulong address, out ulong value)
+	private unsafe static bool TryReadHostQword(ulong address, out ulong value)
 	{
-		if (!OperatingSystem.IsWindows())
+		value = 0;
+		if (address < 65536) return false;
+		if (OperatingSystem.IsWindows())
 		{
-			// A stray read inside the signal handler would raise a nested
-			// SIGSEGV and kill the process before diagnostics finish, so
-			// probe the region table instead of relying on try/catch.
+			if (VirtualQuery((void*)address, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+				mbi.State != MEM_COMMIT ||
+				!IsReadableProtection(mbi.Protect))
+			{
+				return false;
+			}
+		}
+		else
+		{
 			return TryReadStackU64(address, out value);
 		}
 
-		value = 0;
 		try
 		{
 			value = (ulong)Marshal.ReadInt64((nint)address);
@@ -1262,9 +1449,8 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		if (!OperatingSystem.IsWindows())
+		if (OperatingSystem.IsWindows())
 		{
-			// See TryReadHostQword: probe every touched page before reading.
 			ulong end = address + (ulong)buffer.Length;
 			for (ulong page = address & 0xFFFFFFFFFFFFF000uL; page < end; page += 4096)
 			{

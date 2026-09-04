@@ -722,6 +722,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private int _mainHostThreadId;
 
+	public static string? CurrentTitleId { get; set; }
+
 	[ThreadStatic]
 	private static ulong _currentExternalGuestThreadHandle;
 
@@ -2897,9 +2899,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			EmitByte(code, ref offset, 0xB8); EmitUInt32(code, ref offset, unchecked((uint)-1));
 			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89);
 			EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
-			EmitByte(code, ref offset, 0xC3);
+			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D); // pop r13
+			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C); // pop r12
+			EmitByte(code, ref offset, 0xC3);    // ret
 
 			int tbbFallthroughOffset = offset;
 			*(int*)(code + tbbFallthroughJump) = tbbFallthroughOffset - (tbbFallthroughJump + sizeof(int));
@@ -2927,7 +2929,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int belowStackJump = offset;
 		EmitUInt32(code, ref offset, 0u);
 
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
+		// Allocate Win64 shadow space (0x28) aligned to 16 bytes before calling into managed code or Win32 APIs.
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
+		EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28); // sub rsp, 0x28
 		// Serialize managed VEH entry (recursive spinlock). Concurrent UnmanagedCallersOnly
 		// FailFast was the tLTQ silent mid-TBB pattern (enter without abort breadcrumb).
 		// Lock layout: [0]=owner UniqueThread (nint), [8]=depth (int).
@@ -2989,20 +2993,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x01); EmitUInt32(code, ref offset, 0u); // mov qword [r9], 0
 		int hostStillOffset = offset;
 		*(int*)(code + hostStillJump) = hostStillOffset - (hostStillJump + sizeof(int));
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
+		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
 		EmitByte(code, ref offset, 0xE9);
 		int hostRestoreJump = offset;
 		EmitUInt32(code, ref offset, 0u);
 
 		int guestStackOffset = offset;
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
+		EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28); // sub rsp, 0x28
 		EmitByte(code, ref offset, 0xB9);
 		EmitUInt32(code, ref offset, _hostRspSlotTlsIndex);
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
 		*(nint*)(code + offset) = _tlsGetValueAddress;
 		offset += sizeof(nint);
 		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
+		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xC0); // test rax, rax
 		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
 		int missingTlsJump = offset;
@@ -3081,9 +3086,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x31); EmitByte(code, ref offset, 0xC0); // xor eax, eax
 		int restoreOffset = offset;
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C);
-		EmitByte(code, ref offset, 0xC3);
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5D); // pop r13
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5C); // pop r12
+		EmitByte(code, ref offset, 0xC3);    // ret
 
 		*(int*)(code + aboveStackJump) = guestStackOffset - (aboveStackJump + sizeof(int));
 		*(int*)(code + belowStackJump) = guestStackOffset - (belowStackJump + sizeof(int));
