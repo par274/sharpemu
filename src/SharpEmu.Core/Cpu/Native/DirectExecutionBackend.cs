@@ -3219,23 +3219,46 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				byte* ptr = (byte*)num5;
 				int scanBytes = (int)(num6 - num5);
-				for (int i = 0; i <= scanBytes - MinTlsPatchInstructionBytes; i++)
+				// These patterns must only be recognized at instruction boundaries.
+				// Scanning byte by byte can match inside another instruction -- an
+				// embedded immediate, say -- and the patch then overwrites that
+				// instruction with its call/NOP sequence, corrupting guest code.
+				var reader = new CpuPatcher.UnsafeCodeReader(ptr, scanBytes);
+				var decoder = Decoder.Create(64, reader, DecoderOptions.None);
+				decoder.IP = num5;
+				while (reader.Position < scanBytes)
 				{
-					nint address = (nint)(ptr + i);
-					int remainingBytes = scanBytes - i;
-					if (TryPatchTlsLoadInstruction(address, ptr + i, remainingBytes, i))
+					int instructionOffset = reader.Position;
+					decoder.Decode(out var instruction);
+					if (instruction.Code == Code.INVALID ||
+						instruction.Length <= 0 ||
+						instructionOffset + instruction.Length > scanBytes)
+					{
+						// Data or padding inside an executable range: step over it
+						// rather than abandoning the rest of the region.
+						if (reader.Position <= instructionOffset)
+						{
+							reader.Skip(1);
+						}
+
+						continue;
+					}
+
+					nint address = (nint)(ptr + instructionOffset);
+					int remainingBytes = scanBytes - instructionOffset;
+					if (TryPatchTlsLoadInstruction(address, ptr + instructionOffset, remainingBytes, instructionOffset))
 					{
 						num3++;
 					}
-					else if (remainingBytes >= 12 && TryPatchTlsImmediateStoreInstruction(address, ptr + i))
+					else if (remainingBytes >= 12 && TryPatchTlsImmediateStoreInstruction(address, ptr + instructionOffset))
 					{
 						num9++;
 					}
-					else if (remainingBytes >= 12 && TryPatchSse4aExtrqBlend(address, ptr + i))
+					else if (remainingBytes >= 12 && TryPatchSse4aExtrqBlend(address, ptr + instructionOffset))
 					{
 						sse4aPatchCount++;
 					}
-					else if (TryPatchStackCanaryInstruction(address, ptr + i))
+					else if (TryPatchStackCanaryInstruction(address, ptr + instructionOffset))
 					{
 						num4++;
 					}

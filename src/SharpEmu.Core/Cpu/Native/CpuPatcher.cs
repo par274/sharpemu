@@ -43,5 +43,12 @@ public sealed unsafe class CpuPatcher : IDisposable
                 return -1;
             return *_current++;
         }
+
+        public int Position => (int)(_current - _start);
+
+        public void Skip(int count)
+        {
+            _current += Math.Min(Math.Max(count, 0), _length - Position);
+        }
     }
 }
