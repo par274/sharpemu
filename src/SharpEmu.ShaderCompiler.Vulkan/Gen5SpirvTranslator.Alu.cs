@@ -76,7 +76,14 @@ public static partial class Gen5SpirvTranslator
                             _uintType,
                             activeLanes,
                             0);
-                        var firstActiveLane = Ext(73, _uintType, activeLow);
+                        var hasActive = IsNotZero(activeLow);
+                        var firstLsb = Ext(73, _uintType, activeLow);
+                        var firstActiveLane = _module.AddInstruction(
+                            SpirvOp.Select,
+                            _uintType,
+                            hasActive,
+                            firstLsb,
+                            UInt(0));
                         value = _module.AddInstruction(
                             SpirvOp.GroupNonUniformBroadcast,
                             _uintType,
